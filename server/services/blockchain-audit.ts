@@ -63,31 +63,44 @@ interface BlockchainProvider {
   getTransactionUrl(txHash: string): string;
 }
 
-// Mock blockchain provider for development/testing
-class MockBlockchainProvider implements BlockchainProvider {
-  name = 'Mock Blockchain';
-  network = 'mock';
+/**
+ * Local hash anchor provider — used when no external blockchain is configured.
+ *
+ * This provider stores a deterministic SHA-256 commitment of the Merkle root
+ * in the local database only. It does NOT submit to any public blockchain and
+ * does NOT provide external verifiability. It is suitable for development and
+ * for environments where blockchain anchoring is explicitly disabled.
+ *
+ * The returned "txHash" is a deterministic digest of the input — it is NOT a
+ * real on-chain transaction hash and MUST NOT be presented to users as one.
+ */
+class LocalHashAnchorProvider implements BlockchainProvider {
+  name = 'Local Hash Anchor (no blockchain)';
+  network = 'local';
 
-  async submitAnchor(merkleRoot: string, metadata: string): Promise<{ txHash: string; blockNumber: number }> {
-    // Simulate blockchain submission delay
-    await new Promise(resolve => setTimeout(resolve, 100));
-    
-    const txHash = '0x' + createHash('sha256')
-      .update(`${merkleRoot}-${Date.now()}-${Math.random()}`)
+  async submitAnchor(merkleRoot: string, metadata: string): Promise<{ txHash: string; blockNumber?: number }> {
+    // Produce a deterministic commitment from the Merkle root and wall-clock time
+    // (truncated to the nearest second so re-runs within the same second are idempotent).
+    const timestamp = Math.floor(Date.now() / 1000).toString();
+    const commitment = createHash('sha256')
+      .update(`local-anchor:${merkleRoot}:${timestamp}`)
       .digest('hex');
-    
-    const blockNumber = Math.floor(Date.now() / 1000) - 1700000000 + Math.floor(Math.random() * 1000);
-    
-    return { txHash, blockNumber };
+    console.warn(
+      '[BlockchainAudit] Using local-only hash anchor. ' +
+      'Set BLOCKCHAIN_NETWORK=hedera or BLOCKCHAIN_NETWORK=polygon for real on-chain anchoring.'
+    );
+    return { txHash: `0xlocal_${commitment}` };
   }
 
   async verifyAnchor(txHash: string, expectedMerkleRoot: string): Promise<boolean> {
-    // Mock verification always succeeds for valid-looking hashes
-    return txHash.startsWith('0x') && txHash.length === 66;
+    // Local anchors can only be verified against the local database record;
+    // there is no external source of truth.
+    return txHash.startsWith('0xlocal_') && txHash.length > 8;
   }
 
   getTransactionUrl(txHash: string): string {
-    return `https://mock-explorer.example.com/tx/${txHash}`;
+    // No external explorer exists for local anchors.
+    return '';
   }
 }
 
@@ -147,7 +160,7 @@ export class BlockchainAuditService {
         this.enabled = !!process.env.POLYGON_PRIVATE_KEY;
         break;
       default:
-        this.provider = new MockBlockchainProvider();
+        this.provider = new LocalHashAnchorProvider();
         this.enabled = true;
     }
 

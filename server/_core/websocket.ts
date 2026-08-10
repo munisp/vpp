@@ -49,8 +49,9 @@ export function initializeWebSocket(httpServer: HTTPServer) {
     });
   });
 
-  // Start simulating telemetry updates for demo purposes
-  startTelemetrySimulation();
+  // Broadcast real telemetry from the database to connected clients.
+  // Data is written by the MQTT-Fluvio bridge; this loop only reads persisted rows.
+  startTelemetryBroadcast();
 
   console.log('[WebSocket] Server initialized');
   return io;
@@ -60,8 +61,15 @@ export function getIO(): SocketIOServer | null {
   return io;
 }
 
-// Simulate telemetry updates every 5 seconds for demo
-function startTelemetrySimulation() {
+/**
+ * Broadcast real telemetry from the database to connected WebSocket clients.
+ *
+ * Runs every 5 seconds. For each user that has at least one asset it fetches
+ * the most-recently persisted telemetry row and emits it to that user's room.
+ * No values are generated or fabricated here — all data originates from real
+ * device readings ingested through the MQTT-Fluvio pipeline.
+ */
+function startTelemetryBroadcast() {
   setInterval(async () => {
     if (!io) return;
 
@@ -69,51 +77,27 @@ function startTelemetrySimulation() {
       const db_instance = await db.getDb();
       if (!db_instance) return;
 
-      // Get all users with assets - simplified for demo
-      // In production, you would query users who have active assets
-      const usersWithAssets = await db_instance.select({ id: users.id }).from(users).limit(100);
+      const usersWithAssets = await db_instance
+        .select({ id: users.id })
+        .from(users)
+        .limit(100);
 
       for (const user of usersWithAssets) {
-        // Check if user has assets
         const assets = await db.getUserAssets(user.id);
         if (assets.length === 0) continue;
 
-        // Generate simulated telemetry data matching schema
-        const power = Math.floor(Math.random() * 5000); // 0-5000W
-        const voltage = Math.floor((220 + (Math.random() * 20 - 10)) * 1000); // in millivolts
-        const current = Math.floor(Math.random() * 20 * 1000); // in milliamps
-        const frequency = Math.floor((50 + (Math.random() * 0.5 - 0.25)) * 1000); // in millihertz
-        const stateOfCharge = Math.floor(Math.random() * 10000); // 0-100% * 100
-        const temperature = Math.floor((25 + Math.random() * 15) * 100); // in celsius * 100
-        
-        const simulatedData = {
-          assetId: assets[0].id,
-          timestamp: new Date(),
-          power,
-          energy: Math.floor(Math.random() * 50000), // cumulative Wh
-          voltage,
-          current,
-          frequency,
-          stateOfCharge,
-          temperature,
-          metadata: JSON.stringify({
-            userId: user.id,
-            powerGeneration: power,
-            batteryLevel: stateOfCharge / 100,
-            gridFlow: Math.random() * 2000 - 1000, // -1000 to 1000W (negative = import, positive = export)
-          }),
-        };
+        // Fetch the latest real telemetry row for this user.
+        // If no telemetry has been received yet (device offline / not yet
+        // commissioned), nothing is emitted — the client retains its last state.
+        const latest = await db.getLatestTelemetry(user.id);
+        if (!latest) continue;
 
-        // Save to database
-        await db.insertTelemetry(simulatedData);
-
-        // Emit to user's room
-        io.to(`user:${user.id}`).emit('telemetry:update', simulatedData);
+        io.to(`user:${user.id}`).emit('telemetry:update', latest);
       }
     } catch (error) {
-      console.error('[WebSocket] Error in telemetry simulation:', error);
+      console.error('[WebSocket] Error in telemetry broadcast:', error);
     }
-  }, 5000); // Update every 5 seconds
+  }, 5000);
 }
 
 // Emit telemetry update to specific user

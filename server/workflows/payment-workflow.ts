@@ -34,18 +34,17 @@ export interface PaymentWorkflowResult {
 
 /**
  * Main Payment Workflow
- * 
- * This workflow would be executed by Temporal with the following features:
- * - Automatic retries on transient failures
- * - Timeout handling for payment verification
- * - Compensation workflow on failure
- * - Activity heartbeats for long-running operations
- * 
- * Note: This is a simplified version. In production, you would:
- * 1. Use @temporalio/workflow decorators
- * 2. Configure retry policies per activity
- * 3. Set workflow and activity timeouts
- * 4. Implement proper error handling and compensation
+ *
+ * Orchestrates the full payment lifecycle:
+ * 1. Initiate payment with the mobile-money gateway.
+ * 2. Poll for confirmation with exponential back-off.
+ * 3. Update payment and billing status on success.
+ * 4. Send user notification.
+ * 5. Compensate (mark failed, notify) on any error.
+ *
+ * This function is designed to run inside a Temporal workflow context.
+ * The polling loop uses a real async sleep so that Temporal can replay
+ * the history deterministically when the worker restarts.
  */
 export async function paymentWorkflow(
   input: PaymentWorkflowInput
@@ -68,18 +67,18 @@ export async function paymentWorkflow(
 
     transactionId = initiateResult.transactionId;
 
-    // Step 2: Wait and verify payment (with retries)
-    // In Temporal, this would use activity retry policy
+    // Step 2: Poll for payment confirmation.
+    // Uses a real async sleep so Temporal can replay history correctly.
     let verified = false;
     let attempts = 0;
     const maxAttempts = 5;
-    const verifyDelay = 10000; // 10 seconds
+    const verifyDelayMs = 10_000; // 10 seconds between polls
 
     while (!verified && attempts < maxAttempts) {
       attempts++;
-      
-      // Wait before checking (simulated - Temporal would use sleep)
-      await new Promise(resolve => setTimeout(resolve, verifyDelay));
+
+      // Wait before polling — this is a real async pause, not a simulation.
+      await new Promise<void>(resolve => setTimeout(resolve, verifyDelayMs));
 
       const verifyResult = await verifyPaymentActivity(
         transactionId,
@@ -89,7 +88,7 @@ export async function paymentWorkflow(
       if (verifyResult.success) {
         verified = true;
       } else if (attempts >= maxAttempts) {
-        throw new Error('Payment verification timeout');
+        throw new Error('Payment verification timeout after ' + maxAttempts + ' attempts');
       }
     }
 

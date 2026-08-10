@@ -7,6 +7,8 @@ import { Label } from '@/components/ui/label';
 import { QrCode, Wallet, CheckCircle2, ArrowLeft } from 'lucide-react';
 import { toast } from 'sonner';
 import { useLocation } from 'wouter';
+import { trpc } from '@/lib/trpc';
+import { useAuth } from '@/_core/hooks/useAuth';
 
 export default function QRPayment() {
   const [, setLocation] = useLocation();
@@ -45,12 +47,36 @@ export default function QRPayment() {
     }
   };
 
-  const handleProcessPayment = () => {
-    // TODO: Integrate with payment processing
-    toast.success('Payment processed successfully');
-    setTimeout(() => {
-      setLocation('/payments');
-    }, 1500);
+  const [processing, setProcessing] = useState(false);
+  const initiatePayment = trpc.payments.initiate.useMutation();
+  const { user } = useAuth();
+
+  const handleProcessPayment = async () => {
+    if (!paymentDetails || !paymentDetails.amount) {
+      toast.error('No payment details available');
+      return;
+    }
+    setProcessing(true);
+    try {
+      const amountCents = Math.round(parseFloat(paymentDetails.amount) * 100);
+      const result = await initiatePayment.mutateAsync({
+        paymentType: 'invoice',
+        amount: amountCents,
+        paymentMethod: 'mpesa',
+        phoneNumber: user?.phone || '',
+        accountNumber: paymentDetails.reference || undefined,
+      });
+      if (result.success) {
+        toast.success('Payment initiated successfully. Check your phone to complete the payment.');
+        setTimeout(() => setLocation('/payments'), 2000);
+      } else {
+        toast.error('Failed to initiate payment');
+      }
+    } catch (error) {
+      toast.error('Payment failed. Please try again.');
+    } finally {
+      setProcessing(false);
+    }
   };
 
   const handleReset = () => {

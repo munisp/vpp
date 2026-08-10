@@ -6,6 +6,7 @@
  */
 
 import { Request, Response } from 'express';
+import { randomBytes } from 'crypto';
 import { PaymentGatewayManager } from '../payment-gateways';
 import { getDb } from '../db';
 import { payments, billings, paymentGatewayLogs, tokens, users } from '../../drizzle/schema';
@@ -336,14 +337,31 @@ async function handlePaymentFailure(
 }
 
 /**
- * Generate a unique prepaid token code
+ * Generate a cryptographically secure prepaid token code.
+ * Format: XXXX-XXXX-XXXX-XXXX (16 alphanumeric chars from a 36-char alphabet).
  */
 function generatePrepaidToken(): string {
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-  let token = '';
-  for (let i = 0; i < 16; i++) {
-    if (i > 0 && i % 4 === 0) token += '-';
-    token += chars.charAt(Math.floor(Math.random() * chars.length));
+  // Use rejection sampling to avoid modulo bias
+  const bytes = randomBytes(32);
+  let result = '';
+  for (let i = 0; i < bytes.length && result.replace(/-/g, '').length < 16; i++) {
+    const value = bytes[i];
+    if (value < 216) { // 216 = floor(256 / 36) * 36 — rejection threshold
+      const pos = result.replace(/-/g, '').length;
+      if (pos > 0 && pos % 4 === 0) result += '-';
+      result += chars[value % 36];
+    }
   }
-  return token;
+  // Fallback: if rejection sampling exhausted bytes, pad with secure random chars
+  while (result.replace(/-/g, '').length < 16) {
+    const extra = randomBytes(4);
+    for (const b of extra) {
+      const pos = result.replace(/-/g, '').length;
+      if (pos >= 16) break;
+      if (pos > 0 && pos % 4 === 0) result += '-';
+      result += chars[b % 36];
+    }
+  }
+  return result;
 }

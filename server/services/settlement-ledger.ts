@@ -395,31 +395,34 @@ export class SettlementLedgerService {
   }
 
   /**
-   * Anchor period to blockchain (stub for external integration)
+   * Anchor a settlement period to the configured blockchain provider.
+   *
+   * Delegates to BlockchainAuditService which selects the real provider
+   * (Hedera, Polygon, or local-hash-only) based on BLOCKCHAIN_NETWORK env var.
+   * Returns null if anchoring is disabled or the service is unavailable.
    */
   async anchorToBlockchain(
     periodHash: string,
     periodStart: Date,
     periodEnd: Date
   ): Promise<{ txHash: string; anchoredAt: Date } | null> {
-    // This would integrate with an actual blockchain provider
-    // For now, we create a deterministic "proof" that can be verified
-    
-    const proofData = `${periodHash}|${periodStart.toISOString()}|${periodEnd.toISOString()}`;
-    const proofHash = createHash('sha256').update(proofData).digest('hex');
-    
-    // In production, this would:
-    // 1. Connect to Ethereum/Polygon/etc via ethers.js
-    // 2. Call a smart contract to store the hash
-    // 3. Return the transaction hash
-    
-    console.log(`[SettlementLedger] Blockchain anchoring prepared: ${proofHash.substring(0, 16)}...`);
-    
-    // Return simulated anchor (replace with real blockchain integration)
-    return {
-      txHash: `0x${proofHash}`,
-      anchoredAt: new Date(),
-    };
+    try {
+      const { blockchainAudit } = await import('./blockchain-audit');
+      const proofData = `${periodHash}|${periodStart.toISOString()}|${periodEnd.toISOString()}`;
+      const merkleRoot = createHash('sha256').update(proofData).digest('hex');
+      // submitAnchor(anchorId) expects a DB-persisted anchor; use the provider directly
+      // by calling anchorSettlementPeriod which handles the full DB lifecycle.
+      // We pass a synthetic period ID derived from the hash for traceability.
+      const periodIdHash = parseInt(merkleRoot.substring(0, 8), 16);
+      const anchor = await blockchainAudit.anchorSettlementPeriod(periodIdHash);
+      const result = anchor ? { txHash: anchor.transactionHash ?? '' } : null;
+      if (!result) return null;
+      console.log(`[SettlementLedger] Anchored to blockchain: ${result.txHash.substring(0, 20)}...`);
+      return { txHash: result.txHash, anchoredAt: new Date() };
+    } catch (error) {
+      console.error('[SettlementLedger] Blockchain anchoring failed:', error);
+      return null;
+    }
   }
 
   /**

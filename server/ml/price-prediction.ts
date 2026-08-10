@@ -235,9 +235,6 @@ class PricePredictionService {
       price += this.weights.solarCoefficient * solarIrradiance;
     }
     
-    // Add small random variation for realism
-    price *= (0.98 + Math.random() * 0.04);
-    
     return Math.round(price * 100) / 100;
   }
 
@@ -258,54 +255,52 @@ class PricePredictionService {
     try {
       const predictions: PricePrediction[] = [];
       const now = new Date();
-      const currentPrice = 45; // Base price in cents per kWh
+
+      // Fetch weather forecasts once for the full horizon
+      let weatherForecasts: Awaited<ReturnType<typeof getWeatherForecast>> = [];
+      try {
+        weatherForecasts = await getWeatherForecast(-6.7924, 39.2083, hoursAhead); // Dar es Salaam
+      } catch {
+        // Proceed without weather adjustment if API is unavailable
+      }
+
+      // Determine the current market price from the database; fall back to the
+      // model intercept (average historical price) if no recent row is available.
+      let currentPrice = this.weights.intercept;
+      try {
+        const db = await getDb();
+        if (db) {
+          const [latest] = await db
+            .select()
+            .from(marketPrices)
+            .orderBy(desc(marketPrices.timestamp))
+            .limit(1);
+          if (latest) currentPrice = latest.price;
+        }
+      } catch {
+        // Fall back to model intercept
+      }
 
       for (let i = 1; i <= hoursAhead; i++) {
         const predictionTime = new Date(now.getTime() + i * 3600000);
-        const hour = predictionTime.getHours();
 
-        // Get weather forecast for solar generation impact
-        let weatherAdjustment = 0;
-        try {
-          const forecasts = await getWeatherForecast(-6.7924, 39.2083, hoursAhead); // Dar es Salaam
-          if (forecasts[i - 1]) {
-            const solarIrradiance = forecasts[i - 1].solarIrradiance;
-            // Higher solar = more supply = lower prices
-            weatherAdjustment = -(solarIrradiance - 500) / 5000; // -0.1 to +0.1
-          }
-        } catch (error) {
-          // Use default if weather API fails
+        // Derive solar irradiance from real weather data when available
+        let solarIrradiance: number | undefined;
+        if (weatherForecasts[i - 1]) {
+          solarIrradiance = weatherForecasts[i - 1].solarIrradiance;
         }
 
-        // Mock prediction based on time patterns
-        let priceMultiplier = 1.0 + weatherAdjustment;
-        let confidence = 85;
-
-        // Peak hours (6-9 AM, 6-10 PM)
-        if ((hour >= 6 && hour <= 9) || (hour >= 18 && hour <= 22)) {
-          priceMultiplier = 1.3 + Math.random() * 0.2;
-          confidence = 90;
-        }
-        // Off-peak (midnight-5 AM)
-        else if (hour >= 0 && hour <= 5) {
-          priceMultiplier = 0.7 + Math.random() * 0.1;
-          confidence = 92;
-        }
-        // Mid-day (10 AM - 5 PM)
-        else {
-          priceMultiplier = 1.0 + Math.random() * 0.15;
-          confidence = 88;
-        }
-
-        const predictedPrice = Math.round(currentPrice * priceMultiplier);
+        // Use the trained model to predict price deterministically
+        const predictedPrice = this.predictSinglePrice(predictionTime, undefined, solarIrradiance);
         const priceChange = ((predictedPrice - currentPrice) / currentPrice) * 100;
 
         let trend: 'rising' | 'falling' | 'stable' = 'stable';
         if (priceChange > 5) trend = 'rising';
         else if (priceChange < -5) trend = 'falling';
 
-        // Confidence decreases with time
-        confidence = Math.max(60, confidence - (i * 0.5));
+        // Confidence is based on model accuracy and decays slightly with horizon
+        const baseConfidence = this.modelAccuracy;
+        const confidence = Math.max(50, baseConfidence - i * 0.4);
 
         predictions.push({
           timestamp: predictionTime,
@@ -316,11 +311,11 @@ class PricePredictionService {
         });
       }
 
-      console.log(`[ML] Generated ${predictions.length} price predictions`);
-      
+      console.log(`[ML] Generated ${predictions.length} price predictions (model accuracy: ${this.modelAccuracy.toFixed(1)}%)`);
+
       // Cache predictions
       await redisCache.cacheMLPrediction(0, hoursAhead, predictions);
-      
+
       return predictions;
     } catch (error: any) {
       console.error('[ML] Price prediction error:', error);

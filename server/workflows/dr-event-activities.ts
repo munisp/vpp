@@ -263,15 +263,77 @@ export async function sendDRNotificationsActivity(
 
 /**
  * Monitor DR Participation Activity
+ *
+ * Queries real-time telemetry for all participants enrolled in the event,
+ * computes the aggregate power reduction since event start, and updates
+ * each participant's drResponses row with their current reduction.
  */
 export async function monitorDRParticipationActivity(
   input: MonitorDRParticipationInput
-): Promise<{ success: boolean; error?: string }> {
+): Promise<{ success: boolean; aggregateReductionW?: number; error?: string }> {
   try {
-    // This would monitor real-time telemetry during the event
-    // For now, it's a placeholder
-    console.log(`[MonitorDRParticipationActivity] Monitoring event ${input.eventId}`);
-    return { success: true };
+    const { getDb } = await import('../db');
+    const { drResponses, telemetry, assets } = await import('../../drizzle/schema');
+    const { eq, and, gte, lte, avg } = await import('drizzle-orm');
+
+    const db = await getDb();
+    if (!db) throw new Error('Database not available');
+
+    // Fetch enrolled participants for this event
+    const participants = await db
+      .select({ userId: drResponses.userId })
+      .from(drResponses)
+      .where(eq(drResponses.eventId, input.eventId));
+
+    if (participants.length === 0) {
+      console.log(`[MonitorDRParticipationActivity] No participants for event ${input.eventId}`);
+      return { success: true, aggregateReductionW: 0 };
+    }
+
+    let totalReductionW = 0;
+
+    for (const { userId } of participants) {
+      // Get the user's assets
+      const userAssets = await db
+        .select({ id: assets.id })
+        .from(assets)
+        .where(eq(assets.userId, userId));
+
+      if (userAssets.length === 0) continue;
+
+      // Average power during the event window from real telemetry
+      const assetId = userAssets[0].id;
+      const [telRow] = await db
+        .select({ avgPower: avg(telemetry.power) })
+        .from(telemetry)
+        .where(
+          and(
+            eq(telemetry.assetId, assetId),
+            gte(telemetry.timestamp, input.startTime),
+            lte(telemetry.timestamp, new Date())
+          )
+        );
+
+      const currentAvgPower = telRow?.avgPower ? Number(telRow.avgPower) : null;
+
+      if (currentAvgPower !== null) {
+        // Reduction = baseline (target) minus actual average power
+        const reductionW = Math.max(0, input.targetReduction - currentAvgPower);
+        totalReductionW += reductionW;
+
+        // Update participant's DR response with observed reduction
+        await db
+          .update(drResponses)
+          .set({ actualReduction: Math.round(reductionW), updatedAt: new Date() })
+          .where(and(eq(drResponses.eventId, input.eventId), eq(drResponses.userId, userId)));
+      }
+    }
+
+    console.log(
+      `[MonitorDRParticipationActivity] Event ${input.eventId}: ` +
+      `${participants.length} participants, aggregate reduction ${totalReductionW.toFixed(0)}W`
+    );
+    return { success: true, aggregateReductionW: Math.round(totalReductionW) };
   } catch (error) {
     console.error('[MonitorDRParticipationActivity] Error:', error);
     return {

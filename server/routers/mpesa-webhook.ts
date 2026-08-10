@@ -1,9 +1,11 @@
 import { router, publicProcedure } from "../_core/trpc";
 import { z } from "zod";
+import { randomBytes } from "crypto";
 import { mpesaService } from "../services/mpesa-service";
 import { getDb } from "../db";
-import { payments } from "../../drizzle/schema";
+import { payments, billings, tokens, users } from "../../drizzle/schema";
 import { eq } from "drizzle-orm";
+import { sendPushNotification } from "../_core/sendNotification";
 
 /**
  * M-Pesa Webhook Router
@@ -95,10 +97,47 @@ export const mpesaWebhookRouter = router({
             amount: result.amount,
           });
 
-          // TODO: Trigger post-payment actions
-          // - Generate energy tokens
-          // - Send confirmation notification
-          // - Update billing status
+          // Post-payment actions: update billing, generate token if applicable, notify user
+          try {
+            // Update associated billing record to 'paid'
+            if (payment.billingId) {
+              await db
+                .update(billings)
+                .set({ status: 'paid', paidAt: new Date(), paymentMethod: 'mpesa', transactionId: result.mpesaReceiptNumber ?? undefined })
+                .where(eq(billings.id, payment.billingId));
+            }
+
+            // Generate energy token for token_purchase payments
+            if (payment.paymentType === 'token_purchase') {
+              const metadata = payment.metadata ? JSON.parse(payment.metadata) : {};
+              const energyKwh = metadata.energyKwh || 0;
+              if (energyKwh > 0) {
+                const tokenCode = Array.from(randomBytes(20)).map(b => (b % 10).toString()).join('');
+                await db.insert(tokens).values({
+                  userId: payment.userId,
+                  paymentId: payment.id,
+                  tokenCode,
+                  energyKwh,
+                  amount: payment.amount,
+                  validUntil: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000),
+                  status: 'active',
+                });
+                console.log('[MPesa Webhook] Energy token generated for payment', payment.id);
+              }
+            }
+
+            // Send push notification to user
+            await sendPushNotification({
+              userId: payment.userId,
+              title: 'Payment Successful',
+              body: `Your M-Pesa payment of ${(payment.amount / 100).toFixed(2)} was received. Receipt: ${result.mpesaReceiptNumber}`,
+              data: { paymentId: String(payment.id), type: 'payment_success' },
+            });
+          } catch (postPaymentError) {
+            console.error('[MPesa Webhook] Post-payment action failed:', postPaymentError);
+            // Do not rethrow — payment is already marked completed; post-payment
+            // failures are logged and can be retried via reconciliation.
+          }
         } else {
           await db
             .update(payments)
@@ -119,7 +158,17 @@ export const mpesaWebhookRouter = router({
             resultDesc: result.resultDesc,
           });
 
-          // TODO: Send failure notification
+          // Notify user of payment failure
+          try {
+            await sendPushNotification({
+              userId: payment.userId,
+              title: 'Payment Failed',
+              body: `Your M-Pesa payment could not be completed. Reason: ${result.resultDesc}`,
+              data: { paymentId: String(payment.id), type: 'payment_failed' },
+            });
+          } catch (notifError) {
+            console.error('[MPesa Webhook] Failure notification error:', notifError);
+          }
         }
 
         // Acknowledge receipt to M-Pesa

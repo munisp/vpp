@@ -53,41 +53,25 @@ export default function QRGenerator() {
     setGenerating(true);
 
     try {
-      // In production, call the QR code generation API
-      // const response = await trpc.qr.generate.mutate({
-      //   type: paymentType,
-      //   amount: Math.round(parseFloat(amount) * 100),
-      //   currency,
-      //   merchantName,
-      //   recipientName,
-      //   billType,
-      //   description,
-      // });
-
-      // Simulate QR code generation
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-
-      // Mock QR code URL (in production, this would be the actual QR code image)
-      const mockQrCode = `data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect fill='white' width='100' height='100'/%3E%3Ctext x='50' y='50' text-anchor='middle' font-size='8' fill='black'%3EQR Code%3C/text%3E%3C/svg%3E`;
-      setQrCodeUrl(mockQrCode);
-
-      // Record generation to history
-      const qrData = {
+            // Call the real QR code generation API
+      const response = await trpc.qrcode.generate.mutate({
         type: paymentType,
         amount: Math.round(parseFloat(amount) * 100),
         currency,
-        merchantName,
-        recipientName,
-        billType,
-        description,
-      };
-
+        merchantName: merchantName || undefined,
+        recipientName: recipientName || undefined,
+        billType: billType || undefined,
+        description: description || undefined,
+      });
+      const generatedQrCode: string = response.qrCodeDataUrl ?? response.qrCodeImage ?? '';
+      setQrCodeUrl(generatedQrCode);
+      // Record generation to history
       await recordGeneration.mutateAsync({
         paymentType,
         amount: parseFloat(amount).toString(),
         currency,
-        qrCodeData: JSON.stringify(qrData),
-        qrCodeImage: mockQrCode,
+        qrCodeData: response.qrData ? JSON.stringify(response.qrData) : JSON.stringify({ type: paymentType, amount, currency }),
+        qrCodeImage: generatedQrCode,
         merchantName: merchantName || undefined,
         recipientName: recipientName || undefined,
         billType: billType || undefined,

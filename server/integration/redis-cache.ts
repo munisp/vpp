@@ -345,10 +345,11 @@ export class RedisCache {
         assetCacheSize: assetKeys.length,
         priceCacheSize: priceKeys.length,
         drEventCacheSize: drKeys.length,
-        userCacheHitRate: 85.5, // Mock data - would need tracking
-        assetCacheHitRate: 92.3,
-        priceCacheHitRate: 78.9,
-        drEventCacheHitRate: 88.7,
+        // Per-namespace hit rates require application-level counters;
+        // the overall hit rate from Redis INFO is the authoritative metric.
+        overallHitRate: statsData.keyspace_hits && (statsData.keyspace_hits + statsData.keyspace_misses) > 0
+          ? Math.round((statsData.keyspace_hits / (statsData.keyspace_hits + statsData.keyspace_misses)) * 1000) / 10
+          : 0,
       };
     } catch (error) {
       console.error('[Redis] Error getting stats:', error);
@@ -370,26 +371,33 @@ export class RedisCache {
 
   async getMetrics(): Promise<Record<string, any>> {
     try {
-      // Mock metrics - in production, these would be tracked over time
+      // Read real stats from Redis INFO command
+      const info: string = await this.client.info('stats');
+      const parseField = (key: string): number => {
+        const match = info.match(new RegExp(`${key}:(\\d+)`));
+        return match ? parseInt(match[1], 10) : 0;
+      };
+      const hits = parseField('keyspace_hits');
+      const misses = parseField('keyspace_misses');
+      const total = hits + misses;
+      const hitRate = total > 0 ? Math.round((hits / total) * 1000) / 10 : 0;
       const now = new Date();
-      const responseTimeTrend = [];
-      for (let i = 10; i >= 0; i--) {
-        const time = new Date(now.getTime() - i * 60000);
-        responseTimeTrend.push({
-          timestamp: time.toISOString().slice(11, 16),
-          avgTime: Math.random() * 5 + 2,
-          maxTime: Math.random() * 15 + 5,
-        });
-      }
-
       return {
-        responseTimeTrend,
-        hitRateTrend: [],
+        hits,
+        misses,
+        hitRate,
+        // Trend arrays are populated by the Prometheus/Grafana monitoring stack.
+        // Returning a single current snapshot avoids fabricating historical data.
+        responseTimeTrend: [],
+        hitRateTrend: [{ timestamp: now.toISOString().slice(11, 16), value: hitRate }],
         cacheSizeTrend: [],
       };
     } catch (error) {
       console.error('[Redis] Error getting metrics:', error);
       return {
+        hits: 0,
+        misses: 0,
+        hitRate: 0,
         responseTimeTrend: [],
         hitRateTrend: [],
         cacheSizeTrend: [],
@@ -399,13 +407,21 @@ export class RedisCache {
 
   async getPerformance(): Promise<Record<string, number>> {
     try {
-      // Mock performance data - in production, track actual response times
+      // Measure real round-trip latency to Redis with 5 PING samples
+      const samples: number[] = [];
+      for (let i = 0; i < 5; i++) {
+        const start = Date.now();
+        await this.client.ping();
+        samples.push(Date.now() - start);
+      }
+      samples.sort((a, b) => a - b);
+      const avg = samples.reduce((s, v) => s + v, 0) / samples.length;
       return {
-        avgResponseTime: 3.5,
-        minResponseTime: 0.8,
-        maxResponseTime: 12.3,
-        p95ResponseTime: 8.2,
-        p99ResponseTime: 11.1,
+        avgResponseTime: Math.round(avg * 10) / 10,
+        minResponseTime: samples[0],
+        maxResponseTime: samples[samples.length - 1],
+        p95ResponseTime: samples[Math.ceil(samples.length * 0.95) - 1] ?? samples[samples.length - 1],
+        p99ResponseTime: samples[Math.ceil(samples.length * 0.99) - 1] ?? samples[samples.length - 1],
       };
     } catch (error) {
       console.error('[Redis] Error getting performance:', error);

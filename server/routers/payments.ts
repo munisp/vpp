@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { randomBytes } from 'crypto';
 import { router, protectedProcedure } from '../_core/trpc';
 import { TRPCError } from '@trpc/server';
 import * as db from '../db';
@@ -285,8 +286,11 @@ export const paymentsRouter = router({
           });
         }
 
-        // Generate 20-digit STS token (simplified)
-        const tokenCode = Math.random().toString().slice(2, 22);
+        // Generate a cryptographically secure 20-digit numeric STS token.
+        // Each byte contributes one decimal digit via modulo 10.
+        const tokenCode = Array.from(randomBytes(20))
+          .map(b => (b % 10).toString())
+          .join('');
         
         const token = await db.createToken({
           userId: ctx.user.id,

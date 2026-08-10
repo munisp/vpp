@@ -5,9 +5,16 @@
 
 import { z } from 'zod';
 import { TRPCError } from '@trpc/server';
+import { randomBytes, scrypt } from 'crypto';
+import { promisify } from 'util';
 import { adminProcedure, router } from '../_core/trpc';
 import * as devicesDb from '../devices-db';
+import { getDb } from '../db';
+import { assets } from '../../drizzle/schema';
+import { eq } from 'drizzle-orm';
 import { mqttService } from '../_core/mqtt';
+
+const scryptAsync = promisify(scrypt);
 
 export const devicesRouter = router({
   /**
@@ -167,8 +174,15 @@ export const devicesRouter = router({
       try {
         // Extract userId from asset
         const assetId = device.assetId;
-        // For now, use a placeholder userId - in production, look up from assets table
-        const userId = 1;
+        // Look up the owning user from the assets table
+        const assetRecord = await devicesDb.getAssetById(assetId);
+        const userId = assetRecord?.userId ?? null;
+        if (!userId) {
+          throw new TRPCError({
+            code: 'INTERNAL_SERVER_ERROR',
+            message: 'Could not resolve owner for asset ' + assetId,
+          });
+        }
 
         await mqttService.publishCommand(
           userId,
@@ -238,22 +252,28 @@ export const devicesRouter = router({
 });
 
 /**
- * Generate secure random password
+ * Look up an asset row by its primary key.
  */
-function generateSecurePassword(): string {
-  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*';
-  let password = '';
-  for (let i = 0; i < 32; i++) {
-    password += chars.charAt(Math.floor(Math.random() * chars.length));
-  }
-  return password;
+async function getAssetById(assetId: number): Promise<{ userId: number } | null> {
+  const db = await getDb();
+  if (!db) return null;
+  const [row] = await db.select({ userId: assets.userId }).from(assets).where(eq(assets.id, assetId)).limit(1);
+  return row ?? null;
 }
 
 /**
- * Hash password (simple implementation - use bcrypt in production)
+ * Generate a cryptographically secure random password (32 bytes → 64 hex chars).
  */
-function hashPassword(password: string): string {
-  // In production, use bcrypt or similar
-  // For demo, just return a placeholder
-  return `hashed_${password}`;
+function generateSecurePassword(): string {
+  return randomBytes(32).toString('hex');
+}
+
+/**
+ * Hash a password using scrypt with a random salt.
+ * Returns a "salt:hash" string that can be stored and later verified.
+ */
+async function hashPassword(password: string): Promise<string> {
+  const salt = randomBytes(16).toString('hex');
+  const derivedKey = await scryptAsync(password, salt, 64) as Buffer;
+  return `${salt}:${derivedKey.toString('hex')}`;
 }

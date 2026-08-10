@@ -1,0 +1,203 @@
+# APISIX Gateway Configuration for VPP Consumer Platform
+
+# Upstreams - Backend services
+upstreams:
+  - id: consumer-platform
+    name: VPP Consumer Platform
+    type: roundrobin
+    nodes:
+      "consumer-platform:3000": 1
+    timeout:
+      connect: 6
+      send: 6
+      read: 6
+    retries: 2
+    keepalive_pool:
+      size: 320
+      idle_timeout: 60
+      requests: 1000
+
+  - id: nextgen-platform
+    name: NextGen VPP Platform
+    type: roundrobin
+    nodes:
+      "nextgen-api:8000": 1
+    timeout:
+      connect: 6
+      send: 6
+      read: 6
+
+  - id: kafka-rest
+    name: Kafka REST Proxy
+    type: roundrobin
+    nodes:
+      "kafka-rest:8082": 1
+
+  - id: temporal-web
+    name: Temporal Web UI
+    type: roundrobin
+    nodes:
+      "temporal-web:8088": 1
+
+# Routes - API endpoints
+routes:
+  # Consumer Platform Routes
+  - id: consumer-platform-api
+    name: Consumer Platform API
+    uri: /api/*
+    upstream_id: consumer-platform
+    plugins:
+      cors:
+        allow_origins: "*"
+        allow_methods: "GET,POST,PUT,DELETE,PATCH,OPTIONS"
+        allow_headers: "*"
+        expose_headers: "*"
+        max_age: 3600
+      limit-req:
+        rate: 100
+        burst: 200
+        rejected_code: 429
+      prometheus:
+        prefer_name: true
+
+  - id: consumer-platform-websocket
+    name: Consumer Platform WebSocket
+    uri: /ws/*
+    upstream_id: consumer-platform
+    enable_websocket: true
+    plugins:
+      limit-conn:
+        conn: 1000
+        burst: 100
+        default_conn_delay: 0.1
+
+  # NextGen Platform Routes
+  - id: nextgen-grid-services
+    name: NextGen Grid Services
+    uri: /grid/*
+    upstream_id: nextgen-platform
+    plugins:
+      key-auth: {}
+      limit-req:
+        rate: 50
+        burst: 100
+
+  - id: nextgen-forecasting
+    name: NextGen Forecasting
+    uri: /forecast/*
+    upstream_id: nextgen-platform
+    plugins:
+      key-auth: {}
+      response-rewrite:
+        headers:
+          set:
+            X-Service: "OpenSTEF"
+
+  - id: nextgen-openadr
+    name: NextGen OpenADR
+    uri: /openadr/*
+    upstream_id: nextgen-platform
+    plugins:
+      key-auth: {}
+
+  # Kafka REST Proxy Routes
+  - id: kafka-rest-api
+    name: Kafka REST API
+    uri: /kafka/*
+    upstream_id: kafka-rest
+    plugins:
+      key-auth: {}
+      limit-req:
+        rate: 200
+        burst: 400
+
+  # Temporal Web UI
+  - id: temporal-web-ui
+    name: Temporal Web UI
+    uri: /temporal/*
+    upstream_id: temporal-web
+    plugins:
+      basic-auth: {}
+
+# Global Plugins
+global_rules:
+  - id: global-limit
+    plugins:
+      limit-count:
+        count: 10000
+        time_window: 60
+        rejected_code: 429
+      
+  - id: global-monitoring
+    plugins:
+      prometheus:
+        prefer_name: true
+      
+  - id: global-logging
+    plugins:
+      http-logger:
+        uri: http://logstash:5044/apisix
+        batch_max_size: 100
+        inactive_timeout: 5
+
+# Plugin Metadata
+plugin_metadata:
+  - id: prometheus
+    log_format:
+      host: "$host"
+      client: "$remote_addr"
+      method: "$request_method"
+      uri: "$request_uri"
+      status: "$status"
+      latency: "$request_time"
+
+# Consumer Groups (for authentication)
+consumers:
+  - username: consumer-platform
+    plugins:
+      key-auth:
+        key: "${CONSUMER_PLATFORM_API_KEY}"
+      
+  - username: mobile-app
+    plugins:
+      key-auth:
+        key: "${MOBILE_APP_API_KEY}"
+      
+  - username: admin-dashboard
+    plugins:
+      key-auth:
+        key: "${ADMIN_DASHBOARD_API_KEY}"
+      basic-auth:
+        username: admin
+        password: "${ADMIN_PASSWORD}"
+
+# Service Discovery
+discovery:
+  kubernetes:
+    service:
+      schema: https
+      host: "${KUBERNETES_SERVICE_HOST}"
+      port: "${KUBERNETES_SERVICE_PORT}"
+    client:
+      token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+
+# SSL/TLS Configuration
+ssl:
+  - id: vpp-platform-ssl
+    sni: "*.vpp-platform.com"
+    cert: "${SSL_CERT}"
+    key: "${SSL_KEY}"
+    client:
+      ca: "${SSL_CA}"
+
+# Health Check
+health_check:
+  active:
+    type: http
+    http_path: /health
+    healthy:
+      interval: 2
+      successes: 2
+    unhealthy:
+      interval: 1
+      http_failures: 2

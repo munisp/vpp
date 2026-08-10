@@ -1,0 +1,21 @@
+CREATE TABLE `price_alerts` (
+	`id` int AUTO_INCREMENT NOT NULL,
+	`userId` int NOT NULL,
+	`name` text NOT NULL,
+	`description` text,
+	`alertType` varchar(20) NOT NULL,
+	`targetPrice` int,
+	`minPrice` int,
+	`maxPrice` int,
+	`isActive` boolean NOT NULL DEFAULT true,
+	`notifyEmail` boolean NOT NULL DEFAULT true,
+	`notifyPush` boolean NOT NULL DEFAULT true,
+	`notifySMS` boolean NOT NULL DEFAULT false,
+	`cooldownMinutes` int NOT NULL DEFAULT 60,
+	`lastTriggeredAt` timestamp,
+	`triggerCount` int NOT NULL DEFAULT 0,
+	`maxTriggers` int,
+	`createdAt` timestamp NOT NULL DEFAULT (now()),
+	`updatedAt` timestamp NOT NULL DEFAULT (now()) ON UPDATE CURRENT_TIMESTAMP,
+	CONSTRAINT `price_alerts_id` PRIMARY KEY(`id`)
+);

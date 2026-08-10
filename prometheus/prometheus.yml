@@ -1,0 +1,80 @@
+# Prometheus Configuration for VPP Platform
+# Version: v21.0
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    cluster: 'vpp-platform'
+    environment: 'production'
+
+# Alertmanager configuration
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+            - 'localhost:9093'
+
+# Load rules once and periodically evaluate them
+rule_files:
+  - 'alerts/*.yml'
+
+# Scrape configurations
+scrape_configs:
+  # VPP Web Server metrics
+  - job_name: 'vpp-web'
+    static_configs:
+      - targets: ['localhost:3000']
+    metrics_path: '/metrics'
+    scrape_interval: 10s
+    scrape_timeout: 5s
+
+  # Temporal Worker metrics
+  - job_name: 'temporal-worker'
+    static_configs:
+      - targets: ['localhost:9091']
+    scrape_interval: 10s
+    scrape_timeout: 5s
+
+  # Redis metrics (via redis_exporter)
+  - job_name: 'redis'
+    static_configs:
+      - targets: ['localhost:9121']
+    scrape_interval: 10s
+    scrape_timeout: 5s
+
+  # Kafka metrics (via kafka_exporter)
+  - job_name: 'kafka'
+    static_configs:
+      - targets: ['localhost:9308']
+    scrape_interval: 15s
+    scrape_timeout: 10s
+
+  # Node Exporter (system metrics)
+  - job_name: 'node'
+    static_configs:
+      - targets: ['localhost:9100']
+    scrape_interval: 15s
+    scrape_timeout: 10s
+
+  # Prometheus self-monitoring
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+    scrape_interval: 30s
+
+  # Temporal Server metrics (if available)
+  - job_name: 'temporal-server'
+    static_configs:
+      - targets: ['localhost:7233']
+    metrics_path: '/metrics'
+    scrape_interval: 15s
+    scrape_timeout: 10s
+
+  # Keycloak metrics (if metrics enabled)
+  - job_name: 'keycloak'
+    static_configs:
+      - targets: ['localhost:8080']
+    metrics_path: '/metrics'
+    scrape_interval: 30s
+    scrape_timeout: 10s

@@ -1,0 +1,26 @@
+mqtt:
+  broker_url: "ssl://localhost:8883"
+  client_id: "mqtt-fluvio-bridge"
+  username: "vpp_bridge"
+  password: "changeme"
+  topics:
+    - "vpp/telemetry/+"
+    - "vpp/devices/+/status"
+  qos: 1
+  clean_session: false
+  use_tls: true
+  ca_file: "/path/to/ca.crt"
+  cert_file: "/path/to/client.crt"
+  key_file: "/path/to/client.key"
+
+fluvio:
+  endpoint: "localhost:9003"
+  topics:
+    "vpp/telemetry/+": "telemetry"
+    "vpp/devices/+/status": "device-status"
+
+bridge:
+  worker_count: 4
+  buffer_size: 1000
+  enable_validation: true
+  log_level: "info"

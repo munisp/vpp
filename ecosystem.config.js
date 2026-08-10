@@ -1,0 +1,53 @@
+module.exports = {
+  apps: [
+    {
+      name: 'vpp-web',
+      script: 'server/_core/index.ts',
+      interpreter: 'node',
+      interpreter_args: '--import tsx',
+      instances: 1,
+      exec_mode: 'fork',
+      env: {
+        NODE_ENV: 'development',
+      },
+      env_production: {
+        NODE_ENV: 'production',
+      },
+      error_file: './logs/vpp-web-error.log',
+      out_file: './logs/vpp-web-out.log',
+      log_date_format: 'YYYY-MM-DD HH:mm:ss Z',
+      merge_logs: true,
+      autorestart: true,
+      watch: false,
+      max_memory_restart: '1G',
+    },
+    {
+      name: 'vpp-temporal-worker',
+      script: 'server/workflows/worker.ts',
+      interpreter: 'node',
+      interpreter_args: '--import tsx',
+      instances: 2,
+      exec_mode: 'cluster',
+      env: {
+        NODE_ENV: 'development',
+        TEMPORAL_ADDRESS: 'localhost:7233',
+        TEMPORAL_NAMESPACE: 'default',
+      },
+      env_production: {
+        NODE_ENV: 'production',
+        TEMPORAL_ADDRESS: process.env.TEMPORAL_ADDRESS || 'localhost:7233',
+        TEMPORAL_NAMESPACE: process.env.TEMPORAL_NAMESPACE || 'default',
+      },
+      error_file: './logs/vpp-worker-error.log',
+      out_file: './logs/vpp-worker-out.log',
+      log_date_format: 'YYYY-MM-DD HH:mm:ss Z',
+      merge_logs: true,
+      autorestart: true,
+      watch: false,
+      max_memory_restart: '512M',
+      restart_delay: 5000,
+      max_restarts: 10,
+      min_uptime: '10s',
+    },
+  ],
+};

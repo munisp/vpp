@@ -1,0 +1,227 @@
+# TigerBeetle HA Configuration
+# 3+ node cluster with stable storage for financial transactions
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: tigerbeetle
+  labels:
+    app.kubernetes.io/name: tigerbeetle
+---
+# TigerBeetle ConfigMap
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tigerbeetle-config
+  namespace: tigerbeetle
+data:
+  cluster-id: "0"
+  replica-count: "3"
+  addresses: |
+    tigerbeetle-0.tigerbeetle-headless.tigerbeetle.svc.cluster.local:3001
+    tigerbeetle-1.tigerbeetle-headless.tigerbeetle.svc.cluster.local:3001
+    tigerbeetle-2.tigerbeetle-headless.tigerbeetle.svc.cluster.local:3001
+---
+# TigerBeetle StatefulSet
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: tigerbeetle
+  namespace: tigerbeetle
+spec:
+  serviceName: tigerbeetle-headless
+  replicas: 3
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app: tigerbeetle
+  template:
+    metadata:
+      labels:
+        app: tigerbeetle
+    spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                  - key: app
+                    operator: In
+                    values:
+                      - tigerbeetle
+              topologyKey: kubernetes.io/hostname
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node-type
+                    operator: In
+                    values:
+                      - storage-optimized
+      tolerations:
+        - key: "dedicated"
+          operator: "Equal"
+          value: "tigerbeetle"
+          effect: "NoSchedule"
+      initContainers:
+        - name: init-data
+          image: ghcr.io/tigerbeetle/tigerbeetle:0.15.3
+          command:
+            - sh
+            - -c
+            - |
+              REPLICA_INDEX=${HOSTNAME##*-}
+              if [ ! -f /data/0_${REPLICA_INDEX}.tigerbeetle ]; then
+                echo "Formatting TigerBeetle data file for replica ${REPLICA_INDEX}..."
+                /tigerbeetle format --cluster=0 --replica=${REPLICA_INDEX} --replica-count=3 /data/0_${REPLICA_INDEX}.tigerbeetle
+              else
+                echo "Data file already exists for replica ${REPLICA_INDEX}"
+              fi
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+      containers:
+        - name: tigerbeetle
+          image: ghcr.io/tigerbeetle/tigerbeetle:0.15.3
+          command:
+            - sh
+            - -c
+            - |
+              REPLICA_INDEX=${HOSTNAME##*-}
+              ADDRESSES="tigerbeetle-0.tigerbeetle-headless.tigerbeetle.svc.cluster.local:3001,tigerbeetle-1.tigerbeetle-headless.tigerbeetle.svc.cluster.local:3001,tigerbeetle-2.tigerbeetle-headless.tigerbeetle.svc.cluster.local:3001"
+              exec /tigerbeetle start --addresses=${ADDRESSES} /data/0_${REPLICA_INDEX}.tigerbeetle
+          ports:
+            - containerPort: 3001
+              name: tigerbeetle
+          resources:
+            requests:
+              memory: 2Gi
+              cpu: "1"
+            limits:
+              memory: 4Gi
+              cpu: "2"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+          livenessProbe:
+            tcpSocket:
+              port: 3001
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+          readinessProbe:
+            tcpSocket:
+              port: 3001
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 3
+      securityContext:
+        fsGroup: 1000
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        storageClassName: fast-ssd-local
+        resources:
+          requests:
+            storage: 100Gi
+---
+# TigerBeetle Headless Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: tigerbeetle-headless
+  namespace: tigerbeetle
+spec:
+  clusterIP: None
+  selector:
+    app: tigerbeetle
+  ports:
+    - name: tigerbeetle
+      port: 3001
+      targetPort: 3001
+---
+# TigerBeetle Service (load balanced)
+apiVersion: v1
+kind: Service
+metadata:
+  name: tigerbeetle
+  namespace: tigerbeetle
+spec:
+  selector:
+    app: tigerbeetle
+  ports:
+    - name: tigerbeetle
+      port: 3001
+      targetPort: 3001
+  type: ClusterIP
+---
+# Storage Class for TigerBeetle (local SSD for performance)
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: fast-ssd-local
+provisioner: kubernetes.io/no-provisioner
+volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: false
+---
+# Pod Disruption Budget
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: tigerbeetle-pdb
+  namespace: tigerbeetle
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: tigerbeetle
+---
+# Network Policy for TigerBeetle
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: tigerbeetle-network-policy
+  namespace: tigerbeetle
+spec:
+  podSelector:
+    matchLabels:
+      app: tigerbeetle
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              app.kubernetes.io/name: vpp-platform
+        - podSelector:
+            matchLabels:
+              app: tigerbeetle
+      ports:
+        - protocol: TCP
+          port: 3001
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: tigerbeetle
+      ports:
+        - protocol: TCP
+          port: 3001
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53

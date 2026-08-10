@@ -1,0 +1,1 @@
+ALTER TABLE `trading_strategies` MODIFY COLUMN `tradingMode` text NOT NULL;

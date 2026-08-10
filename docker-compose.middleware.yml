@@ -1,0 +1,349 @@
+version: '3.9'
+
+services:
+  # ============================================================================
+  # Kafka & Zookeeper
+  # ============================================================================
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    hostname: zookeeper
+    container_name: vpp-zookeeper
+    ports:
+      - "2181:2181"
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    volumes:
+      - zookeeper-data:/var/lib/zookeeper/data
+      - zookeeper-logs:/var/lib/zookeeper/log
+    networks:
+      - vpp-network
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    hostname: kafka
+    container_name: vpp-kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+      - "9101:9101"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: 'zookeeper:2181'
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_JMX_PORT: 9101
+      KAFKA_JMX_HOSTNAME: localhost
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true'
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    networks:
+      - vpp-network
+
+  # ============================================================================
+  # Redis
+  # ============================================================================
+  redis:
+    image: redis:7-alpine
+    hostname: redis
+    container_name: vpp-redis
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes
+    volumes:
+      - redis-data:/data
+    networks:
+      - vpp-network
+
+  # ============================================================================
+  # Temporal
+  # ============================================================================
+  temporal:
+    image: temporalio/auto-setup:1.22.0
+    hostname: temporal
+    container_name: vpp-temporal
+    depends_on:
+      - temporal-postgresql
+    ports:
+      - "7233:7233"
+    environment:
+      - DB=postgresql
+      - DB_PORT=5432
+      - POSTGRES_USER=temporal
+      - POSTGRES_PWD=temporal
+      - POSTGRES_SEEDS=temporal-postgresql
+      - DYNAMIC_CONFIG_FILE_PATH=config/dynamicconfig/development-sql.yaml
+    volumes:
+      - ./middleware/temporal/dynamicconfig:/etc/temporal/config/dynamicconfig
+    networks:
+      - vpp-network
+
+  temporal-postgresql:
+    image: postgres:15-alpine
+    hostname: temporal-postgresql
+    container_name: vpp-temporal-db
+    environment:
+      POSTGRES_USER: temporal
+      POSTGRES_PASSWORD: temporal
+      POSTGRES_DB: temporal
+    volumes:
+      - temporal-postgres-data:/var/lib/postgresql/data
+    networks:
+      - vpp-network
+
+  temporal-ui:
+    image: temporalio/ui:2.21.0
+    hostname: temporal-ui
+    container_name: vpp-temporal-ui
+    depends_on:
+      - temporal
+    ports:
+      - "8088:8080"
+    environment:
+      - TEMPORAL_ADDRESS=temporal:7233
+      - TEMPORAL_CORS_ORIGINS=http://localhost:3000
+    networks:
+      - vpp-network
+
+  # ============================================================================
+  # Keycloak
+  # ============================================================================
+  keycloak:
+    image: quay.io/keycloak/keycloak:23.0
+    hostname: keycloak
+    container_name: vpp-keycloak
+    command: start-dev
+    ports:
+      - "8080:8080"
+    environment:
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://keycloak-postgresql:5432/keycloak
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: keycloak
+      KC_HOSTNAME_STRICT: 'false'
+      KC_HTTP_ENABLED: 'true'
+    depends_on:
+      - keycloak-postgresql
+    networks:
+      - vpp-network
+
+  keycloak-postgresql:
+    image: postgres:15-alpine
+    hostname: keycloak-postgresql
+    container_name: vpp-keycloak-db
+    environment:
+      POSTGRES_USER: keycloak
+      POSTGRES_PASSWORD: keycloak
+      POSTGRES_DB: keycloak
+    volumes:
+      - keycloak-postgres-data:/var/lib/postgresql/data
+    networks:
+      - vpp-network
+
+  # ============================================================================
+  # Permify
+  # ============================================================================
+  permify:
+    image: ghcr.io/permify/permify:latest
+    hostname: permify
+    container_name: vpp-permify
+    ports:
+      - "3476:3476"
+      - "3478:3478"
+    command: serve
+    environment:
+      - PERMIFY_DATABASE_ENGINE=postgres
+      - PERMIFY_DATABASE_URI=postgres://permify:permify@permify-postgresql:5432/permify?sslmode=disable
+      - PERMIFY_LOG_LEVEL=info
+    depends_on:
+      - permify-postgresql
+    networks:
+      - vpp-network
+
+  permify-postgresql:
+    image: postgres:15-alpine
+    hostname: permify-postgresql
+    container_name: vpp-permify-db
+    environment:
+      POSTGRES_USER: permify
+      POSTGRES_PASSWORD: permify
+      POSTGRES_DB: permify
+    volumes:
+      - permify-postgres-data:/var/lib/postgresql/data
+    networks:
+      - vpp-network
+
+  # ============================================================================
+  # APISIX
+  # ============================================================================
+  apisix:
+    image: apache/apisix:3.7.0-debian
+    hostname: apisix
+    container_name: vpp-apisix
+    ports:
+      - "9080:9080"
+      - "9091:9091"
+      - "9443:9443"
+    volumes:
+      - ./middleware/apisix/config.yaml:/usr/local/apisix/conf/config.yaml:ro
+      - ./middleware/apisix/apisix.yaml:/usr/local/apisix/conf/apisix.yaml:ro
+    depends_on:
+      - etcd
+    networks:
+      - vpp-network
+
+  etcd:
+    image: bitnami/etcd:3.5
+    hostname: etcd
+    container_name: vpp-etcd
+    environment:
+      ETCD_ENABLE_V2: "true"
+      ALLOW_NONE_AUTHENTICATION: "yes"
+      ETCD_ADVERTISE_CLIENT_URLS: "http://0.0.0.0:2379"
+      ETCD_LISTEN_CLIENT_URLS: "http://0.0.0.0:2379"
+    ports:
+      - "2379:2379"
+      - "2380:2380"
+    networks:
+      - vpp-network
+
+  # ============================================================================
+  # TigerBeetle
+  # ============================================================================
+  tigerbeetle:
+    image: ghcr.io/tigerbeetle/tigerbeetle:latest
+    hostname: tigerbeetle
+    container_name: vpp-tigerbeetle
+    command: start --addresses=0.0.0.0:3000 /var/lib/tigerbeetle/0_0.tigerbeetle
+    ports:
+      - "3001:3000"
+    volumes:
+      - tigerbeetle-data:/var/lib/tigerbeetle
+    networks:
+      - vpp-network
+
+  # ============================================================================
+  # MinIO (Lakehouse Storage)
+  # ============================================================================
+  minio:
+    image: minio/minio:latest
+    hostname: minio
+    container_name: vpp-minio
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - minio-data:/data
+    networks:
+      - vpp-network
+
+  # ============================================================================
+  # Dapr
+  # ============================================================================
+  dapr-placement:
+    image: daprio/dapr:1.12.0
+    hostname: dapr-placement
+    container_name: vpp-dapr-placement
+    command: ["./placement", "-port", "50006"]
+    ports:
+      - "50006:50006"
+    networks:
+      - vpp-network
+
+  # ============================================================================
+  # Fluvio
+  # ============================================================================
+  fluvio:
+    image: infinyon/fluvio:latest
+    hostname: fluvio
+    container_name: vpp-fluvio
+    command: cluster start --local
+    ports:
+      - "9003:9003"
+    volumes:
+      - fluvio-data:/home/fluvio/.fluvio
+    networks:
+      - vpp-network
+
+  # ============================================================================
+  # Monitoring
+  # ============================================================================
+  prometheus:
+    image: prom/prometheus:latest
+    hostname: prometheus
+    container_name: vpp-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./middleware/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+    networks:
+      - vpp-network
+
+  grafana:
+    image: grafana/grafana:latest
+    hostname: grafana
+    container_name: vpp-grafana
+    ports:
+      - "3002:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./middleware/grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - ./middleware/grafana/datasources:/etc/grafana/provisioning/datasources
+    depends_on:
+      - prometheus
+    networks:
+      - vpp-network
+
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    hostname: jaeger
+    container_name: vpp-jaeger
+    ports:
+      - "5775:5775/udp"
+      - "6831:6831/udp"
+      - "6832:6832/udp"
+      - "5778:5778"
+      - "16686:16686"
+      - "14268:14268"
+      - "14250:14250"
+      - "9411:9411"
+    environment:
+      - COLLECTOR_ZIPKIN_HOST_PORT=:9411
+    networks:
+      - vpp-network
+
+volumes:
+  zookeeper-data:
+  zookeeper-logs:
+  kafka-data:
+  redis-data:
+  temporal-postgres-data:
+  keycloak-postgres-data:
+  permify-postgres-data:
+  tigerbeetle-data:
+  minio-data:
+  fluvio-data:
+  prometheus-data:
+  grafana-data:
+
+networks:
+  vpp-network:
+    driver: bridge

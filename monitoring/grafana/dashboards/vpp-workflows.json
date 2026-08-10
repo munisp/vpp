@@ -1,0 +1,128 @@
+{
+  "dashboard": {
+    "title": "VPP Workflow Metrics",
+    "tags": ["vpp", "workflows", "temporal"],
+    "timezone": "browser",
+    "panels": [
+      {
+        "id": 1,
+        "title": "Workflows Started (Rate)",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "rate(vpp_workflows_started_total[5m])",
+            "legendFormat": "{{workflow_type}}"
+          }
+        ],
+        "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 }
+      },
+      {
+        "id": 2,
+        "title": "Workflows Completed vs Failed",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "rate(vpp_workflows_completed_total[5m])",
+            "legendFormat": "Completed - {{workflow_type}}"
+          },
+          {
+            "expr": "rate(vpp_workflows_failed_total[5m])",
+            "legendFormat": "Failed - {{workflow_type}}"
+          }
+        ],
+        "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 }
+      },
+      {
+        "id": 3,
+        "title": "Active Workflows",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "vpp_active_workflows"
+          }
+        ],
+        "gridPos": { "h": 4, "w": 6, "x": 0, "y": 8 }
+      },
+      {
+        "id": 4,
+        "title": "Workflow Success Rate",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "sum(rate(vpp_workflows_completed_total[5m])) / (sum(rate(vpp_workflows_completed_total[5m])) + sum(rate(vpp_workflows_failed_total[5m]))) * 100"
+          }
+        ],
+        "gridPos": { "h": 4, "w": 6, "x": 6, "y": 8 }
+      },
+      {
+        "id": 5,
+        "title": "Worker Utilization",
+        "type": "gauge",
+        "targets": [
+          {
+            "expr": "vpp_worker_utilization_percent"
+          }
+        ],
+        "gridPos": { "h": 4, "w": 6, "x": 12, "y": 8 }
+      },
+      {
+        "id": 6,
+        "title": "Memory Usage",
+        "type": "gauge",
+        "targets": [
+          {
+            "expr": "vpp_memory_usage_bytes / 1024 / 1024"
+          }
+        ],
+        "gridPos": { "h": 4, "w": 6, "x": 18, "y": 8 }
+      },
+      {
+        "id": 7,
+        "title": "Workflow Duration (p50, p95, p99)",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.50, rate(vpp_workflow_duration_seconds_bucket[5m]))",
+            "legendFormat": "p50 - {{workflow_type}}"
+          },
+          {
+            "expr": "histogram_quantile(0.95, rate(vpp_workflow_duration_seconds_bucket[5m]))",
+            "legendFormat": "p95 - {{workflow_type}}"
+          },
+          {
+            "expr": "histogram_quantile(0.99, rate(vpp_workflow_duration_seconds_bucket[5m]))",
+            "legendFormat": "p99 - {{workflow_type}}"
+          }
+        ],
+        "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 }
+      },
+      {
+        "id": 8,
+        "title": "Activity Execution Rate",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "rate(vpp_activities_executed_total[5m])",
+            "legendFormat": "{{activity_name}}"
+          }
+        ],
+        "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 }
+      },
+      {
+        "id": 9,
+        "title": "Activity Failure Rate",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "rate(vpp_activities_failed_total[5m])",
+            "legendFormat": "{{activity_name}} - {{error_type}}"
+          }
+        ],
+        "gridPos": { "h": 8, "w": 24, "x": 0, "y": 20 }
+      }
+    ],
+    "refresh": "10s",
+    "schemaVersion": 27,
+    "version": 1
+  }
+}

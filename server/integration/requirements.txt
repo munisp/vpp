@@ -1,0 +1,15 @@
+# Lakehouse ETL Pipeline Requirements
+
+# Kafka
+confluent-kafka==2.3.0
+
+# Data processing
+pandas==2.2.0
+numpy==1.26.3
+
+# Iceberg
+pyiceberg==0.6.1
+pyarrow==15.0.0
+
+# Utilities
+python-dotenv==1.0.1

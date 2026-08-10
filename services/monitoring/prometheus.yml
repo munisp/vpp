@@ -1,0 +1,52 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    cluster: 'vpp-platform'
+    environment: 'production'
+
+# Alertmanager configuration
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+            - alertmanager:9093
+
+# Load rules once and periodically evaluate them
+rule_files:
+  - "alerts.yml"
+
+# Scrape configurations
+scrape_configs:
+  # Prometheus itself
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  # MQTT-Fluvio Bridge (Go)
+  - job_name: 'mqtt-fluvio-bridge'
+    static_configs:
+      - targets: ['mqtt-fluvio-bridge:8080']
+    metrics_path: '/metrics'
+
+  # Database Consumer (Python)
+  - job_name: 'database-consumer'
+    static_configs:
+      - targets: ['database-consumer:8000']
+    metrics_path: '/metrics'
+
+  # Analytics Consumer (Python)
+  - job_name: 'analytics-consumer'
+    static_configs:
+      - targets: ['analytics-consumer:8000']
+    metrics_path: '/metrics'
+
+  # Node Exporter (system metrics)
+  - job_name: 'node'
+    static_configs:
+      - targets: ['node-exporter:9100']
+
+  # MySQL Exporter
+  - job_name: 'mysql'
+    static_configs:
+      - targets: ['mysql-exporter:9104']

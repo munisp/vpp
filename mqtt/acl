@@ -1,0 +1,55 @@
+# Mosquitto Access Control List (ACL)
+# VPP Consumer Platform
+#
+# Format:
+# user <username>
+# topic [read|write|readwrite] <topic>
+#
+# Wildcards:
+# + matches single level
+# # matches multiple levels
+
+# =============================================================================
+# Admin User - Full Access
+# =============================================================================
+
+user vpp-admin
+topic readwrite #
+
+# =============================================================================
+# Server/Backend - Full Access
+# =============================================================================
+
+user vpp-server
+topic readwrite #
+
+# =============================================================================
+# Device Pattern - Devices can only publish to their own topics
+# =============================================================================
+
+# Devices follow pattern: device-{userId}-{assetId}
+# They can only publish telemetry and status to their own topics
+# They can only subscribe to commands for their own asset
+
+pattern read vpp/%u/+/command/#
+pattern write vpp/%u/+/telemetry
+pattern write vpp/%u/+/status
+
+# =============================================================================
+# Web Clients - Read-only access to their own data
+# =============================================================================
+
+# Web clients follow pattern: web-{userId}
+# They can only subscribe to their own user's topics
+
+pattern read vpp/%u/#
+
+# =============================================================================
+# System Topics - Admin Only
+# =============================================================================
+
+user vpp-admin
+topic readwrite $SYS/#
+
+# Deny all other users from system topics
+topic deny $SYS/#

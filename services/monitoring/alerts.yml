@@ -1,0 +1,97 @@
+groups:
+  - name: vpp_platform_alerts
+    interval: 30s
+    rules:
+      # MQTT Bridge Alerts
+      - alert: MQTTBridgeDown
+        expr: mqtt_connection_status == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "MQTT Bridge disconnected"
+          description: "MQTT-Fluvio bridge has been disconnected for more than 1 minute"
+
+      - alert: HighFluvioPublishErrors
+        expr: rate(fluvio_publish_errors_total[5m]) > 10
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High Fluvio publish error rate"
+          description: "Fluvio publish errors are occurring at {{ $value }} per second"
+
+      # Consumer Alerts
+      - alert: DatabaseConsumerDown
+        expr: up{job="database-consumer"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Database consumer is down"
+          description: "Database consumer has been down for more than 1 minute"
+
+      - alert: HighProcessingErrors
+        expr: rate(processing_errors_total[5m]) > 5
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High message processing error rate"
+          description: "Processing errors in {{ $labels.consumer }} are occurring at {{ $value }} per second"
+
+      - alert: DatabaseConnectionLost
+        expr: database_connection_status == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Database connection lost"
+          description: "Database consumer has lost connection to the database"
+
+      # Performance Alerts
+      - alert: HighMessageProcessingLatency
+        expr: histogram_quantile(0.95, rate(message_processing_duration_seconds_bucket[5m])) > 1.0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High message processing latency"
+          description: "95th percentile processing latency is {{ $value }}s"
+
+      - alert: WorkerQueueFull
+        expr: worker_queue_size > 900
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Worker queue nearly full"
+          description: "Worker queue size is {{ $value }}, consider increasing worker count"
+
+      # System Alerts
+      - alert: HighCPUUsage
+        expr: 100 - (avg by (instance) (irate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 80
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High CPU usage"
+          description: "CPU usage is {{ $value }}% on {{ $labels.instance }}"
+
+      - alert: HighMemoryUsage
+        expr: (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100 > 85
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High memory usage"
+          description: "Memory usage is {{ $value }}% on {{ $labels.instance }}"
+
+      - alert: DiskSpaceLow
+        expr: (node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"}) * 100 < 15
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Low disk space"
+          description: "Disk space is {{ $value }}% available on {{ $labels.instance }}"

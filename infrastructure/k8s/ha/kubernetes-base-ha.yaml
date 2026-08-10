@@ -1,0 +1,580 @@
+# Kubernetes Base HA Configuration
+# HA-ready manifests for VPP Platform core services
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: vpp-platform
+  labels:
+    app.kubernetes.io/name: vpp-platform
+    istio-injection: enabled
+---
+# VPP Consumer Platform Deployment (HA)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: consumer-platform
+  namespace: vpp-platform
+spec:
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: consumer-platform
+  template:
+    metadata:
+      labels:
+        app: consumer-platform
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "3000"
+        prometheus.io/path: /metrics
+    spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                  - key: app
+                    operator: In
+                    values:
+                      - consumer-platform
+              topologyKey: kubernetes.io/hostname
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app
+                      operator: In
+                      values:
+                        - consumer-platform
+                topologyKey: topology.kubernetes.io/zone
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: consumer-platform
+      containers:
+        - name: consumer-platform
+          image: vpp-platform/consumer-platform:latest
+          ports:
+            - containerPort: 3000
+              name: http
+            - containerPort: 3001
+              name: websocket
+          env:
+            - name: NODE_ENV
+              value: production
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: vpp-db-credentials
+                  key: url
+            - name: REDIS_URL
+              value: redis://redis.redis.svc.cluster.local:6379
+            - name: KAFKA_BROKERS
+              value: vpp-kafka-cluster-kafka-bootstrap.vpp-platform.svc.cluster.local:9092
+            - name: TEMPORAL_ADDRESS
+              value: temporal-frontend.temporal.svc.cluster.local:7233
+            - name: KEYCLOAK_URL
+              value: http://keycloak.keycloak.svc.cluster.local
+            - name: PERMIFY_URL
+              value: http://permify.permify.svc.cluster.local:3476
+            - name: TIGERBEETLE_ADDRESS
+              value: tigerbeetle.tigerbeetle.svc.cluster.local:3001
+            - name: MQTT_BROKER_URL
+              value: mqtt://mosquitto.vpp-platform.svc.cluster.local:1883
+          envFrom:
+            - secretRef:
+                name: vpp-platform-secrets
+          resources:
+            requests:
+              memory: 512Mi
+              cpu: 250m
+            limits:
+              memory: 1Gi
+              cpu: 500m
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: 3000
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 30
+          volumeMounts:
+            - name: config
+              mountPath: /app/config
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: consumer-platform-config
+---
+# VPP Trading Worker Deployment (HA)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: trading-worker
+  namespace: vpp-platform
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: trading-worker
+  template:
+    metadata:
+      labels:
+        app: trading-worker
+    spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app
+                      operator: In
+                      values:
+                        - trading-worker
+                topologyKey: kubernetes.io/hostname
+      containers:
+        - name: trading-worker
+          image: vpp-platform/trading-worker:latest
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: vpp-db-credentials
+                  key: url
+            - name: TEMPORAL_ADDRESS
+              value: temporal-frontend.temporal.svc.cluster.local:7233
+            - name: KAFKA_BROKERS
+              value: vpp-kafka-cluster-kafka-bootstrap.vpp-platform.svc.cluster.local:9092
+            - name: TIGERBEETLE_ADDRESS
+              value: tigerbeetle.tigerbeetle.svc.cluster.local:3001
+          resources:
+            requests:
+              memory: 256Mi
+              cpu: 250m
+            limits:
+              memory: 512Mi
+              cpu: 500m
+          livenessProbe:
+            exec:
+              command:
+                - python
+                - -c
+                - "import sys; sys.exit(0)"
+            initialDelaySeconds: 30
+            periodSeconds: 30
+---
+# VPP DR Worker Deployment (HA)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dr-worker
+  namespace: vpp-platform
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: dr-worker
+  template:
+    metadata:
+      labels:
+        app: dr-worker
+    spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app
+                      operator: In
+                      values:
+                        - dr-worker
+                topologyKey: kubernetes.io/hostname
+      containers:
+        - name: dr-worker
+          image: vpp-platform/dr-worker:latest
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: vpp-db-credentials
+                  key: url
+            - name: TEMPORAL_ADDRESS
+              value: temporal-frontend.temporal.svc.cluster.local:7233
+            - name: KAFKA_BROKERS
+              value: vpp-kafka-cluster-kafka-bootstrap.vpp-platform.svc.cluster.local:9092
+          resources:
+            requests:
+              memory: 256Mi
+              cpu: 250m
+            limits:
+              memory: 512Mi
+              cpu: 500m
+---
+# VPP Telemetry Worker Deployment (HA)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: telemetry-worker
+  namespace: vpp-platform
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: telemetry-worker
+  template:
+    metadata:
+      labels:
+        app: telemetry-worker
+    spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app
+                      operator: In
+                      values:
+                        - telemetry-worker
+                topologyKey: kubernetes.io/hostname
+      containers:
+        - name: telemetry-worker
+          image: vpp-platform/telemetry-worker:latest
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: vpp-db-credentials
+                  key: url
+            - name: FLUVIO_SC_ADDRESS
+              value: fluvio-sc.fluvio.svc.cluster.local:9003
+            - name: MQTT_BROKER_URL
+              value: mqtt://mosquitto.vpp-platform.svc.cluster.local:1883
+          resources:
+            requests:
+              memory: 256Mi
+              cpu: 250m
+            limits:
+              memory: 512Mi
+              cpu: 500m
+---
+# Services
+apiVersion: v1
+kind: Service
+metadata:
+  name: consumer-platform
+  namespace: vpp-platform
+spec:
+  selector:
+    app: consumer-platform
+  ports:
+    - name: http
+      port: 3000
+      targetPort: 3000
+    - name: websocket
+      port: 3001
+      targetPort: 3001
+  type: ClusterIP
+---
+# Ingress
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: vpp-platform
+  namespace: vpp-platform
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "50m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/websocket-services: "consumer-platform"
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: api.vpp-platform.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: consumer-platform
+                port:
+                  number: 3000
+    - host: ws.vpp-platform.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: consumer-platform
+                port:
+                  number: 3001
+  tls:
+    - hosts:
+        - api.vpp-platform.com
+        - ws.vpp-platform.com
+      secretName: vpp-platform-tls
+---
+# ConfigMap
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: consumer-platform-config
+  namespace: vpp-platform
+data:
+  config.json: |
+    {
+      "server": {
+        "port": 3000,
+        "wsPort": 3001,
+        "cors": {
+          "origins": ["https://app.vpp-platform.com", "https://admin.vpp-platform.com"]
+        }
+      },
+      "features": {
+        "trading": true,
+        "demandResponse": true,
+        "p2pMarketplace": true,
+        "analytics": true
+      },
+      "limits": {
+        "maxAssetsPerUser": 100,
+        "maxTradesPerDay": 1000,
+        "maxDREventsPerMonth": 50
+      }
+    }
+---
+# Secrets (placeholders - use sealed secrets in production)
+apiVersion: v1
+kind: Secret
+metadata:
+  name: vpp-db-credentials
+  namespace: vpp-platform
+type: Opaque
+stringData:
+  url: "${DATABASE_URL}"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: vpp-platform-secrets
+  namespace: vpp-platform
+type: Opaque
+stringData:
+  JWT_SECRET: "${JWT_SECRET}"
+  MPESA_CONSUMER_KEY: "${MPESA_CONSUMER_KEY}"
+  MPESA_CONSUMER_SECRET: "${MPESA_CONSUMER_SECRET}"
+  AIRTEL_API_KEY: "${AIRTEL_API_KEY}"
+  TIGO_API_KEY: "${TIGO_API_KEY}"
+---
+# Pod Disruption Budgets
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: consumer-platform-pdb
+  namespace: vpp-platform
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: consumer-platform
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: trading-worker-pdb
+  namespace: vpp-platform
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: trading-worker
+---
+# Horizontal Pod Autoscalers
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: consumer-platform-hpa
+  namespace: vpp-platform
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: consumer-platform
+  minReplicas: 3
+  maxReplicas: 20
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Percent
+          value: 10
+          periodSeconds: 60
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 15
+        - type: Pods
+          value: 4
+          periodSeconds: 15
+      selectPolicy: Max
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: trading-worker-hpa
+  namespace: vpp-platform
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: trading-worker
+  minReplicas: 3
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+---
+# Network Policies
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: consumer-platform-network-policy
+  namespace: vpp-platform
+spec:
+  podSelector:
+    matchLabels:
+      app: consumer-platform
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: ingress-nginx
+        - namespaceSelector:
+            matchLabels:
+              name: apisix
+      ports:
+        - protocol: TCP
+          port: 3000
+        - protocol: TCP
+          port: 3001
+  egress:
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: TCP
+          port: 5432
+        - protocol: TCP
+          port: 6379
+        - protocol: TCP
+          port: 9092
+        - protocol: TCP
+          port: 7233
+        - protocol: TCP
+          port: 3001
+        - protocol: TCP
+          port: 1883
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+---
+# Resource Quotas
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: vpp-platform-quota
+  namespace: vpp-platform
+spec:
+  hard:
+    requests.cpu: "50"
+    requests.memory: 100Gi
+    limits.cpu: "100"
+    limits.memory: 200Gi
+    pods: "100"
+    services: "20"
+    secrets: "50"
+    configmaps: "50"
+---
+# Limit Ranges
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: vpp-platform-limits
+  namespace: vpp-platform
+spec:
+  limits:
+    - default:
+        cpu: 500m
+        memory: 512Mi
+      defaultRequest:
+        cpu: 100m
+        memory: 128Mi
+      type: Container
+    - max:
+        cpu: "4"
+        memory: 8Gi
+      min:
+        cpu: 50m
+        memory: 64Mi
+      type: Container

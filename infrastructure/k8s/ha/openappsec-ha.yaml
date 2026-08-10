@@ -1,0 +1,401 @@
+# OpenAppSec HA Configuration
+# Web Application Firewall (WAF) at ingress level with centralized policy
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: openappsec
+  labels:
+    app.kubernetes.io/name: openappsec
+---
+# OpenAppSec ConfigMap
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: openappsec-config
+  namespace: openappsec
+data:
+  local_policy.yaml: |
+    policies:
+      - name: vpp-platform-policy
+        mode: prevent-learn
+        practices:
+          - web-attacks:
+              override-mode: prevent-learn
+              minimum-confidence: medium
+              max-body-size-kb: 1000000
+              max-header-size-bytes: 102400
+              max-object-depth: 40
+              max-url-size-bytes: 32768
+          - anti-bot:
+              override-mode: prevent-learn
+              injected-uris:
+                - "/api/*"
+              validated-uris:
+                - "/api/*"
+          - snort-signatures:
+              override-mode: detect
+              files:
+                - "/etc/cp/conf/snort3-community.rules"
+        triggers:
+          - log:
+              address: "fluentd.monitoring.svc.cluster.local"
+              port: 24224
+              protocol: tcp
+              format: json-formatted
+          - web-user-response:
+              mode: block-page
+              response-body: "Access Denied - Security Policy Violation"
+              response-code: 403
+        exceptions:
+          - match:
+              sourceIp: "10.0.0.0/8"
+            action: accept
+          - match:
+              url: "/health"
+            action: accept
+          - match:
+              url: "/metrics"
+            action: accept
+    
+    settings:
+      agent-settings:
+        fog:
+          fog-address: "https://inext-agents.checkpoint.com"
+        log:
+          log-level: info
+        orchestration:
+          orchestration-mode: online-mode
+  
+  cp-nano-http-transaction-handler.cfg: |
+    {
+      "reverse_proxy": {
+        "assets": [
+          {
+            "id": "vpp-api",
+            "name": "VPP API",
+            "asset_type": "WebAPI",
+            "urls": ["http://consumer-platform.vpp-platform.svc.cluster.local:3000"],
+            "upstream_url": "http://consumer-platform.vpp-platform.svc.cluster.local:3000",
+            "practices": ["vpp-platform-policy"]
+          },
+          {
+            "id": "vpp-web",
+            "name": "VPP Web",
+            "asset_type": "WebApplication",
+            "urls": ["http://consumer-platform.vpp-platform.svc.cluster.local:3000"],
+            "upstream_url": "http://consumer-platform.vpp-platform.svc.cluster.local:3000",
+            "practices": ["vpp-platform-policy"]
+          }
+        ]
+      }
+    }
+---
+# OpenAppSec DaemonSet (runs on each node)
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: openappsec-agent
+  namespace: openappsec
+spec:
+  selector:
+    matchLabels:
+      app: openappsec-agent
+  template:
+    metadata:
+      labels:
+        app: openappsec-agent
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+        prometheus.io/path: /metrics
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      serviceAccountName: openappsec
+      containers:
+        - name: openappsec-agent
+          image: ghcr.io/openappsec/agent:latest
+          securityContext:
+            privileged: true
+            capabilities:
+              add:
+                - NET_ADMIN
+                - SYS_PTRACE
+          ports:
+            - containerPort: 9090
+              name: metrics
+              hostPort: 9090
+          env:
+            - name: SHARED_STORAGE_HOST
+              value: openappsec-shared-storage.openappsec.svc.cluster.local
+            - name: LEARNING_HOST
+              value: openappsec-learning.openappsec.svc.cluster.local
+            - name: FOG_ENABLED
+              value: "false"
+            - name: AGENT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: openappsec-credentials
+                  key: agent-token
+          resources:
+            requests:
+              memory: 256Mi
+              cpu: 250m
+            limits:
+              memory: 512Mi
+              cpu: 500m
+          volumeMounts:
+            - name: config
+              mountPath: /etc/cp/conf
+            - name: logs
+              mountPath: /var/log/nano_agent
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            initialDelaySeconds: 10
+            periodSeconds: 5
+      volumes:
+        - name: config
+          configMap:
+            name: openappsec-config
+        - name: logs
+          hostPath:
+            path: /var/log/openappsec
+            type: DirectoryOrCreate
+      tolerations:
+        - operator: Exists
+---
+# OpenAppSec Shared Storage Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: openappsec-shared-storage
+  namespace: openappsec
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: openappsec-shared-storage
+  template:
+    metadata:
+      labels:
+        app: openappsec-shared-storage
+    spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app
+                      operator: In
+                      values:
+                        - openappsec-shared-storage
+                topologyKey: kubernetes.io/hostname
+      containers:
+        - name: shared-storage
+          image: ghcr.io/openappsec/shared-storage:latest
+          ports:
+            - containerPort: 9000
+              name: http
+          resources:
+            requests:
+              memory: 128Mi
+              cpu: 100m
+            limits:
+              memory: 256Mi
+              cpu: 200m
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 9000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 9000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: openappsec-shared-storage-pvc
+---
+# OpenAppSec Learning Service Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: openappsec-learning
+  namespace: openappsec
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: openappsec-learning
+  template:
+    metadata:
+      labels:
+        app: openappsec-learning
+    spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app
+                      operator: In
+                      values:
+                        - openappsec-learning
+                topologyKey: kubernetes.io/hostname
+      containers:
+        - name: learning
+          image: ghcr.io/openappsec/smartsync-learning:latest
+          ports:
+            - containerPort: 9001
+              name: http
+          env:
+            - name: STORAGE_HOST
+              value: openappsec-shared-storage.openappsec.svc.cluster.local
+          resources:
+            requests:
+              memory: 256Mi
+              cpu: 250m
+            limits:
+              memory: 512Mi
+              cpu: 500m
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 9001
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 9001
+            initialDelaySeconds: 10
+            periodSeconds: 5
+---
+# Services
+apiVersion: v1
+kind: Service
+metadata:
+  name: openappsec-shared-storage
+  namespace: openappsec
+spec:
+  selector:
+    app: openappsec-shared-storage
+  ports:
+    - name: http
+      port: 9000
+      targetPort: 9000
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: openappsec-learning
+  namespace: openappsec
+spec:
+  selector:
+    app: openappsec-learning
+  ports:
+    - name: http
+      port: 9001
+      targetPort: 9001
+  type: ClusterIP
+---
+# Persistent Volume Claim for Shared Storage
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: openappsec-shared-storage-pvc
+  namespace: openappsec
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: fast-ssd
+  resources:
+    requests:
+      storage: 10Gi
+---
+# Service Account
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: openappsec
+  namespace: openappsec
+---
+# RBAC
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: openappsec
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "services", "endpoints", "namespaces"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: openappsec
+subjects:
+  - kind: ServiceAccount
+    name: openappsec
+    namespace: openappsec
+roleRef:
+  kind: ClusterRole
+  name: openappsec
+  apiGroup: rbac.authorization.k8s.io
+---
+# Secrets
+apiVersion: v1
+kind: Secret
+metadata:
+  name: openappsec-credentials
+  namespace: openappsec
+type: Opaque
+stringData:
+  agent-token: "${OPENAPPSEC_AGENT_TOKEN}"
+---
+# Pod Disruption Budgets
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: openappsec-shared-storage-pdb
+  namespace: openappsec
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: openappsec-shared-storage
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: openappsec-learning-pdb
+  namespace: openappsec
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: openappsec-learning

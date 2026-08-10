@@ -1,0 +1,130 @@
+global:
+  resolve_timeout: 5m
+  smtp_smarthost: 'smtp.example.com:587'
+  smtp_from: 'alerts@vpp-platform.com'
+  smtp_auth_username: 'alerts@vpp-platform.com'
+  smtp_auth_password: 'your-smtp-password'
+
+# Templates for notifications
+templates:
+  - '/etc/alertmanager/templates/*.tmpl'
+
+# Route tree for alerts
+route:
+  group_by: ['alertname', 'cluster', 'service']
+  group_wait: 10s
+  group_interval: 10s
+  repeat_interval: 12h
+  receiver: 'default'
+  
+  routes:
+    # Critical alerts go to PagerDuty
+    - match:
+        severity: critical
+      receiver: 'pagerduty'
+      continue: true
+    
+    # Warning alerts go to Slack
+    - match:
+        severity: warning
+      receiver: 'slack'
+    
+    # Kafka alerts
+    - match:
+        component: kafka
+      receiver: 'slack-kafka'
+      group_wait: 30s
+    
+    # Redis alerts
+    - match:
+        component: redis
+      receiver: 'slack-redis'
+      group_wait: 30s
+    
+    # Temporal alerts
+    - match:
+        component: temporal
+      receiver: 'slack-temporal'
+      group_wait: 30s
+
+# Inhibition rules
+inhibit_rules:
+  # Inhibit warning if critical is firing
+  - source_match:
+      severity: 'critical'
+    target_match:
+      severity: 'warning'
+    equal: ['alertname', 'cluster', 'service']
+
+# Notification receivers
+receivers:
+  # Default receiver (email)
+  - name: 'default'
+    email_configs:
+      - to: 'ops-team@vpp-platform.com'
+        headers:
+          Subject: '[VPP Alert] {{ .GroupLabels.alertname }}'
+        html: |
+          <h3>Alert: {{ .GroupLabels.alertname }}</h3>
+          <p><strong>Severity:</strong> {{ .CommonLabels.severity }}</p>
+          <p><strong>Summary:</strong> {{ .CommonAnnotations.summary }}</p>
+          <p><strong>Description:</strong> {{ .CommonAnnotations.description }}</p>
+          <p><strong>Time:</strong> {{ .StartsAt }}</p>
+
+  # Slack receiver (general)
+  - name: 'slack'
+    slack_configs:
+      - api_url: 'https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK'
+        channel: '#vpp-alerts'
+        title: '{{ .GroupLabels.alertname }}'
+        text: |
+          *Severity:* {{ .CommonLabels.severity }}
+          *Summary:* {{ .CommonAnnotations.summary }}
+          *Description:* {{ .CommonAnnotations.description }}
+        send_resolved: true
+
+  # Slack receiver (Kafka)
+  - name: 'slack-kafka'
+    slack_configs:
+      - api_url: 'https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK'
+        channel: '#vpp-kafka-alerts'
+        title: 'Kafka Alert: {{ .GroupLabels.alertname }}'
+        text: |
+          *Severity:* {{ .CommonLabels.severity }}
+          *Summary:* {{ .CommonAnnotations.summary }}
+          *Description:* {{ .CommonAnnotations.description }}
+        send_resolved: true
+
+  # Slack receiver (Redis)
+  - name: 'slack-redis'
+    slack_configs:
+      - api_url: 'https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK'
+        channel: '#vpp-redis-alerts'
+        title: 'Redis Alert: {{ .GroupLabels.alertname }}'
+        text: |
+          *Severity:* {{ .CommonLabels.severity }}
+          *Summary:* {{ .CommonAnnotations.summary }}
+          *Description:* {{ .CommonAnnotations.description }}
+        send_resolved: true
+
+  # Slack receiver (Temporal)
+  - name: 'slack-temporal'
+    slack_configs:
+      - api_url: 'https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK'
+        channel: '#vpp-temporal-alerts'
+        title: 'Temporal Alert: {{ .GroupLabels.alertname }}'
+        text: |
+          *Severity:* {{ .CommonLabels.severity }}
+          *Summary:* {{ .CommonAnnotations.summary }}
+          *Description:* {{ .CommonAnnotations.description }}
+        send_resolved: true
+
+  # PagerDuty receiver (critical alerts)
+  - name: 'pagerduty'
+    pagerduty_configs:
+      - service_key: 'YOUR_PAGERDUTY_SERVICE_KEY'
+        description: '{{ .CommonAnnotations.summary }}'
+        details:
+          severity: '{{ .CommonLabels.severity }}'
+          description: '{{ .CommonAnnotations.description }}'
+          alertname: '{{ .GroupLabels.alertname }}'

@@ -1,0 +1,466 @@
+# Dapr HA Configuration
+# Multi-replica control plane with Pod Disruption Budgets
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: dapr-system
+  labels:
+    app.kubernetes.io/name: dapr
+---
+# Dapr Operator Deployment (HA)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dapr-operator
+  namespace: dapr-system
+  labels:
+    app: dapr-operator
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: dapr-operator
+  template:
+    metadata:
+      labels:
+        app: dapr-operator
+    spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                  - key: app
+                    operator: In
+                    values:
+                      - dapr-operator
+              topologyKey: kubernetes.io/hostname
+      serviceAccountName: dapr-operator
+      containers:
+        - name: dapr-operator
+          image: daprio/dapr:1.12.4
+          args:
+            - --watch-interval
+            - "0"
+            - --max-pod-restarts-per-minute
+            - "20"
+            - --log-level
+            - info
+            - --log-as-json
+            - "true"
+          ports:
+            - containerPort: 6500
+              name: api
+          env:
+            - name: NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          resources:
+            requests:
+              memory: 128Mi
+              cpu: 100m
+            limits:
+              memory: 256Mi
+              cpu: 200m
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 3
+---
+# Dapr Sidecar Injector Deployment (HA)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dapr-sidecar-injector
+  namespace: dapr-system
+  labels:
+    app: dapr-sidecar-injector
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: dapr-sidecar-injector
+  template:
+    metadata:
+      labels:
+        app: dapr-sidecar-injector
+    spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                  - key: app
+                    operator: In
+                    values:
+                      - dapr-sidecar-injector
+              topologyKey: kubernetes.io/hostname
+      serviceAccountName: dapr-injector
+      containers:
+        - name: dapr-sidecar-injector
+          image: daprio/dapr:1.12.4
+          args:
+            - --log-level
+            - info
+            - --log-as-json
+            - "true"
+            - --metrics-port
+            - "9090"
+          ports:
+            - containerPort: 4000
+              name: https
+            - containerPort: 9090
+              name: metrics
+          env:
+            - name: TLS_CERT_FILE
+              value: /dapr/cert/tls.crt
+            - name: TLS_KEY_FILE
+              value: /dapr/cert/tls.key
+            - name: SIDECAR_IMAGE
+              value: daprio/daprd:1.12.4
+            - name: SIDECAR_IMAGE_PULL_POLICY
+              value: IfNotPresent
+            - name: NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          resources:
+            requests:
+              memory: 128Mi
+              cpu: 100m
+            limits:
+              memory: 256Mi
+              cpu: 200m
+          volumeMounts:
+            - name: cert
+              mountPath: /dapr/cert
+              readOnly: true
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 3
+      volumes:
+        - name: cert
+          secret:
+            secretName: dapr-sidecar-injector-cert
+---
+# Dapr Placement Service StatefulSet (HA)
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: dapr-placement-server
+  namespace: dapr-system
+  labels:
+    app: dapr-placement-server
+spec:
+  serviceName: dapr-placement-server
+  replicas: 3
+  selector:
+    matchLabels:
+      app: dapr-placement-server
+  template:
+    metadata:
+      labels:
+        app: dapr-placement-server
+    spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                  - key: app
+                    operator: In
+                    values:
+                      - dapr-placement-server
+              topologyKey: kubernetes.io/hostname
+      serviceAccountName: dapr-placement
+      containers:
+        - name: dapr-placement-server
+          image: daprio/dapr:1.12.4
+          args:
+            - --log-level
+            - info
+            - --log-as-json
+            - "true"
+            - --replicationFactor
+            - "100"
+            - --initial-cluster
+            - dapr-placement-server-0=dapr-placement-server-0.dapr-placement-server.dapr-system.svc.cluster.local:8201,dapr-placement-server-1=dapr-placement-server-1.dapr-placement-server.dapr-system.svc.cluster.local:8201,dapr-placement-server-2=dapr-placement-server-2.dapr-placement-server.dapr-system.svc.cluster.local:8201
+          ports:
+            - containerPort: 50005
+              name: api
+            - containerPort: 8201
+              name: raft
+          env:
+            - name: PLACEMENT_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          resources:
+            requests:
+              memory: 128Mi
+              cpu: 100m
+            limits:
+              memory: 256Mi
+              cpu: 200m
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 3
+---
+# Dapr Sentry Service Deployment (HA)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dapr-sentry
+  namespace: dapr-system
+  labels:
+    app: dapr-sentry
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: dapr-sentry
+  template:
+    metadata:
+      labels:
+        app: dapr-sentry
+    spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                  - key: app
+                    operator: In
+                    values:
+                      - dapr-sentry
+              topologyKey: kubernetes.io/hostname
+      serviceAccountName: dapr-sentry
+      containers:
+        - name: dapr-sentry
+          image: daprio/dapr:1.12.4
+          args:
+            - --log-level
+            - info
+            - --log-as-json
+            - "true"
+            - --enable-metrics
+            - "true"
+            - --metrics-port
+            - "9090"
+            - --trust-domain
+            - cluster.local
+          ports:
+            - containerPort: 50001
+              name: grpc
+            - containerPort: 9090
+              name: metrics
+          env:
+            - name: NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          resources:
+            requests:
+              memory: 128Mi
+              cpu: 100m
+            limits:
+              memory: 256Mi
+              cpu: 200m
+          volumeMounts:
+            - name: credentials
+              mountPath: /var/run/dapr/credentials
+              readOnly: true
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 3
+      volumes:
+        - name: credentials
+          secret:
+            secretName: dapr-trust-bundle
+---
+# Services
+apiVersion: v1
+kind: Service
+metadata:
+  name: dapr-api
+  namespace: dapr-system
+spec:
+  selector:
+    app: dapr-operator
+  ports:
+    - name: api
+      port: 6500
+      targetPort: 6500
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dapr-sidecar-injector
+  namespace: dapr-system
+spec:
+  selector:
+    app: dapr-sidecar-injector
+  ports:
+    - name: https
+      port: 443
+      targetPort: 4000
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dapr-placement-server
+  namespace: dapr-system
+spec:
+  clusterIP: None
+  selector:
+    app: dapr-placement-server
+  ports:
+    - name: api
+      port: 50005
+      targetPort: 50005
+    - name: raft
+      port: 8201
+      targetPort: 8201
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dapr-sentry
+  namespace: dapr-system
+spec:
+  selector:
+    app: dapr-sentry
+  ports:
+    - name: grpc
+      port: 50001
+      targetPort: 50001
+  type: ClusterIP
+---
+# Pod Disruption Budgets
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: dapr-operator-pdb
+  namespace: dapr-system
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: dapr-operator
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: dapr-sidecar-injector-pdb
+  namespace: dapr-system
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: dapr-sidecar-injector
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: dapr-placement-server-pdb
+  namespace: dapr-system
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: dapr-placement-server
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: dapr-sentry-pdb
+  namespace: dapr-system
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: dapr-sentry
+---
+# Dapr Components for VPP Platform
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: statestore
+  namespace: vpp-platform
+spec:
+  type: state.redis
+  version: v1
+  metadata:
+    - name: redisHost
+      value: redis.redis.svc.cluster.local:6379
+    - name: redisPassword
+      secretKeyRef:
+        name: redis-credentials
+        key: password
+    - name: actorStateStore
+      value: "true"
+---
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: pubsub
+  namespace: vpp-platform
+spec:
+  type: pubsub.kafka
+  version: v1
+  metadata:
+    - name: brokers
+      value: vpp-kafka-cluster-kafka-bootstrap.vpp-platform.svc.cluster.local:9092
+    - name: authType
+      value: none
+    - name: consumerGroup
+      value: vpp-dapr-consumer
+---
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: secretstore
+  namespace: vpp-platform
+spec:
+  type: secretstores.kubernetes
+  version: v1
+  metadata: []

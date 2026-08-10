@@ -1,0 +1,188 @@
+# VPP Platform Alert Rules
+# Version: v21.0
+
+groups:
+  - name: vpp_kafka_alerts
+    interval: 30s
+    rules:
+      - alert: KafkaHighErrorRate
+        expr: rate(kafka_messages_published_total{status="error"}[5m]) > 10
+        for: 5m
+        labels:
+          severity: warning
+          component: kafka
+        annotations:
+          summary: "High Kafka error rate detected"
+          description: "Kafka error rate is {{ $value }} errors/minute (threshold: 10)"
+
+      - alert: KafkaLowSuccessRate
+        expr: (sum(rate(kafka_messages_published_total{status="success"}[5m])) / sum(rate(kafka_messages_published_total[5m]))) * 100 < 95
+        for: 10m
+        labels:
+          severity: warning
+          component: kafka
+        annotations:
+          summary: "Kafka success rate below threshold"
+          description: "Kafka success rate is {{ $value }}% (threshold: 95%)"
+
+      - alert: KafkaHighLatency
+        expr: histogram_quantile(0.99, rate(kafka_publish_duration_seconds_bucket[5m])) > 1
+        for: 5m
+        labels:
+          severity: warning
+          component: kafka
+        annotations:
+          summary: "Kafka P99 latency high"
+          description: "Kafka P99 latency is {{ $value }}s (threshold: 1s)"
+
+  - name: vpp_redis_alerts
+    interval: 30s
+    rules:
+      - alert: RedisLowHitRate
+        expr: (redis_keyspace_hits_total / (redis_keyspace_hits_total + redis_keyspace_misses_total)) * 100 < 70
+        for: 10m
+        labels:
+          severity: warning
+          component: redis
+        annotations:
+          summary: "Redis cache hit rate low"
+          description: "Redis hit rate is {{ $value }}% (threshold: 70%)"
+
+      - alert: RedisHighMemoryUsage
+        expr: redis_memory_used_bytes > 1073741824
+        for: 5m
+        labels:
+          severity: warning
+          component: redis
+        annotations:
+          summary: "Redis memory usage high"
+          description: "Redis memory usage is {{ $value | humanize }}B (threshold: 1GB)"
+
+      - alert: RedisHighLatency
+        expr: histogram_quantile(0.99, rate(redis_command_duration_seconds_bucket[5m])) > 0.01
+        for: 5m
+        labels:
+          severity: warning
+          component: redis
+        annotations:
+          summary: "Redis P99 latency high"
+          description: "Redis P99 latency is {{ $value }}s (threshold: 10ms)"
+
+      - alert: RedisHighEvictionRate
+        expr: rate(redis_evicted_keys_total[5m]) > 100
+        for: 5m
+        labels:
+          severity: warning
+          component: redis
+        annotations:
+          summary: "Redis high eviction rate"
+          description: "Redis eviction rate is {{ $value }} keys/sec (threshold: 100)"
+
+  - name: vpp_temporal_alerts
+    interval: 30s
+    rules:
+      - alert: TemporalLowSuccessRate
+        expr: (sum(rate(temporal_workflow_execution_total{status="completed"}[5m])) / sum(rate(temporal_workflow_execution_total[5m]))) * 100 < 95
+        for: 10m
+        labels:
+          severity: warning
+          component: temporal
+        annotations:
+          summary: "Temporal workflow success rate low"
+          description: "Workflow success rate is {{ $value }}% (threshold: 95%)"
+
+      - alert: TemporalNoActiveWorkers
+        expr: temporal_worker_active_count < 1
+        for: 1m
+        labels:
+          severity: critical
+          component: temporal
+        annotations:
+          summary: "No active Temporal workers"
+          description: "Temporal worker count is {{ $value }} (expected: >= 1)"
+
+      - alert: TemporalHighBacklog
+        expr: temporal_task_queue_backlog{queue="payment-processing"} > 100
+        for: 5m
+        labels:
+          severity: warning
+          component: temporal
+        annotations:
+          summary: "Temporal task queue backlog high"
+          description: "Task queue backlog is {{ $value }} tasks (threshold: 100)"
+
+      - alert: TemporalHighDuration
+        expr: histogram_quantile(0.99, rate(temporal_workflow_duration_seconds_bucket[5m])) > 30
+        for: 10m
+        labels:
+          severity: warning
+          component: temporal
+        annotations:
+          summary: "Temporal workflow duration high"
+          description: "Workflow P99 duration is {{ $value }}s (threshold: 30s)"
+
+      - alert: TemporalWorkerHighCPU
+        expr: rate(process_cpu_seconds_total{job="temporal-worker"}[5m]) * 100 > 80
+        for: 10m
+        labels:
+          severity: warning
+          component: temporal
+        annotations:
+          summary: "Temporal worker CPU usage high"
+          description: "Worker CPU usage is {{ $value }}% (threshold: 80%)"
+
+  - name: vpp_system_alerts
+    interval: 30s
+    rules:
+      - alert: HighCPUUsage
+        expr: 100 - (avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 80
+        for: 10m
+        labels:
+          severity: warning
+          component: system
+        annotations:
+          summary: "High CPU usage detected"
+          description: "CPU usage is {{ $value }}% on {{ $labels.instance }}"
+
+      - alert: HighMemoryUsage
+        expr: (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100 > 85
+        for: 10m
+        labels:
+          severity: warning
+          component: system
+        annotations:
+          summary: "High memory usage detected"
+          description: "Memory usage is {{ $value }}% on {{ $labels.instance }}"
+
+      - alert: DiskSpaceLow
+        expr: (1 - (node_filesystem_avail_bytes{fstype!~"tmpfs|fuse.lxcfs"} / node_filesystem_size_bytes)) * 100 > 85
+        for: 10m
+        labels:
+          severity: warning
+          component: system
+        annotations:
+          summary: "Disk space low"
+          description: "Disk usage is {{ $value }}% on {{ $labels.instance }}:{{ $labels.mountpoint }}"
+
+  - name: vpp_application_alerts
+    interval: 30s
+    rules:
+      - alert: HighErrorRate
+        expr: rate(http_requests_total{status=~"5.."}[5m]) > 10
+        for: 5m
+        labels:
+          severity: warning
+          component: application
+        annotations:
+          summary: "High application error rate"
+          description: "Error rate is {{ $value }} errors/sec (threshold: 10)"
+
+      - alert: SlowResponseTime
+        expr: histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[5m])) > 1
+        for: 5m
+        labels:
+          severity: warning
+          component: application
+        annotations:
+          summary: "Slow application response time"
+          description: "P95 response time is {{ $value }}s (threshold: 1s)"

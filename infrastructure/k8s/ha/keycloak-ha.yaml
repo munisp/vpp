@@ -1,0 +1,256 @@
+# Keycloak HA Configuration
+# Multi-replica deployment with external PostgreSQL database
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: keycloak
+  labels:
+    app.kubernetes.io/name: keycloak
+---
+# Keycloak ConfigMap
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: keycloak-config
+  namespace: keycloak
+data:
+  KC_HEALTH_ENABLED: "true"
+  KC_METRICS_ENABLED: "true"
+  KC_HTTP_ENABLED: "true"
+  KC_HOSTNAME_STRICT: "false"
+  KC_PROXY: "edge"
+  KC_CACHE: "ispn"
+  KC_CACHE_STACK: "kubernetes"
+  JAVA_OPTS_APPEND: "-Djgroups.dns.query=keycloak-headless.keycloak.svc.cluster.local"
+---
+# Keycloak StatefulSet
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: keycloak
+  namespace: keycloak
+spec:
+  serviceName: keycloak-headless
+  replicas: 3
+  selector:
+    matchLabels:
+      app: keycloak
+  template:
+    metadata:
+      labels:
+        app: keycloak
+    spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                  - key: app
+                    operator: In
+                    values:
+                      - keycloak
+              topologyKey: kubernetes.io/hostname
+      containers:
+        - name: keycloak
+          image: quay.io/keycloak/keycloak:23.0.3
+          args:
+            - start
+            - --cache=ispn
+            - --cache-stack=kubernetes
+            - --hostname-strict=false
+            - --http-enabled=true
+          ports:
+            - containerPort: 8080
+              name: http
+            - containerPort: 8443
+              name: https
+            - containerPort: 7800
+              name: jgroups
+          env:
+            - name: KC_DB
+              value: postgres
+            - name: KC_DB_URL
+              value: jdbc:postgresql://postgres-ha-primary.vpp-platform.svc.cluster.local:5432/keycloak
+            - name: KC_DB_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: keycloak-db-credentials
+                  key: username
+            - name: KC_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: keycloak-db-credentials
+                  key: password
+            - name: KEYCLOAK_ADMIN
+              valueFrom:
+                secretKeyRef:
+                  name: keycloak-admin-credentials
+                  key: username
+            - name: KEYCLOAK_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: keycloak-admin-credentials
+                  key: password
+            - name: KC_HEALTH_ENABLED
+              value: "true"
+            - name: KC_METRICS_ENABLED
+              value: "true"
+            - name: KC_PROXY
+              value: edge
+            - name: JAVA_OPTS_APPEND
+              value: "-Djgroups.dns.query=keycloak-headless.keycloak.svc.cluster.local -Xms512m -Xmx1024m"
+          envFrom:
+            - configMapRef:
+                name: keycloak-config
+          resources:
+            requests:
+              memory: 1Gi
+              cpu: 500m
+            limits:
+              memory: 2Gi
+              cpu: "1"
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: 8080
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+          startupProbe:
+            httpGet:
+              path: /health/started
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 30
+---
+# Keycloak Headless Service (for JGroups clustering)
+apiVersion: v1
+kind: Service
+metadata:
+  name: keycloak-headless
+  namespace: keycloak
+spec:
+  clusterIP: None
+  selector:
+    app: keycloak
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+    - name: jgroups
+      port: 7800
+      targetPort: 7800
+---
+# Keycloak Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: keycloak
+  namespace: keycloak
+spec:
+  selector:
+    app: keycloak
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+    - name: https
+      port: 443
+      targetPort: 8443
+  type: ClusterIP
+---
+# Keycloak Ingress
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: keycloak
+  namespace: keycloak
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-buffer-size: "128k"
+    nginx.ingress.kubernetes.io/proxy-buffers-number: "4"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: auth.vpp-platform.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: keycloak
+                port:
+                  number: 80
+  tls:
+    - hosts:
+        - auth.vpp-platform.com
+      secretName: keycloak-tls
+---
+# Secrets (placeholders - use sealed secrets in production)
+apiVersion: v1
+kind: Secret
+metadata:
+  name: keycloak-db-credentials
+  namespace: keycloak
+type: Opaque
+stringData:
+  username: "${KEYCLOAK_DB_USER}"
+  password: "${KEYCLOAK_DB_PASSWORD}"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: keycloak-admin-credentials
+  namespace: keycloak
+type: Opaque
+stringData:
+  username: "${KEYCLOAK_ADMIN_USER}"
+  password: "${KEYCLOAK_ADMIN_PASSWORD}"
+---
+# Pod Disruption Budget
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: keycloak-pdb
+  namespace: keycloak
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: keycloak
+---
+# Horizontal Pod Autoscaler
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: keycloak-hpa
+  namespace: keycloak
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: StatefulSet
+    name: keycloak
+  minReplicas: 3
+  maxReplicas: 6
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80

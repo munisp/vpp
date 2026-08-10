@@ -1,0 +1,20 @@
+CREATE TABLE `notification_preferences` (
+	`id` int AUTO_INCREMENT NOT NULL,
+	`user_id` int NOT NULL,
+	`email_payment_received` boolean NOT NULL DEFAULT true,
+	`email_achievement_unlocked` boolean NOT NULL DEFAULT true,
+	`email_dr_event_reminder` boolean NOT NULL DEFAULT true,
+	`email_dr_event_created` boolean NOT NULL DEFAULT true,
+	`email_leaderboard_rank_change` boolean NOT NULL DEFAULT true,
+	`email_weekly_summary` boolean NOT NULL DEFAULT true,
+	`email_monthly_summary` boolean NOT NULL DEFAULT true,
+	`push_payment_received` boolean NOT NULL DEFAULT true,
+	`push_achievement_unlocked` boolean NOT NULL DEFAULT true,
+	`push_dr_event_reminder` boolean NOT NULL DEFAULT true,
+	`push_dr_event_created` boolean NOT NULL DEFAULT true,
+	`push_leaderboard_rank_change` boolean NOT NULL DEFAULT false,
+	`created_at` timestamp NOT NULL DEFAULT (now()),
+	`updated_at` timestamp NOT NULL DEFAULT (now()) ON UPDATE CURRENT_TIMESTAMP,
+	CONSTRAINT `notification_preferences_id` PRIMARY KEY(`id`),
+	CONSTRAINT `notification_preferences_user_id_unique` UNIQUE(`user_id`)
+);

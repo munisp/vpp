@@ -1,0 +1,140 @@
+version: '3.8'
+
+services:
+  # Fluvio cluster (single node for development)
+  fluvio:
+    image: infinyon/fluvio:latest
+    container_name: fluvio
+    ports:
+      - "9003:9003"
+    environment:
+      - RUST_LOG=info
+    volumes:
+      - fluvio-data:/var/lib/fluvio
+    networks:
+      - vpp-network
+
+  # Mosquitto MQTT Broker
+  mosquitto:
+    image: eclipse-mosquitto:2
+    container_name: mosquitto
+    ports:
+      - "1883:1883"
+      - "8883:8883"
+    volumes:
+      - ../mqtt/mosquitto.conf:/mosquitto/config/mosquitto.conf
+      - ../mqtt/certs:/mosquitto/certs
+      - ../mqtt/data:/mosquitto/data
+      - ../mqtt/log:/mosquitto/log
+    networks:
+      - vpp-network
+
+  # MQTT-Fluvio Bridge (Go)
+  mqtt-fluvio-bridge:
+    build:
+      context: ./mqtt-fluvio-bridge
+      dockerfile: Dockerfile
+    container_name: mqtt-fluvio-bridge
+    depends_on:
+      - mosquitto
+      - fluvio
+    environment:
+      - MQTT_BROKER_URL=ssl://mosquitto:8883
+      - FLUVIO_ENDPOINT=fluvio:9003
+    volumes:
+      - ./mqtt-fluvio-bridge/config:/root/config
+      - ../mqtt/certs:/root/certs
+    networks:
+      - vpp-network
+    restart: unless-stopped
+
+  # Database Consumer (Python)
+  database-consumer:
+    build:
+      context: ./fluvio-consumers
+      dockerfile: Dockerfile
+    container_name: database-consumer
+    command: python database/consumer.py
+    depends_on:
+      - fluvio
+    environment:
+      - FLUVIO_TOPIC=telemetry
+      - DB_HOST=${DB_HOST:-localhost}
+      - DB_PORT=${DB_PORT:-3306}
+      - DB_USER=${DB_USER:-root}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_NAME=${DB_NAME:-vpp}
+    volumes:
+      - ./fluvio-consumers/logs:/app/logs
+    networks:
+      - vpp-network
+    restart: unless-stopped
+
+  # Analytics Consumer (Python)
+  analytics-consumer:
+    build:
+      context: ./fluvio-consumers
+      dockerfile: Dockerfile
+    container_name: analytics-consumer
+    command: python analytics/consumer.py
+    depends_on:
+      - fluvio
+    environment:
+      - FLUVIO_TOPIC=telemetry
+      - WINDOW_SIZE_SECONDS=60
+    volumes:
+      - ./fluvio-consumers/logs:/app/logs
+    networks:
+      - vpp-network
+    restart: unless-stopped
+
+  # Prometheus
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - ./monitoring/alerts.yml:/etc/prometheus/alerts.yml
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+    networks:
+      - vpp-network
+
+  # Grafana
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    ports:
+      - "3001:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./monitoring/grafana-dashboard.json:/etc/grafana/provisioning/dashboards/vpp.json
+    depends_on:
+      - prometheus
+    networks:
+      - vpp-network
+
+  # Node Exporter
+  node-exporter:
+    image: prom/node-exporter:latest
+    container_name: node-exporter
+    ports:
+      - "9100:9100"
+    networks:
+      - vpp-network
+
+volumes:
+  fluvio-data:
+  prometheus-data:
+  grafana-data:
+
+networks:
+  vpp-network:
+    driver: bridge

@@ -1,0 +1,1 @@
+-- Migration 0012: Skipped (schema change reverted)

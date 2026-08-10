@@ -1,0 +1,236 @@
+# Permify HA Configuration
+# Stateless authorization service backed by HA PostgreSQL
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: permify
+  labels:
+    app.kubernetes.io/name: permify
+---
+# Permify ConfigMap
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: permify-config
+  namespace: permify
+data:
+  config.yaml: |
+    server:
+      http:
+        enabled: true
+        port: 3476
+      grpc:
+        enabled: true
+        port: 3478
+      
+    logger:
+      level: info
+      output: stdout
+      
+    profiler:
+      enabled: true
+      port: 6060
+      
+    authn:
+      enabled: true
+      method: preshared
+      preshared:
+        keys:
+          - "${PERMIFY_API_KEY}"
+      
+    tracer:
+      enabled: true
+      exporter: otlp
+      endpoint: otel-collector.monitoring.svc.cluster.local:4317
+      insecure: true
+      
+    meter:
+      enabled: true
+      exporter: otlp
+      endpoint: otel-collector.monitoring.svc.cluster.local:4317
+      insecure: true
+      
+    service:
+      circuit_breaker: true
+      watch:
+        enabled: true
+      schema:
+        cache:
+          number_of_counters: 1000
+          max_cost: 10MiB
+      permission:
+        bulk_limit: 100
+        concurrency_limit: 100
+      relationship:
+        bulk_limit: 100
+        concurrency_limit: 100
+---
+# Permify Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: permify
+  namespace: permify
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: permify
+  template:
+    metadata:
+      labels:
+        app: permify
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "6060"
+        prometheus.io/path: /metrics
+    spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app
+                      operator: In
+                      values:
+                        - permify
+                topologyKey: kubernetes.io/hostname
+      containers:
+        - name: permify
+          image: ghcr.io/permify/permify:v0.8.5
+          args:
+            - serve
+            - --config=/etc/permify/config.yaml
+          ports:
+            - containerPort: 3476
+              name: http
+            - containerPort: 3478
+              name: grpc
+            - containerPort: 6060
+              name: profiler
+          env:
+            - name: PERMIFY_DATABASE_ENGINE
+              value: postgres
+            - name: PERMIFY_DATABASE_URI
+              valueFrom:
+                secretKeyRef:
+                  name: permify-db-credentials
+                  key: uri
+            - name: PERMIFY_DATABASE_MAX_OPEN_CONNECTIONS
+              value: "20"
+            - name: PERMIFY_DATABASE_MAX_IDLE_CONNECTIONS
+              value: "5"
+            - name: PERMIFY_DATABASE_MAX_CONNECTION_LIFETIME
+              value: "300s"
+            - name: PERMIFY_DATABASE_MAX_CONNECTION_IDLE_TIME
+              value: "60s"
+            - name: PERMIFY_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: permify-credentials
+                  key: api-key
+          resources:
+            requests:
+              memory: 256Mi
+              cpu: 250m
+            limits:
+              memory: 512Mi
+              cpu: 500m
+          volumeMounts:
+            - name: config
+              mountPath: /etc/permify
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 3476
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 3476
+            initialDelaySeconds: 5
+            periodSeconds: 5
+      volumes:
+        - name: config
+          configMap:
+            name: permify-config
+---
+# Permify Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: permify
+  namespace: permify
+spec:
+  selector:
+    app: permify
+  ports:
+    - name: http
+      port: 3476
+      targetPort: 3476
+    - name: grpc
+      port: 3478
+      targetPort: 3478
+  type: ClusterIP
+---
+# Permify Secrets
+apiVersion: v1
+kind: Secret
+metadata:
+  name: permify-db-credentials
+  namespace: permify
+type: Opaque
+stringData:
+  uri: "postgres://${PERMIFY_DB_USER}:${PERMIFY_DB_PASSWORD}@postgres-ha-primary.vpp-platform.svc.cluster.local:5432/permify?sslmode=require"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: permify-credentials
+  namespace: permify
+type: Opaque
+stringData:
+  api-key: "${PERMIFY_API_KEY}"
+---
+# Pod Disruption Budget
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: permify-pdb
+  namespace: permify
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: permify
+---
+# Horizontal Pod Autoscaler
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: permify-hpa
+  namespace: permify
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: permify
+  minReplicas: 3
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80

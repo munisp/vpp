@@ -1,0 +1,493 @@
+# OpenStack HA Configuration
+# Heat templates and configurations for deploying VPP Platform on OpenStack
+---
+# This file contains OpenStack Heat templates for HA deployment
+# Convert to actual Heat template format when deploying
+
+# OpenStack Deployment Configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: openstack-deployment-config
+  namespace: vpp-platform
+data:
+  heat-template.yaml: |
+    heat_template_version: 2021-04-16
+    
+    description: VPP Platform HA Deployment on OpenStack
+    
+    parameters:
+      key_name:
+        type: string
+        description: SSH key pair name
+        default: vpp-platform-key
+      
+      image:
+        type: string
+        description: Image ID for instances
+        default: ubuntu-22.04-server
+      
+      flavor_api:
+        type: string
+        description: Flavor for API servers
+        default: m1.large
+      
+      flavor_worker:
+        type: string
+        description: Flavor for worker nodes
+        default: m1.medium
+      
+      flavor_db:
+        type: string
+        description: Flavor for database servers
+        default: m1.xlarge
+      
+      external_network:
+        type: string
+        description: External network for floating IPs
+        default: external
+      
+      dns_nameservers:
+        type: comma_delimited_list
+        description: DNS nameservers
+        default: "8.8.8.8,8.8.4.4"
+      
+      availability_zones:
+        type: comma_delimited_list
+        description: Availability zones for HA
+        default: "az1,az2,az3"
+    
+    resources:
+      # Network Infrastructure
+      vpp_network:
+        type: OS::Neutron::Net
+        properties:
+          name: vpp-platform-network
+          admin_state_up: true
+      
+      vpp_subnet:
+        type: OS::Neutron::Subnet
+        properties:
+          name: vpp-platform-subnet
+          network_id: { get_resource: vpp_network }
+          cidr: 10.0.0.0/16
+          gateway_ip: 10.0.0.1
+          dns_nameservers: { get_param: dns_nameservers }
+          allocation_pools:
+            - start: 10.0.1.10
+              end: 10.0.255.250
+      
+      vpp_router:
+        type: OS::Neutron::Router
+        properties:
+          name: vpp-platform-router
+          external_gateway_info:
+            network: { get_param: external_network }
+      
+      vpp_router_interface:
+        type: OS::Neutron::RouterInterface
+        properties:
+          router_id: { get_resource: vpp_router }
+          subnet_id: { get_resource: vpp_subnet }
+      
+      # Security Groups
+      api_security_group:
+        type: OS::Neutron::SecurityGroup
+        properties:
+          name: vpp-api-sg
+          rules:
+            - direction: ingress
+              protocol: tcp
+              port_range_min: 80
+              port_range_max: 80
+              remote_ip_prefix: 0.0.0.0/0
+            - direction: ingress
+              protocol: tcp
+              port_range_min: 443
+              port_range_max: 443
+              remote_ip_prefix: 0.0.0.0/0
+            - direction: ingress
+              protocol: tcp
+              port_range_min: 22
+              port_range_max: 22
+              remote_ip_prefix: 10.0.0.0/8
+            - direction: ingress
+              protocol: tcp
+              port_range_min: 3000
+              port_range_max: 3001
+              remote_ip_prefix: 10.0.0.0/16
+      
+      db_security_group:
+        type: OS::Neutron::SecurityGroup
+        properties:
+          name: vpp-db-sg
+          rules:
+            - direction: ingress
+              protocol: tcp
+              port_range_min: 5432
+              port_range_max: 5432
+              remote_ip_prefix: 10.0.0.0/16
+            - direction: ingress
+              protocol: tcp
+              port_range_min: 6379
+              port_range_max: 6379
+              remote_ip_prefix: 10.0.0.0/16
+            - direction: ingress
+              protocol: tcp
+              port_range_min: 22
+              port_range_max: 22
+              remote_ip_prefix: 10.0.0.0/8
+      
+      worker_security_group:
+        type: OS::Neutron::SecurityGroup
+        properties:
+          name: vpp-worker-sg
+          rules:
+            - direction: ingress
+              protocol: tcp
+              port_range_min: 22
+              port_range_max: 22
+              remote_ip_prefix: 10.0.0.0/8
+            - direction: ingress
+              protocol: tcp
+              port_range_min: 9092
+              port_range_max: 9092
+              remote_ip_prefix: 10.0.0.0/16
+            - direction: ingress
+              protocol: tcp
+              port_range_min: 7233
+              port_range_max: 7239
+              remote_ip_prefix: 10.0.0.0/16
+      
+      # Load Balancer
+      api_lb:
+        type: OS::Octavia::LoadBalancer
+        properties:
+          name: vpp-api-lb
+          vip_subnet: { get_resource: vpp_subnet }
+      
+      api_lb_listener_http:
+        type: OS::Octavia::Listener
+        properties:
+          name: vpp-api-http-listener
+          loadbalancer: { get_resource: api_lb }
+          protocol: HTTP
+          protocol_port: 80
+      
+      api_lb_listener_https:
+        type: OS::Octavia::Listener
+        properties:
+          name: vpp-api-https-listener
+          loadbalancer: { get_resource: api_lb }
+          protocol: HTTPS
+          protocol_port: 443
+      
+      api_lb_pool:
+        type: OS::Octavia::Pool
+        properties:
+          name: vpp-api-pool
+          listener: { get_resource: api_lb_listener_http }
+          lb_algorithm: ROUND_ROBIN
+          protocol: HTTP
+      
+      api_lb_healthmonitor:
+        type: OS::Octavia::HealthMonitor
+        properties:
+          pool: { get_resource: api_lb_pool }
+          type: HTTP
+          delay: 5
+          timeout: 5
+          max_retries: 3
+          http_method: GET
+          url_path: /health
+      
+      # API Server Group (Anti-Affinity)
+      api_server_group:
+        type: OS::Nova::ServerGroup
+        properties:
+          name: vpp-api-server-group
+          policies:
+            - anti-affinity
+      
+      # API Servers (HA across AZs)
+      api_server_1:
+        type: OS::Nova::Server
+        properties:
+          name: vpp-api-1
+          image: { get_param: image }
+          flavor: { get_param: flavor_api }
+          key_name: { get_param: key_name }
+          availability_zone: az1
+          networks:
+            - network: { get_resource: vpp_network }
+          security_groups:
+            - { get_resource: api_security_group }
+          scheduler_hints:
+            group: { get_resource: api_server_group }
+          user_data:
+            str_replace:
+              template: |
+                #!/bin/bash
+                apt-get update
+                apt-get install -y docker.io docker-compose
+                systemctl enable docker
+                systemctl start docker
+                # Pull and run VPP Platform
+                docker pull vpp-platform/consumer-platform:latest
+                docker run -d --name vpp-api \
+                  -p 3000:3000 -p 3001:3001 \
+                  -e DATABASE_URL=$DB_URL \
+                  -e REDIS_URL=$REDIS_URL \
+                  vpp-platform/consumer-platform:latest
+              params:
+                $DB_URL: { get_attr: [db_server_primary, first_address] }
+                $REDIS_URL: { get_attr: [redis_server_primary, first_address] }
+      
+      api_server_2:
+        type: OS::Nova::Server
+        properties:
+          name: vpp-api-2
+          image: { get_param: image }
+          flavor: { get_param: flavor_api }
+          key_name: { get_param: key_name }
+          availability_zone: az2
+          networks:
+            - network: { get_resource: vpp_network }
+          security_groups:
+            - { get_resource: api_security_group }
+          scheduler_hints:
+            group: { get_resource: api_server_group }
+      
+      api_server_3:
+        type: OS::Nova::Server
+        properties:
+          name: vpp-api-3
+          image: { get_param: image }
+          flavor: { get_param: flavor_api }
+          key_name: { get_param: key_name }
+          availability_zone: az3
+          networks:
+            - network: { get_resource: vpp_network }
+          security_groups:
+            - { get_resource: api_security_group }
+          scheduler_hints:
+            group: { get_resource: api_server_group }
+      
+      # Add API servers to load balancer pool
+      api_lb_member_1:
+        type: OS::Octavia::PoolMember
+        properties:
+          pool: { get_resource: api_lb_pool }
+          address: { get_attr: [api_server_1, first_address] }
+          protocol_port: 3000
+      
+      api_lb_member_2:
+        type: OS::Octavia::PoolMember
+        properties:
+          pool: { get_resource: api_lb_pool }
+          address: { get_attr: [api_server_2, first_address] }
+          protocol_port: 3000
+      
+      api_lb_member_3:
+        type: OS::Octavia::PoolMember
+        properties:
+          pool: { get_resource: api_lb_pool }
+          address: { get_attr: [api_server_3, first_address] }
+          protocol_port: 3000
+      
+      # Database Server Group (Anti-Affinity)
+      db_server_group:
+        type: OS::Nova::ServerGroup
+        properties:
+          name: vpp-db-server-group
+          policies:
+            - anti-affinity
+      
+      # Primary Database Server
+      db_server_primary:
+        type: OS::Nova::Server
+        properties:
+          name: vpp-db-primary
+          image: { get_param: image }
+          flavor: { get_param: flavor_db }
+          key_name: { get_param: key_name }
+          availability_zone: az1
+          networks:
+            - network: { get_resource: vpp_network }
+          security_groups:
+            - { get_resource: db_security_group }
+          scheduler_hints:
+            group: { get_resource: db_server_group }
+          block_device_mapping_v2:
+            - boot_index: 0
+              image_id: { get_param: image }
+              volume_size: 100
+              delete_on_termination: false
+      
+      # Replica Database Servers
+      db_server_replica_1:
+        type: OS::Nova::Server
+        properties:
+          name: vpp-db-replica-1
+          image: { get_param: image }
+          flavor: { get_param: flavor_db }
+          key_name: { get_param: key_name }
+          availability_zone: az2
+          networks:
+            - network: { get_resource: vpp_network }
+          security_groups:
+            - { get_resource: db_security_group }
+          scheduler_hints:
+            group: { get_resource: db_server_group }
+      
+      db_server_replica_2:
+        type: OS::Nova::Server
+        properties:
+          name: vpp-db-replica-2
+          image: { get_param: image }
+          flavor: { get_param: flavor_db }
+          key_name: { get_param: key_name }
+          availability_zone: az3
+          networks:
+            - network: { get_resource: vpp_network }
+          security_groups:
+            - { get_resource: db_security_group }
+          scheduler_hints:
+            group: { get_resource: db_server_group }
+      
+      # Redis Server Group
+      redis_server_group:
+        type: OS::Nova::ServerGroup
+        properties:
+          name: vpp-redis-server-group
+          policies:
+            - anti-affinity
+      
+      # Redis Primary
+      redis_server_primary:
+        type: OS::Nova::Server
+        properties:
+          name: vpp-redis-primary
+          image: { get_param: image }
+          flavor: { get_param: flavor_worker }
+          key_name: { get_param: key_name }
+          availability_zone: az1
+          networks:
+            - network: { get_resource: vpp_network }
+          security_groups:
+            - { get_resource: db_security_group }
+          scheduler_hints:
+            group: { get_resource: redis_server_group }
+      
+      # Redis Replicas
+      redis_server_replica_1:
+        type: OS::Nova::Server
+        properties:
+          name: vpp-redis-replica-1
+          image: { get_param: image }
+          flavor: { get_param: flavor_worker }
+          key_name: { get_param: key_name }
+          availability_zone: az2
+          networks:
+            - network: { get_resource: vpp_network }
+          security_groups:
+            - { get_resource: db_security_group }
+          scheduler_hints:
+            group: { get_resource: redis_server_group }
+      
+      redis_server_replica_2:
+        type: OS::Nova::Server
+        properties:
+          name: vpp-redis-replica-2
+          image: { get_param: image }
+          flavor: { get_param: flavor_worker }
+          key_name: { get_param: key_name }
+          availability_zone: az3
+          networks:
+            - network: { get_resource: vpp_network }
+          security_groups:
+            - { get_resource: db_security_group }
+          scheduler_hints:
+            group: { get_resource: redis_server_group }
+      
+      # Worker Servers
+      worker_server_group:
+        type: OS::Nova::ServerGroup
+        properties:
+          name: vpp-worker-server-group
+          policies:
+            - soft-anti-affinity
+      
+      trading_worker_1:
+        type: OS::Nova::Server
+        properties:
+          name: vpp-trading-worker-1
+          image: { get_param: image }
+          flavor: { get_param: flavor_worker }
+          key_name: { get_param: key_name }
+          availability_zone: az1
+          networks:
+            - network: { get_resource: vpp_network }
+          security_groups:
+            - { get_resource: worker_security_group }
+          scheduler_hints:
+            group: { get_resource: worker_server_group }
+      
+      trading_worker_2:
+        type: OS::Nova::Server
+        properties:
+          name: vpp-trading-worker-2
+          image: { get_param: image }
+          flavor: { get_param: flavor_worker }
+          key_name: { get_param: key_name }
+          availability_zone: az2
+          networks:
+            - network: { get_resource: vpp_network }
+          security_groups:
+            - { get_resource: worker_security_group }
+          scheduler_hints:
+            group: { get_resource: worker_server_group }
+      
+      trading_worker_3:
+        type: OS::Nova::Server
+        properties:
+          name: vpp-trading-worker-3
+          image: { get_param: image }
+          flavor: { get_param: flavor_worker }
+          key_name: { get_param: key_name }
+          availability_zone: az3
+          networks:
+            - network: { get_resource: vpp_network }
+          security_groups:
+            - { get_resource: worker_security_group }
+          scheduler_hints:
+            group: { get_resource: worker_server_group }
+      
+      # Floating IP for Load Balancer
+      api_floating_ip:
+        type: OS::Neutron::FloatingIP
+        properties:
+          floating_network: { get_param: external_network }
+      
+      api_floating_ip_association:
+        type: OS::Neutron::FloatingIPAssociation
+        properties:
+          floatingip_id: { get_resource: api_floating_ip }
+          port_id: { get_attr: [api_lb, vip_port_id] }
+    
+    outputs:
+      api_url:
+        description: VPP Platform API URL
+        value:
+          str_replace:
+            template: http://HOST
+            params:
+              HOST: { get_attr: [api_floating_ip, floating_ip_address] }
+      
+      db_primary_ip:
+        description: Database Primary IP
+        value: { get_attr: [db_server_primary, first_address] }
+      
+      redis_primary_ip:
+        description: Redis Primary IP
+        value: { get_attr: [redis_server_primary, first_address] }

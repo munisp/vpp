@@ -1,0 +1,1 @@
+ALTER TABLE `demandResponseEvents` MODIFY COLUMN `eventType` enum('peak_shaving','load_shifting','emergency','economic') NOT NULL;

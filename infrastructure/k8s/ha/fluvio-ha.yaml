@@ -1,0 +1,376 @@
+# Fluvio HA Configuration
+# Distributed streaming platform for real-time data processing
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: fluvio
+  labels:
+    app.kubernetes.io/name: fluvio
+---
+# Fluvio SC (Streaming Controller) StatefulSet
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: fluvio-sc
+  namespace: fluvio
+spec:
+  serviceName: fluvio-sc-headless
+  replicas: 3
+  selector:
+    matchLabels:
+      app: fluvio-sc
+  template:
+    metadata:
+      labels:
+        app: fluvio-sc
+    spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                  - key: app
+                    operator: In
+                    values:
+                      - fluvio-sc
+              topologyKey: kubernetes.io/hostname
+      serviceAccountName: fluvio-sc
+      containers:
+        - name: fluvio-sc
+          image: infinyon/fluvio:0.11.5
+          command:
+            - /fluvio-run
+            - sc
+            - --bind-public
+            - 0.0.0.0:9003
+            - --bind-private
+            - 0.0.0.0:9004
+          ports:
+            - containerPort: 9003
+              name: public
+            - containerPort: 9004
+              name: private
+          env:
+            - name: RUST_LOG
+              value: info
+            - name: FLV_SC_PRIVATE_HOST
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: FLV_SC_PUBLIC_HOST
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+          resources:
+            requests:
+              memory: 256Mi
+              cpu: 250m
+            limits:
+              memory: 512Mi
+              cpu: 500m
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/fluvio
+          livenessProbe:
+            tcpSocket:
+              port: 9003
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            tcpSocket:
+              port: 9003
+            initialDelaySeconds: 10
+            periodSeconds: 5
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        storageClassName: fast-ssd
+        resources:
+          requests:
+            storage: 10Gi
+---
+# Fluvio SPU (Streaming Processing Unit) StatefulSet
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: fluvio-spu
+  namespace: fluvio
+spec:
+  serviceName: fluvio-spu-headless
+  replicas: 3
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app: fluvio-spu
+  template:
+    metadata:
+      labels:
+        app: fluvio-spu
+    spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                  - key: app
+                    operator: In
+                    values:
+                      - fluvio-spu
+              topologyKey: kubernetes.io/hostname
+      serviceAccountName: fluvio-spu
+      containers:
+        - name: fluvio-spu
+          image: infinyon/fluvio:0.11.5
+          command:
+            - /fluvio-run
+            - spu
+            - --sc-addr
+            - fluvio-sc.fluvio.svc.cluster.local:9004
+            - --bind-public
+            - 0.0.0.0:9005
+            - --bind-private
+            - 0.0.0.0:9006
+          ports:
+            - containerPort: 9005
+              name: public
+            - containerPort: 9006
+              name: private
+          env:
+            - name: RUST_LOG
+              value: info
+            - name: FLV_SPU_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: FLV_SPU_PRIVATE_HOST
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: FLV_SPU_PUBLIC_HOST
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+          resources:
+            requests:
+              memory: 512Mi
+              cpu: 500m
+            limits:
+              memory: 1Gi
+              cpu: "1"
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/fluvio
+          livenessProbe:
+            tcpSocket:
+              port: 9005
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            tcpSocket:
+              port: 9005
+            initialDelaySeconds: 10
+            periodSeconds: 5
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        storageClassName: fast-ssd
+        resources:
+          requests:
+            storage: 50Gi
+---
+# Fluvio SC Headless Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: fluvio-sc-headless
+  namespace: fluvio
+spec:
+  clusterIP: None
+  selector:
+    app: fluvio-sc
+  ports:
+    - name: public
+      port: 9003
+      targetPort: 9003
+    - name: private
+      port: 9004
+      targetPort: 9004
+---
+# Fluvio SC Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: fluvio-sc
+  namespace: fluvio
+spec:
+  selector:
+    app: fluvio-sc
+  ports:
+    - name: public
+      port: 9003
+      targetPort: 9003
+    - name: private
+      port: 9004
+      targetPort: 9004
+  type: ClusterIP
+---
+# Fluvio SPU Headless Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: fluvio-spu-headless
+  namespace: fluvio
+spec:
+  clusterIP: None
+  selector:
+    app: fluvio-spu
+  ports:
+    - name: public
+      port: 9005
+      targetPort: 9005
+    - name: private
+      port: 9006
+      targetPort: 9006
+---
+# Fluvio SPU Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: fluvio-spu
+  namespace: fluvio
+spec:
+  selector:
+    app: fluvio-spu
+  ports:
+    - name: public
+      port: 9005
+      targetPort: 9005
+  type: ClusterIP
+---
+# Service Accounts
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: fluvio-sc
+  namespace: fluvio
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: fluvio-spu
+  namespace: fluvio
+---
+# RBAC for Fluvio SC
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: fluvio-sc
+  namespace: fluvio
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "services", "configmaps", "secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["apps"]
+    resources: ["statefulsets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: fluvio-sc
+  namespace: fluvio
+subjects:
+  - kind: ServiceAccount
+    name: fluvio-sc
+    namespace: fluvio
+roleRef:
+  kind: Role
+  name: fluvio-sc
+  apiGroup: rbac.authorization.k8s.io
+---
+# Pod Disruption Budgets
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: fluvio-sc-pdb
+  namespace: fluvio
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: fluvio-sc
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: fluvio-spu-pdb
+  namespace: fluvio
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: fluvio-spu
+---
+# Fluvio Topics for VPP Platform
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fluvio-topics
+  namespace: fluvio
+data:
+  topics.yaml: |
+    topics:
+      - name: vpp-telemetry-raw
+        partitions: 6
+        replication: 3
+        retention_time: 604800000  # 7 days
+      - name: vpp-telemetry-processed
+        partitions: 6
+        replication: 3
+        retention_time: 2592000000  # 30 days
+      - name: vpp-trading-events
+        partitions: 3
+        replication: 3
+        retention_time: 2592000000
+      - name: vpp-dr-events
+        partitions: 3
+        replication: 3
+        retention_time: 2592000000
+      - name: vpp-alerts
+        partitions: 3
+        replication: 3
+        retention_time: 604800000
+---
+# Horizontal Pod Autoscaler for SPUs
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: fluvio-spu-hpa
+  namespace: fluvio
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: StatefulSet
+    name: fluvio-spu
+  minReplicas: 3
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80

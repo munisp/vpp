@@ -1,0 +1,33 @@
+{
+  "web": {
+    "apiKey": "AIzaSy___________________________",
+    "authDomain": "your-project-id.firebaseapp.com",
+    "projectId": "your-project-id",
+    "storageBucket": "your-project-id.appspot.com",
+    "messagingSenderId": "123456789012",
+    "appId": "1:123456789012:web:abcdef123456",
+    "measurementId": "G-XXXXXXXXXX"
+  },
+  "ios": {
+    "bundleId": "com.vpp.consumer",
+    "appId": "1:123456789012:ios:abcdef123456",
+    "configFile": "GoogleService-Info.plist",
+    "location": "mobile/ios/GoogleService-Info.plist"
+  },
+  "android": {
+    "packageName": "com.vpp.consumer",
+    "appId": "1:123456789012:android:abcdef123456",
+    "configFile": "google-services.json",
+    "location": "mobile/android/app/google-services.json"
+  },
+  "analytics": {
+    "enabled": true,
+    "debugMode": false,
+    "automaticScreenReporting": true,
+    "dataCollectionEnabled": true
+  },
+  "messaging": {
+    "enabled": true,
+    "vapidKey": "BPXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXx"
+  }
+}

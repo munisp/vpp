@@ -1,0 +1,145 @@
+import { COOKIE_NAME } from "@shared/const";
+import { getSessionCookieOptions } from "./_core/cookies";
+import { systemRouter } from "./_core/systemRouter";
+import { publicProcedure, router } from "./_core/trpc";
+import { assetsRouter } from "./routers/assets";
+import { telemetryRouter } from "./routers/telemetry";
+import { tradingRouter } from "./routers/trading";
+import { billingRouter } from "./routers/billing";
+import { paymentsRouter } from "./routers/payments";
+import { alertsRouter } from "./routers/alerts";
+import { adminRouter } from './routers/admin';
+import { analyticsRouter } from './routers/analytics';
+import { devicesRouter } from './routers/devices';
+import { exportRouter } from './routers/export';
+import { demandResponseRouter } from './routers/demandResponse';
+import { drAutomationRouter } from './routers/dr-automation';
+import { redisHealthRouter } from './routers/redis-health';
+import { webhookConfigRouter } from './routers/webhook-config';import { paymentCredentialsRouter } from './routers/paymentCredentials';
+import { paymentProcessingRouter } from './routers/paymentProcessing';
+import { drForecastingRouter } from './routers/drForecasting';
+import { adminAnalyticsRouter } from './routers/adminAnalytics';
+import { drSegmentationRouter } from './routers/drSegmentation';
+import { reconciliationRouter } from './routers/reconciliation';
+import { gamificationRouter } from './routers/gamification';
+import { participantInsightsRouter } from './routers/participantInsights';
+import { cacheMonitoringRouter } from './routers/cache-monitoring';
+import { notificationsRouter } from './routers/notifications';
+import { notificationPreferencesRouter } from './routers/notificationPreferences';
+import { emailRouter } from './routers/email';
+import { biometricRouter } from './routers/biometric';
+import { mqttCredentialsRouter } from './routers/mqtt-credentials';
+import { orchestratorRouter } from './routers/orchestrator';
+import { onboardingRouter } from './routers/onboarding';
+import { performanceRouter } from './routers/performance';
+import { performanceAlerting } from './_core/performance-alerting';
+import { mpesaWebhookRouter } from './routers/mpesa-webhook';
+import { auditLogsRouter } from './routers/auditLogs';
+import { tradingStrategiesRouter } from './routers/tradingStrategies';
+import { strategyTemplatesRouter } from './routers/strategyTemplates';
+import { priceAlertsRouter } from './routers/priceAlerts';
+import { strategyComparisonRouter } from './routers/strategyComparison';
+import { referralsRouter } from './routers/referrals';
+import { qrcodeRouter } from './routers/qrcode';
+import { qrHistoryRouter } from './routers/qr-history';
+import { workflowsRouter } from './routers/workflows';
+import { gridOperatorRouter } from './routers/grid-operator';
+import { iotDevicesRouter } from './routers/iot-devices';
+import { mlPredictionsRouter } from './routers/ml-predictions';
+
+// Next-gen VPP routers
+import {
+  anomalyRouter,
+  evChargingRouter,
+  forecastingRouter,
+  optimizationRouter,
+  settlementRouter,
+  edgeRouter,
+  carbonRouter,
+  communityRouter,
+  mlopsRouter,
+  complianceRouter,
+  blockchainRouter,
+  derCapabilitiesRouter,
+} from './routers/nextgen';
+
+// Start performance alerting
+if (process.env.NODE_ENV === 'production') {
+  performanceAlerting.start();
+}
+
+export const appRouter = router({
+  system: systemRouter,
+  orchestrator: orchestratorRouter,
+  onboarding: onboardingRouter,
+  performance: performanceRouter,
+  mpesaWebhook: mpesaWebhookRouter,
+  auditLogs: auditLogsRouter,
+  tradingStrategies: tradingStrategiesRouter,
+  strategyTemplates: strategyTemplatesRouter,
+  priceAlerts: priceAlertsRouter,
+  strategyComparison: strategyComparisonRouter,
+  referrals: referralsRouter,
+  qrcode: qrcodeRouter,
+  qrHistory: qrHistoryRouter,
+  workflows: workflowsRouter,
+  gridOperator: gridOperatorRouter,
+  iotDevices: iotDevicesRouter,
+  mlPredictions: mlPredictionsRouter,
+  notifications: notificationsRouter,
+  notificationPreferences: notificationPreferencesRouter,
+  email: emailRouter,
+  biometric: biometricRouter,
+  mqttCredentials: mqttCredentialsRouter,
+  auth: router({
+    me: publicProcedure.query(opts => opts.ctx.user),
+    logout: publicProcedure.mutation(({ ctx }) => {
+      const cookieOptions = getSessionCookieOptions(ctx.req);
+      ctx.res.clearCookie(COOKIE_NAME, { ...cookieOptions, maxAge: -1 });
+      return {
+        success: true,
+      } as const;
+    }),
+  }),
+
+  // VPP Platform Routers
+  assets: assetsRouter,
+  telemetry: telemetryRouter,
+  trading: tradingRouter,
+  billing: billingRouter,
+  payments: paymentsRouter,
+  alerts: alertsRouter,
+  admin: adminRouter,
+  cacheMonitoring: cacheMonitoringRouter,
+  analytics: analyticsRouter,
+  devices: devicesRouter,
+  export: exportRouter,
+  demandResponse: demandResponseRouter,
+  drAutomation: drAutomationRouter,
+  redisHealth: redisHealthRouter,
+  webhookConfig: webhookConfigRouter,
+  paymentCredentials: paymentCredentialsRouter,
+  paymentProcessing: paymentProcessingRouter,
+  drForecasting: drForecastingRouter,
+  adminAnalytics: adminAnalyticsRouter,
+  drSegmentation: drSegmentationRouter,
+  reconciliation: reconciliationRouter,
+  gamification: gamificationRouter,
+  participantInsights: participantInsightsRouter,
+
+  // Next-gen VPP routers
+  anomaly: anomalyRouter,
+  evCharging: evChargingRouter,
+  forecasting: forecastingRouter,
+  optimization: optimizationRouter,
+  settlement: settlementRouter,
+  edge: edgeRouter,
+  carbon: carbonRouter,
+  community: communityRouter,
+  mlops: mlopsRouter,
+  compliance: complianceRouter,
+  blockchain: blockchainRouter,
+  derCapabilities: derCapabilitiesRouter,
+});
+
+export type AppRouter = typeof appRouter;

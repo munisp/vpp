@@ -1,0 +1,188 @@
+{
+  "dashboard": {
+    "title": "VPP Business Metrics",
+    "tags": ["vpp", "business", "trading", "revenue"],
+    "timezone": "browser",
+    "panels": [
+      {
+        "id": 1,
+        "title": "Total Trades (24h)",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "sum(increase(vpp_trades_executed_total[24h]))"
+          }
+        ],
+        "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 }
+      },
+      {
+        "id": 2,
+        "title": "Total Energy Traded (24h kWh)",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "sum(increase(vpp_trade_volume_kwh[24h]))"
+          }
+        ],
+        "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 }
+      },
+      {
+        "id": 3,
+        "title": "Total Revenue (24h)",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "sum(increase(vpp_trade_revenue_cents[24h])) / 100"
+          }
+        ],
+        "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 }
+      },
+      {
+        "id": 4,
+        "title": "DR Rewards Earned (24h)",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "increase(vpp_dr_rewards_earned_cents[24h]) / 100"
+          }
+        ],
+        "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 }
+      },
+      {
+        "id": 5,
+        "title": "Trades by Type",
+        "type": "piechart",
+        "targets": [
+          {
+            "expr": "sum by (trade_type) (increase(vpp_trades_executed_total[24h]))",
+            "legendFormat": "{{trade_type}}"
+          }
+        ],
+        "gridPos": { "h": 8, "w": 8, "x": 0, "y": 4 }
+      },
+      {
+        "id": 6,
+        "title": "Energy Trading Volume by Type",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "rate(vpp_trade_volume_kwh[5m])",
+            "legendFormat": "{{trade_type}}"
+          }
+        ],
+        "gridPos": { "h": 8, "w": 8, "x": 8, "y": 4 }
+      },
+      {
+        "id": 7,
+        "title": "Revenue by Trade Type",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "rate(vpp_trade_revenue_cents[5m]) / 100",
+            "legendFormat": "{{trade_type}}"
+          }
+        ],
+        "gridPos": { "h": 8, "w": 8, "x": 16, "y": 4 }
+      },
+      {
+        "id": 8,
+        "title": "Payments Processed",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "rate(vpp_payments_processed_total[5m])",
+            "legendFormat": "{{payment_method}}"
+          }
+        ],
+        "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 }
+      },
+      {
+        "id": 9,
+        "title": "Payment Volume",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "rate(vpp_payment_volume_cents[5m]) / 100",
+            "legendFormat": "{{payment_method}}"
+          }
+        ],
+        "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 }
+      },
+      {
+        "id": 10,
+        "title": "Payment Success Rate",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "sum by (payment_method) (rate(vpp_payments_processed_total[5m])) / (sum by (payment_method) (rate(vpp_payments_processed_total[5m])) + sum by (payment_method) (rate(vpp_payments_failed_total[5m]))) * 100",
+            "legendFormat": "{{payment_method}}"
+          }
+        ],
+        "gridPos": { "h": 8, "w": 12, "x": 0, "y": 20 }
+      },
+      {
+        "id": 11,
+        "title": "DR Event Participation",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "rate(vpp_dr_events_enrolled_total[5m])",
+            "legendFormat": "Enrolled"
+          },
+          {
+            "expr": "rate(vpp_dr_events_completed_total[5m])",
+            "legendFormat": "Completed"
+          }
+        ],
+        "gridPos": { "h": 8, "w": 12, "x": 12, "y": 20 }
+      },
+      {
+        "id": 12,
+        "title": "Achievements Awarded",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "increase(vpp_achievements_awarded_total[24h])"
+          }
+        ],
+        "gridPos": { "h": 4, "w": 6, "x": 0, "y": 28 }
+      },
+      {
+        "id": 13,
+        "title": "Leaderboard Updates",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "increase(vpp_leaderboard_updates_total[24h])"
+          }
+        ],
+        "gridPos": { "h": 4, "w": 6, "x": 6, "y": 28 }
+      },
+      {
+        "id": 14,
+        "title": "Telemetry Data Points Processed",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "sum(increase(vpp_telemetry_datapoints_total[24h]))"
+          }
+        ],
+        "gridPos": { "h": 4, "w": 6, "x": 12, "y": 28 }
+      },
+      {
+        "id": 15,
+        "title": "Anomalies Detected",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "sum(increase(vpp_anomalies_detected_total[24h]))"
+          }
+        ],
+        "gridPos": { "h": 4, "w": 6, "x": 18, "y": 28 }
+      }
+    ],
+    "refresh": "30s",
+    "schemaVersion": 27,
+    "version": 1
+  }
+}

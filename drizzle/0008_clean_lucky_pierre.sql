@@ -1,0 +1,62 @@
+CREATE TABLE `dr_campaigns` (
+	`id` int AUTO_INCREMENT NOT NULL,
+	`name` varchar(200) NOT NULL,
+	`description` text,
+	`eventId` int,
+	`targetSegments` text,
+	`minScore` int,
+	`maxParticipants` int,
+	`bonusCompensation` int,
+	`status` enum('draft','scheduled','active','completed','cancelled') NOT NULL DEFAULT 'draft',
+	`scheduledStart` timestamp,
+	`scheduledEnd` timestamp,
+	`participantsInvited` int DEFAULT 0,
+	`participantsAccepted` int DEFAULT 0,
+	`totalReduction` int,
+	`totalCompensation` int,
+	`createdBy` int NOT NULL,
+	`metadata` text,
+	`createdAt` timestamp NOT NULL DEFAULT (now()),
+	`updatedAt` timestamp NOT NULL DEFAULT (now()) ON UPDATE CURRENT_TIMESTAMP,
+	CONSTRAINT `dr_campaigns_id` PRIMARY KEY(`id`)
+);
+--> statement-breakpoint
+CREATE TABLE `participant_scores` (
+	`id` int AUTO_INCREMENT NOT NULL,
+	`userId` int NOT NULL,
+	`reliabilityScore` int NOT NULL,
+	`responseTimeScore` int NOT NULL,
+	`reductionAccuracyScore` int NOT NULL,
+	`participationRateScore` int NOT NULL,
+	`overallScore` int NOT NULL,
+	`totalEventsParticipated` int NOT NULL DEFAULT 0,
+	`totalEventsOptedOut` int NOT NULL DEFAULT 0,
+	`averageReduction` int,
+	`totalCompensationEarned` int NOT NULL DEFAULT 0,
+	`maxCapacity` int,
+	`averageResponseTime` int,
+	`segment` enum('platinum','gold','silver','bronze','inactive') NOT NULL,
+	`lastCalculated` timestamp NOT NULL DEFAULT (now()),
+	`metadata` text,
+	`createdAt` timestamp NOT NULL DEFAULT (now()),
+	`updatedAt` timestamp NOT NULL DEFAULT (now()) ON UPDATE CURRENT_TIMESTAMP,
+	CONSTRAINT `participant_scores_id` PRIMARY KEY(`id`),
+	CONSTRAINT `participant_scores_userId_unique` UNIQUE(`userId`)
+);
+--> statement-breakpoint
+CREATE TABLE `participant_segments` (
+	`id` int AUTO_INCREMENT NOT NULL,
+	`name` varchar(100) NOT NULL,
+	`description` text,
+	`minOverallScore` int,
+	`minReliabilityScore` int,
+	`minParticipationRate` int,
+	`minCapacity` int,
+	`priority` int NOT NULL DEFAULT 0,
+	`compensationMultiplier` int NOT NULL DEFAULT 100,
+	`isActive` boolean NOT NULL DEFAULT true,
+	`metadata` text,
+	`createdAt` timestamp NOT NULL DEFAULT (now()),
+	`updatedAt` timestamp NOT NULL DEFAULT (now()) ON UPDATE CURRENT_TIMESTAMP,
+	CONSTRAINT `participant_segments_id` PRIMARY KEY(`id`)
+);

@@ -1,0 +1,78 @@
+version: '3.8'
+
+services:
+  # Temporal Server (for local development)
+  temporal:
+    image: temporalio/auto-setup:latest
+    ports:
+      - "7233:7233"
+    environment:
+      - DB=postgresql
+      - DB_PORT=5432
+      - POSTGRES_USER=temporal
+      - POSTGRES_PWD=temporal
+      - POSTGRES_SEEDS=postgresql
+    depends_on:
+      - postgresql
+    networks:
+      - temporal-network
+
+  postgresql:
+    image: postgres:13
+    environment:
+      POSTGRES_USER: temporal
+      POSTGRES_PASSWORD: temporal
+    networks:
+      - temporal-network
+
+  # DR Event Worker (Go)
+  dr-worker:
+    build:
+      context: ./dr-worker
+      dockerfile: Dockerfile
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
+      - TEMPORAL_ADDRESS=temporal:7233
+    depends_on:
+      - temporal
+    networks:
+      - temporal-network
+    restart: unless-stopped
+
+  # Trading Worker (Python)
+  trading-worker:
+    build:
+      context: ./trading-worker
+      dockerfile: Dockerfile
+    environment:
+      - DB_HOST=${DB_HOST}
+      - DB_NAME=${DB_NAME}
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - TEMPORAL_ADDRESS=temporal:7233
+    depends_on:
+      - temporal
+    networks:
+      - temporal-network
+    restart: unless-stopped
+
+  # Payment Worker (Python)
+  payment-worker:
+    build:
+      context: ./payment-worker
+      dockerfile: Dockerfile
+    environment:
+      - DB_HOST=${DB_HOST}
+      - DB_NAME=${DB_NAME}
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - TEMPORAL_ADDRESS=temporal:7233
+    depends_on:
+      - temporal
+    networks:
+      - temporal-network
+    restart: unless-stopped
+
+networks:
+  temporal-network:
+    driver: bridge

@@ -1,0 +1,1 @@
+ALTER TABLE `trading_strategies` MODIFY COLUMN `tradingMode` varchar(20) NOT NULL DEFAULT 'both';

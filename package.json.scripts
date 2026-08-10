@@ -1,0 +1,18 @@
+{
+  "scripts": {
+    "dev": "NODE_ENV=development tsx watch server/_core/index.ts",
+    "build": "tsc && vite build",
+    "start": "NODE_ENV=production tsx server/_core/index.ts",
+    "worker": "tsx server/workflows/worker.ts",
+    "worker:dev": "tsx watch server/workflows/worker.ts",
+    "pm2:start": "pm2 start ecosystem.config.js",
+    "pm2:stop": "pm2 stop ecosystem.config.js",
+    "pm2:restart": "pm2 restart ecosystem.config.js",
+    "pm2:delete": "pm2 delete ecosystem.config.js",
+    "pm2:logs": "pm2 logs",
+    "pm2:monit": "pm2 monit",
+    "pm2:status": "pm2 status",
+    "db:push": "drizzle-kit generate && drizzle-kit migrate",
+    "db:studio": "drizzle-kit studio"
+  }
+}

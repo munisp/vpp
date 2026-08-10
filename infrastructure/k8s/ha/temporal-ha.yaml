@@ -1,0 +1,580 @@
+# Temporal HA Configuration
+# Multi-replica deployment with separate frontend, history, matching, and worker services
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: temporal
+  labels:
+    app.kubernetes.io/name: temporal
+---
+# Temporal Server - Frontend Service (3 replicas)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: temporal-frontend
+  namespace: temporal
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: temporal
+      component: frontend
+  template:
+    metadata:
+      labels:
+        app: temporal
+        component: frontend
+    spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                  - key: component
+                    operator: In
+                    values:
+                      - frontend
+              topologyKey: kubernetes.io/hostname
+      containers:
+        - name: temporal-frontend
+          image: temporalio/server:1.22.4
+          ports:
+            - containerPort: 7233
+              name: grpc
+            - containerPort: 6933
+              name: membership
+          env:
+            - name: SERVICES
+              value: frontend
+            - name: DB
+              value: mysql
+            - name: MYSQL_SEEDS
+              value: mysql-ha-primary.vpp-platform.svc.cluster.local
+            - name: MYSQL_USER
+              valueFrom:
+                secretKeyRef:
+                  name: temporal-db-credentials
+                  key: username
+            - name: MYSQL_PWD
+              valueFrom:
+                secretKeyRef:
+                  name: temporal-db-credentials
+                  key: password
+            - name: TEMPORAL_BROADCAST_ADDRESS
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: NUM_HISTORY_SHARDS
+              value: "512"
+            - name: DYNAMIC_CONFIG_FILE_PATH
+              value: /etc/temporal/config/dynamicconfig/dynamic_config.yaml
+          resources:
+            requests:
+              memory: 512Mi
+              cpu: 250m
+            limits:
+              memory: 1Gi
+              cpu: 500m
+          volumeMounts:
+            - name: dynamic-config
+              mountPath: /etc/temporal/config/dynamicconfig
+          livenessProbe:
+            tcpSocket:
+              port: 7233
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            tcpSocket:
+              port: 7233
+            initialDelaySeconds: 10
+            periodSeconds: 5
+      volumes:
+        - name: dynamic-config
+          configMap:
+            name: temporal-dynamic-config
+---
+# Temporal Server - History Service (3 replicas)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: temporal-history
+  namespace: temporal
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: temporal
+      component: history
+  template:
+    metadata:
+      labels:
+        app: temporal
+        component: history
+    spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                  - key: component
+                    operator: In
+                    values:
+                      - history
+              topologyKey: kubernetes.io/hostname
+      containers:
+        - name: temporal-history
+          image: temporalio/server:1.22.4
+          ports:
+            - containerPort: 7234
+              name: grpc
+            - containerPort: 6934
+              name: membership
+          env:
+            - name: SERVICES
+              value: history
+            - name: DB
+              value: mysql
+            - name: MYSQL_SEEDS
+              value: mysql-ha-primary.vpp-platform.svc.cluster.local
+            - name: MYSQL_USER
+              valueFrom:
+                secretKeyRef:
+                  name: temporal-db-credentials
+                  key: username
+            - name: MYSQL_PWD
+              valueFrom:
+                secretKeyRef:
+                  name: temporal-db-credentials
+                  key: password
+            - name: TEMPORAL_BROADCAST_ADDRESS
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: NUM_HISTORY_SHARDS
+              value: "512"
+            - name: DYNAMIC_CONFIG_FILE_PATH
+              value: /etc/temporal/config/dynamicconfig/dynamic_config.yaml
+          resources:
+            requests:
+              memory: 1Gi
+              cpu: 500m
+            limits:
+              memory: 2Gi
+              cpu: "1"
+          volumeMounts:
+            - name: dynamic-config
+              mountPath: /etc/temporal/config/dynamicconfig
+          livenessProbe:
+            tcpSocket:
+              port: 7234
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            tcpSocket:
+              port: 7234
+            initialDelaySeconds: 10
+            periodSeconds: 5
+      volumes:
+        - name: dynamic-config
+          configMap:
+            name: temporal-dynamic-config
+---
+# Temporal Server - Matching Service (3 replicas)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: temporal-matching
+  namespace: temporal
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: temporal
+      component: matching
+  template:
+    metadata:
+      labels:
+        app: temporal
+        component: matching
+    spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                  - key: component
+                    operator: In
+                    values:
+                      - matching
+              topologyKey: kubernetes.io/hostname
+      containers:
+        - name: temporal-matching
+          image: temporalio/server:1.22.4
+          ports:
+            - containerPort: 7235
+              name: grpc
+            - containerPort: 6935
+              name: membership
+          env:
+            - name: SERVICES
+              value: matching
+            - name: DB
+              value: mysql
+            - name: MYSQL_SEEDS
+              value: mysql-ha-primary.vpp-platform.svc.cluster.local
+            - name: MYSQL_USER
+              valueFrom:
+                secretKeyRef:
+                  name: temporal-db-credentials
+                  key: username
+            - name: MYSQL_PWD
+              valueFrom:
+                secretKeyRef:
+                  name: temporal-db-credentials
+                  key: password
+            - name: TEMPORAL_BROADCAST_ADDRESS
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: DYNAMIC_CONFIG_FILE_PATH
+              value: /etc/temporal/config/dynamicconfig/dynamic_config.yaml
+          resources:
+            requests:
+              memory: 512Mi
+              cpu: 250m
+            limits:
+              memory: 1Gi
+              cpu: 500m
+          volumeMounts:
+            - name: dynamic-config
+              mountPath: /etc/temporal/config/dynamicconfig
+          livenessProbe:
+            tcpSocket:
+              port: 7235
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            tcpSocket:
+              port: 7235
+            initialDelaySeconds: 10
+            periodSeconds: 5
+      volumes:
+        - name: dynamic-config
+          configMap:
+            name: temporal-dynamic-config
+---
+# Temporal Server - Worker Service (3 replicas)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: temporal-worker
+  namespace: temporal
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: temporal
+      component: worker
+  template:
+    metadata:
+      labels:
+        app: temporal
+        component: worker
+    spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: component
+                      operator: In
+                      values:
+                        - worker
+                topologyKey: kubernetes.io/hostname
+      containers:
+        - name: temporal-worker
+          image: temporalio/server:1.22.4
+          ports:
+            - containerPort: 7239
+              name: grpc
+            - containerPort: 6939
+              name: membership
+          env:
+            - name: SERVICES
+              value: worker
+            - name: DB
+              value: mysql
+            - name: MYSQL_SEEDS
+              value: mysql-ha-primary.vpp-platform.svc.cluster.local
+            - name: MYSQL_USER
+              valueFrom:
+                secretKeyRef:
+                  name: temporal-db-credentials
+                  key: username
+            - name: MYSQL_PWD
+              valueFrom:
+                secretKeyRef:
+                  name: temporal-db-credentials
+                  key: password
+            - name: TEMPORAL_BROADCAST_ADDRESS
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: DYNAMIC_CONFIG_FILE_PATH
+              value: /etc/temporal/config/dynamicconfig/dynamic_config.yaml
+          resources:
+            requests:
+              memory: 512Mi
+              cpu: 250m
+            limits:
+              memory: 1Gi
+              cpu: 500m
+          volumeMounts:
+            - name: dynamic-config
+              mountPath: /etc/temporal/config/dynamicconfig
+          livenessProbe:
+            tcpSocket:
+              port: 7239
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            tcpSocket:
+              port: 7239
+            initialDelaySeconds: 10
+            periodSeconds: 5
+      volumes:
+        - name: dynamic-config
+          configMap:
+            name: temporal-dynamic-config
+---
+# Temporal Web UI (2 replicas)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: temporal-web
+  namespace: temporal
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: temporal
+      component: web
+  template:
+    metadata:
+      labels:
+        app: temporal
+        component: web
+    spec:
+      containers:
+        - name: temporal-web
+          image: temporalio/ui:2.21.3
+          ports:
+            - containerPort: 8080
+              name: http
+          env:
+            - name: TEMPORAL_ADDRESS
+              value: temporal-frontend.temporal.svc.cluster.local:7233
+            - name: TEMPORAL_CORS_ORIGINS
+              value: "*"
+          resources:
+            requests:
+              memory: 128Mi
+              cpu: 100m
+            limits:
+              memory: 256Mi
+              cpu: 200m
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 5
+---
+# Services
+apiVersion: v1
+kind: Service
+metadata:
+  name: temporal-frontend
+  namespace: temporal
+spec:
+  selector:
+    app: temporal
+    component: frontend
+  ports:
+    - name: grpc
+      port: 7233
+      targetPort: 7233
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: temporal-history
+  namespace: temporal
+spec:
+  selector:
+    app: temporal
+    component: history
+  ports:
+    - name: grpc
+      port: 7234
+      targetPort: 7234
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: temporal-matching
+  namespace: temporal
+spec:
+  selector:
+    app: temporal
+    component: matching
+  ports:
+    - name: grpc
+      port: 7235
+      targetPort: 7235
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: temporal-worker
+  namespace: temporal
+spec:
+  selector:
+    app: temporal
+    component: worker
+  ports:
+    - name: grpc
+      port: 7239
+      targetPort: 7239
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: temporal-web
+  namespace: temporal
+spec:
+  selector:
+    app: temporal
+    component: web
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+  type: ClusterIP
+---
+# Dynamic Config
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: temporal-dynamic-config
+  namespace: temporal
+data:
+  dynamic_config.yaml: |
+    # History service settings
+    history.persistenceMaxQPS:
+      - value: 3000
+    history.persistenceGlobalMaxQPS:
+      - value: 10000
+    history.historyMgrNumConns:
+      - value: 50
+    
+    # Matching service settings
+    matching.numTaskqueueReadPartitions:
+      - value: 5
+    matching.numTaskqueueWritePartitions:
+      - value: 5
+    
+    # Frontend service settings
+    frontend.persistenceMaxQPS:
+      - value: 2000
+    frontend.persistenceGlobalMaxQPS:
+      - value: 5000
+    
+    # Worker service settings
+    worker.ReplicationTaskProcessorHostQPS:
+      - value: 100
+    
+    # System limits
+    limit.maxIDLength:
+      - value: 1000
+    limit.blobSizeLimitError:
+      - value: 2097152
+    limit.blobSizeLimitWarn:
+      - value: 524288
+---
+# Pod Disruption Budgets
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: temporal-frontend-pdb
+  namespace: temporal
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: temporal
+      component: frontend
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: temporal-history-pdb
+  namespace: temporal
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: temporal
+      component: history
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: temporal-matching-pdb
+  namespace: temporal
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: temporal
+      component: matching
+---
+# Horizontal Pod Autoscaler for Workers
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: temporal-worker-hpa
+  namespace: temporal
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: temporal-worker
+  minReplicas: 3
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80

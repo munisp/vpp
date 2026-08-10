@@ -1,0 +1,270 @@
+version: '3.8'
+
+services:
+  # ============================================================================
+  # TEMPORAL SERVER
+  # ============================================================================
+  temporal-postgresql:
+    image: postgres:14-alpine
+    container_name: temporal-postgresql
+    environment:
+      POSTGRES_PASSWORD: temporal
+      POSTGRES_USER: temporal
+      POSTGRES_DB: temporal
+    volumes:
+      - temporal-postgres-data:/var/lib/postgresql/data
+    networks:
+      - vpp-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U temporal"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  temporal:
+    image: temporalio/auto-setup:1.22.0
+    container_name: temporal
+    depends_on:
+      temporal-postgresql:
+        condition: service_healthy
+    environment:
+      - DB=postgresql
+      - DB_PORT=5432
+      - POSTGRES_USER=temporal
+      - POSTGRES_PWD=temporal
+      - POSTGRES_SEEDS=temporal-postgresql
+      - DYNAMIC_CONFIG_FILE_PATH=config/dynamicconfig/development-sql.yaml
+    ports:
+      - "7233:7233"
+    volumes:
+      - ./temporal-config:/etc/temporal/config/dynamicconfig
+    networks:
+      - vpp-network
+    healthcheck:
+      test: ["CMD", "tctl", "--address", "temporal:7233", "cluster", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  temporal-web:
+    image: temporalio/web:2.0.0
+    container_name: temporal-web
+    depends_on:
+      - temporal
+    environment:
+      - TEMPORAL_ADDRESS=temporal:7233
+      - TEMPORAL_CORS_ORIGINS=http://localhost:3000
+    ports:
+      - "8233:8080"
+    networks:
+      - vpp-network
+
+  # ============================================================================
+  # KAFKA & ZOOKEEPER
+  # ============================================================================
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    volumes:
+      - zookeeper-data:/var/lib/zookeeper/data
+      - zookeeper-logs:/var/lib/zookeeper/log
+    networks:
+      - vpp-network
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "2181"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: kafka
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    ports:
+      - "29092:29092"
+      - "9092:9092"
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    networks:
+      - vpp-network
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka-ui
+    depends_on:
+      - kafka
+    environment:
+      KAFKA_CLUSTERS_0_NAME: vpp-cluster
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      KAFKA_CLUSTERS_0_ZOOKEEPER: zookeeper:2181
+    ports:
+      - "8090:8080"
+    networks:
+      - vpp-network
+
+  # ============================================================================
+  # REDIS
+  # ============================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    command: redis-server --appendonly yes --requirepass vpp-redis-password
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - vpp-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis-commander:
+    image: rediscommander/redis-commander:latest
+    container_name: redis-commander
+    depends_on:
+      - redis
+    environment:
+      REDIS_HOSTS: local:redis:6379:0:vpp-redis-password
+    ports:
+      - "8091:8081"
+    networks:
+      - vpp-network
+
+  # ============================================================================
+  # KEYCLOAK
+  # ============================================================================
+  keycloak-postgres:
+    image: postgres:14-alpine
+    container_name: keycloak-postgres
+    environment:
+      POSTGRES_DB: keycloak
+      POSTGRES_USER: keycloak
+      POSTGRES_PASSWORD: keycloak
+    volumes:
+      - keycloak-postgres-data:/var/lib/postgresql/data
+    networks:
+      - vpp-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U keycloak"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:22.0
+    container_name: keycloak
+    depends_on:
+      keycloak-postgres:
+        condition: service_healthy
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://keycloak-postgres:5432/keycloak
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: keycloak
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+      KC_HEALTH_ENABLED: "true"
+      KC_METRICS_ENABLED: "true"
+    command: start-dev
+    ports:
+      - "8080:8080"
+    networks:
+      - vpp-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ============================================================================
+  # DAPR
+  # ============================================================================
+  dapr-placement:
+    image: daprio/dapr:1.12.0
+    container_name: dapr-placement
+    command: ["./placement", "-port", "50005"]
+    ports:
+      - "50005:50005"
+    networks:
+      - vpp-network
+
+  dapr-redis:
+    image: redis:7-alpine
+    container_name: dapr-redis
+    ports:
+      - "6380:6379"
+    volumes:
+      - dapr-redis-data:/data
+    networks:
+      - vpp-network
+
+  # ============================================================================
+  # FLUVIO (Single-node cluster for development)
+  # ============================================================================
+  fluvio:
+    image: infinyon/fluvio:latest
+    container_name: fluvio
+    command: cluster start --local
+    ports:
+      - "9003:9003"
+    volumes:
+      - fluvio-data:/home/fluvio/.fluvio
+    networks:
+      - vpp-network
+    environment:
+      - FLUVIO_CLOUD_PROFILE=local
+
+  # ============================================================================
+  # TIGERBEETLE (Financial Ledger)
+  # ============================================================================
+  tigerbeetle:
+    image: ghcr.io/tigerbeetle/tigerbeetle:latest
+    container_name: tigerbeetle
+    command: start --addresses=0.0.0.0:3000 /data/cluster_0.tigerbeetle
+    ports:
+      - "3000:3000"
+    volumes:
+      - tigerbeetle-data:/data
+    networks:
+      - vpp-network
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "3000"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  temporal-postgres-data:
+  zookeeper-data:
+  zookeeper-logs:
+  kafka-data:
+  redis-data:
+  keycloak-postgres-data:
+  dapr-redis-data:
+  fluvio-data:
+  tigerbeetle-data:
+
+networks:
+  vpp-network:
+    driver: bridge

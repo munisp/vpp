@@ -1,0 +1,392 @@
+# Redis HA Configuration using Redis Sentinel
+# 3-node cluster with automatic failover
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: redis
+  labels:
+    app.kubernetes.io/name: redis
+---
+# Redis ConfigMap
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: redis-config
+  namespace: redis
+data:
+  redis.conf: |
+    # Network
+    bind 0.0.0.0
+    port 6379
+    tcp-backlog 511
+    timeout 0
+    tcp-keepalive 300
+    
+    # General
+    daemonize no
+    supervised no
+    loglevel notice
+    databases 16
+    
+    # Snapshotting
+    save 900 1
+    save 300 10
+    save 60 10000
+    stop-writes-on-bgsave-error yes
+    rdbcompression yes
+    rdbchecksum yes
+    dbfilename dump.rdb
+    dir /data
+    
+    # Replication
+    replica-serve-stale-data yes
+    replica-read-only yes
+    repl-diskless-sync no
+    repl-diskless-sync-delay 5
+    repl-disable-tcp-nodelay no
+    replica-priority 100
+    
+    # Security
+    requirepass ${REDIS_PASSWORD}
+    masterauth ${REDIS_PASSWORD}
+    
+    # Memory Management
+    maxmemory 2gb
+    maxmemory-policy allkeys-lru
+    
+    # Append Only Mode
+    appendonly yes
+    appendfilename "appendonly.aof"
+    appendfsync everysec
+    no-appendfsync-on-rewrite no
+    auto-aof-rewrite-percentage 100
+    auto-aof-rewrite-min-size 64mb
+    aof-load-truncated yes
+    aof-use-rdb-preamble yes
+    
+    # Cluster
+    cluster-enabled no
+    
+    # Slow Log
+    slowlog-log-slower-than 10000
+    slowlog-max-len 128
+    
+    # Latency Monitor
+    latency-monitor-threshold 0
+    
+    # Event Notification
+    notify-keyspace-events ""
+    
+  sentinel.conf: |
+    port 26379
+    sentinel monitor mymaster redis-0.redis-headless.redis.svc.cluster.local 6379 2
+    sentinel auth-pass mymaster ${REDIS_PASSWORD}
+    sentinel down-after-milliseconds mymaster 5000
+    sentinel parallel-syncs mymaster 1
+    sentinel failover-timeout mymaster 60000
+    sentinel resolve-hostnames yes
+    sentinel announce-hostnames yes
+---
+# Redis StatefulSet
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis
+  namespace: redis
+spec:
+  serviceName: redis-headless
+  replicas: 3
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                  - key: app
+                    operator: In
+                    values:
+                      - redis
+              topologyKey: kubernetes.io/hostname
+      initContainers:
+        - name: init-redis
+          image: redis:7.2-alpine
+          command:
+            - sh
+            - -c
+            - |
+              cp /tmp/redis/redis.conf /etc/redis/redis.conf
+              if [ "$(hostname)" = "redis-0" ]; then
+                echo "I am the master"
+              else
+                echo "slaveof redis-0.redis-headless.redis.svc.cluster.local 6379" >> /etc/redis/redis.conf
+              fi
+          volumeMounts:
+            - name: redis-config
+              mountPath: /tmp/redis
+            - name: config
+              mountPath: /etc/redis
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: redis-credentials
+                  key: password
+      containers:
+        - name: redis
+          image: redis:7.2-alpine
+          command:
+            - redis-server
+            - /etc/redis/redis.conf
+          ports:
+            - containerPort: 6379
+              name: redis
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: redis-credentials
+                  key: password
+          resources:
+            requests:
+              memory: 1Gi
+              cpu: 500m
+            limits:
+              memory: 2Gi
+              cpu: "1"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: config
+              mountPath: /etc/redis
+          livenessProbe:
+            exec:
+              command:
+                - redis-cli
+                - -a
+                - $(REDIS_PASSWORD)
+                - ping
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            exec:
+              command:
+                - redis-cli
+                - -a
+                - $(REDIS_PASSWORD)
+                - ping
+            initialDelaySeconds: 5
+            periodSeconds: 5
+      volumes:
+        - name: redis-config
+          configMap:
+            name: redis-config
+        - name: config
+          emptyDir: {}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        storageClassName: fast-ssd
+        resources:
+          requests:
+            storage: 10Gi
+---
+# Redis Sentinel StatefulSet
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis-sentinel
+  namespace: redis
+spec:
+  serviceName: redis-sentinel-headless
+  replicas: 3
+  selector:
+    matchLabels:
+      app: redis-sentinel
+  template:
+    metadata:
+      labels:
+        app: redis-sentinel
+    spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                  - key: app
+                    operator: In
+                    values:
+                      - redis-sentinel
+              topologyKey: kubernetes.io/hostname
+      initContainers:
+        - name: init-sentinel
+          image: redis:7.2-alpine
+          command:
+            - sh
+            - -c
+            - |
+              cp /tmp/redis/sentinel.conf /etc/redis/sentinel.conf
+              sed -i "s/\${REDIS_PASSWORD}/$REDIS_PASSWORD/g" /etc/redis/sentinel.conf
+          volumeMounts:
+            - name: redis-config
+              mountPath: /tmp/redis
+            - name: config
+              mountPath: /etc/redis
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: redis-credentials
+                  key: password
+      containers:
+        - name: sentinel
+          image: redis:7.2-alpine
+          command:
+            - redis-sentinel
+            - /etc/redis/sentinel.conf
+          ports:
+            - containerPort: 26379
+              name: sentinel
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: redis-credentials
+                  key: password
+          resources:
+            requests:
+              memory: 128Mi
+              cpu: 100m
+            limits:
+              memory: 256Mi
+              cpu: 200m
+          volumeMounts:
+            - name: config
+              mountPath: /etc/redis
+          livenessProbe:
+            exec:
+              command:
+                - redis-cli
+                - -p
+                - "26379"
+                - ping
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            exec:
+              command:
+                - redis-cli
+                - -p
+                - "26379"
+                - ping
+            initialDelaySeconds: 5
+            periodSeconds: 5
+      volumes:
+        - name: redis-config
+          configMap:
+            name: redis-config
+        - name: config
+          emptyDir: {}
+---
+# Headless Service for StatefulSet
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-headless
+  namespace: redis
+spec:
+  clusterIP: None
+  selector:
+    app: redis
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: 6379
+---
+# Redis Service (points to master)
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: redis
+spec:
+  selector:
+    app: redis
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: 6379
+  type: ClusterIP
+---
+# Sentinel Headless Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-sentinel-headless
+  namespace: redis
+spec:
+  clusterIP: None
+  selector:
+    app: redis-sentinel
+  ports:
+    - name: sentinel
+      port: 26379
+      targetPort: 26379
+---
+# Sentinel Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-sentinel
+  namespace: redis
+spec:
+  selector:
+    app: redis-sentinel
+  ports:
+    - name: sentinel
+      port: 26379
+      targetPort: 26379
+  type: ClusterIP
+---
+# Redis Credentials Secret (placeholder - use sealed secrets in production)
+apiVersion: v1
+kind: Secret
+metadata:
+  name: redis-credentials
+  namespace: redis
+type: Opaque
+stringData:
+  password: "${REDIS_PASSWORD}"
+---
+# Pod Disruption Budget
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: redis-pdb
+  namespace: redis
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: redis
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: redis-sentinel-pdb
+  namespace: redis
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: redis-sentinel

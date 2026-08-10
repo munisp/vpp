@@ -10,7 +10,7 @@
 
 import { getDb } from '../db';
 import { sql } from 'drizzle-orm';
-import { createHash } from 'crypto';
+import { createHash, randomBytes } from 'crypto';
 import { kafkaPublisher } from '../integration/kafka-publisher';
 
 // Types for blockchain anchoring
@@ -536,7 +536,7 @@ export class BlockchainAuditService {
     const db = await getDb();
     if (!db) throw new Error('Database not available');
 
-    const batchId = `batch_${Date.now().toString(36)}_${Math.random().toString(36).substring(2, 6)}`;
+    const batchId = `batch_${Date.now().toString(36)}_${randomBytes(3).toString('hex')}`;
     const anchors: BlockchainAnchor[] = [];
     const hashes: string[] = [];
 

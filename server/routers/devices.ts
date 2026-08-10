@@ -175,7 +175,7 @@ export const devicesRouter = router({
         // Extract userId from asset
         const assetId = device.assetId;
         // Look up the owning user from the assets table
-        const assetRecord = await devicesDb.getAssetById(assetId);
+        const assetRecord = await getAssetById(assetId);
         const userId = assetRecord?.userId ?? null;
         if (!userId) {
           throw new TRPCError({

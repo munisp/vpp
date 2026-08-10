@@ -127,12 +127,15 @@ export const mpesaWebhookRouter = router({
             }
 
             // Send push notification to user
-            await sendPushNotification({
-              userId: payment.userId,
-              title: 'Payment Successful',
-              body: `Your M-Pesa payment of ${(payment.amount / 100).toFixed(2)} was received. Receipt: ${result.mpesaReceiptNumber}`,
-              data: { paymentId: String(payment.id), type: 'payment_success' },
-            });
+            await sendPushNotification(
+              payment.userId,
+              {
+                title: 'Payment Successful',
+                body: `Your M-Pesa payment of ${(payment.amount / 100).toFixed(2)} was received. Receipt: ${result.mpesaReceiptNumber}`,
+                data: { paymentId: String(payment.id), type: 'payment_success' },
+              },
+              'pushPaymentReceived'
+            );
           } catch (postPaymentError) {
             console.error('[MPesa Webhook] Post-payment action failed:', postPaymentError);
             // Do not rethrow — payment is already marked completed; post-payment
@@ -160,12 +163,15 @@ export const mpesaWebhookRouter = router({
 
           // Notify user of payment failure
           try {
-            await sendPushNotification({
-              userId: payment.userId,
-              title: 'Payment Failed',
-              body: `Your M-Pesa payment could not be completed. Reason: ${result.resultDesc}`,
-              data: { paymentId: String(payment.id), type: 'payment_failed' },
-            });
+            await sendPushNotification(
+              payment.userId,
+              {
+                title: 'Payment Failed',
+                body: `Your M-Pesa payment could not be completed. Reason: ${result.resultDesc}`,
+                data: { paymentId: String(payment.id), type: 'payment_failed' },
+              },
+              'pushPaymentReceived'
+            );
           } catch (notifError) {
             console.error('[MPesa Webhook] Failure notification error:', notifError);
           }

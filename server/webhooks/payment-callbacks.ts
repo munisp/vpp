@@ -342,25 +342,18 @@ async function handlePaymentFailure(
  */
 function generatePrepaidToken(): string {
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-  // Use rejection sampling to avoid modulo bias
-  const bytes = randomBytes(32);
+  // Use rejection sampling to avoid modulo bias.
+  // Array.from() is used to iterate the Buffer for ES2015+ compatibility.
   let result = '';
-  for (let i = 0; i < bytes.length && result.replace(/-/g, '').length < 16; i++) {
-    const value = bytes[i];
-    if (value < 216) { // 216 = floor(256 / 36) * 36 — rejection threshold
-      const pos = result.replace(/-/g, '').length;
-      if (pos > 0 && pos % 4 === 0) result += '-';
-      result += chars[value % 36];
-    }
-  }
-  // Fallback: if rejection sampling exhausted bytes, pad with secure random chars
   while (result.replace(/-/g, '').length < 16) {
-    const extra = randomBytes(4);
-    for (const b of extra) {
-      const pos = result.replace(/-/g, '').length;
-      if (pos >= 16) break;
-      if (pos > 0 && pos % 4 === 0) result += '-';
-      result += chars[b % 36];
+    const bytes = Array.from(randomBytes(32));
+    for (const value of bytes) {
+      if (result.replace(/-/g, '').length >= 16) break;
+      if (value < 216) { // floor(256 / 36) * 36 = 216 — rejection threshold avoids modulo bias
+        const pos = result.replace(/-/g, '').length;
+        if (pos > 0 && pos % 4 === 0) result += '-';
+        result += chars[value % 36];
+      }
     }
   }
   return result;

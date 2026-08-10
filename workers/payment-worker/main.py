@@ -295,7 +295,11 @@ async def update_payment_status(
 ) -> bool:
     """Update payment status in the database."""
     logger.info(f"Updating payment {payment_id} status to {status}")
-    connection = get_db_connection()
+    try:
+        connection = get_db_connection()
+    except Exception as e:
+        logger.error(f"Failed to connect to database: {e}")
+        return False
     cursor = connection.cursor()
     try:
         if transaction_id:
@@ -357,7 +361,11 @@ async def send_payment_notification(user_id: int, payment_id: int, status: str, 
 async def record_payment_audit(payment_id: int, action: str, details: dict) -> bool:
     """Insert an audit log entry for the payment action."""
     logger.info(f"Recording audit log for payment {payment_id}: {action}")
-    connection = get_db_connection()
+    try:
+        connection = get_db_connection()
+    except Exception as e:
+        logger.error(f"Failed to connect to database: {e}")
+        return False
     cursor = connection.cursor()
     try:
         cursor.execute(

@@ -27,6 +27,7 @@ export default function QRGenerator() {
   const [qrCodeUrl, setQrCodeUrl] = useState<string | null>(null);
   const [generating, setGenerating] = useState(false);
   const recordGeneration = trpc.qrHistory.recordGeneration.useMutation();
+  const generateQRMutation = trpc.qrcode.generate.useMutation();
 
   const handleGenerateQR = async () => {
     // Validate inputs
@@ -54,7 +55,7 @@ export default function QRGenerator() {
 
     try {
             // Call the real QR code generation API
-      const response = await trpc.qrcode.generate.mutate({
+      const response = await generateQRMutation.mutateAsync({
         type: paymentType,
         amount: Math.round(parseFloat(amount) * 100),
         currency,
@@ -63,14 +64,16 @@ export default function QRGenerator() {
         billType: billType || undefined,
         description: description || undefined,
       });
-      const generatedQrCode: string = response.qrCodeDataUrl ?? response.qrCodeImage ?? '';
+      // The generate endpoint returns a base64 data URL string directly
+      const generatedQrCode: string = typeof response === 'string' ? response : '';
       setQrCodeUrl(generatedQrCode);
       // Record generation to history
+      const qrPayload = JSON.stringify({ type: paymentType, amount, currency });
       await recordGeneration.mutateAsync({
         paymentType,
         amount: parseFloat(amount).toString(),
         currency,
-        qrCodeData: response.qrData ? JSON.stringify(response.qrData) : JSON.stringify({ type: paymentType, amount, currency }),
+        qrCodeData: qrPayload,
         qrCodeImage: generatedQrCode,
         merchantName: merchantName || undefined,
         recipientName: recipientName || undefined,

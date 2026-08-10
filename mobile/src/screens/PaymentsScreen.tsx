@@ -14,13 +14,19 @@ import ShareButton from '../components/ShareButton';
 import { ShareService } from '../services/shareService';
 import { HapticService } from '../services/hapticService';
 
-export default function PaymentsScreen() {
+export default function PaymentsScreen({ navigation }: any) {
   const [modalVisible, setModalVisible] = useState(false);
   const [selectedGateway, setSelectedGateway] = useState<
     'mpesa' | 'airtel_money' | 'tigo_pesa'
   >('mpesa');
+  // Server input (server/routers/payments.ts -> InitiatePaymentInputSchema):
+  // paymentType is 'invoice' | 'token_purchase' | 'monthly_fee'.
+  const [paymentType, setPaymentType] = useState<'invoice' | 'token_purchase'>(
+    'invoice'
+  );
   const [phoneNumber, setPhoneNumber] = useState('');
   const [amount, setAmount] = useState('');
+  const [energyKwh, setEnergyKwh] = useState('');
 
   const utils = trpc.useUtils();
 
@@ -38,9 +44,21 @@ export default function PaymentsScreen() {
   const initiatePaymentMutation = trpc.payments.initiate.useMutation({
     onSuccess: async (data) => {
       await HapticService.paymentCompleted();
+      // Always surface the server's real response message. For token
+      // purchases no token exists yet at this point — the server generates
+      // it only after the payment is confirmed (and may mark it
+      // 'pending_issuance' when STS vending is not configured), so we must
+      // never claim a token was issued here.
+      const reference = data.payment?.id
+        ? `\nReference: PAY${data.payment.id}`
+        : '';
+      const tokenNote =
+        paymentType === 'token_purchase'
+          ? '\nYour meter token will be generated once the payment is confirmed.'
+          : '';
       Alert.alert(
         'Payment Initiated',
-        data.message || 'Please check your phone to complete the payment',
+        `${data.message || 'Please check your phone to complete the payment'}${reference}${tokenNote}`,
         [{ text: 'OK', onPress: () => setModalVisible(false) }]
       );
       utils.payments.list.invalidate();
@@ -65,14 +83,30 @@ export default function PaymentsScreen() {
       return;
     }
 
+    // Server schema requires energyKwh as a positive integer (kWh) for
+    // token purchases.
+    let energyKwhInt: number | undefined;
+    if (paymentType === 'token_purchase') {
+      const parsedKwh = parseInt(energyKwh, 10);
+      if (isNaN(parsedKwh) || parsedKwh <= 0) {
+        Alert.alert('Error', 'Please enter a valid energy amount (kWh)');
+        return;
+      }
+      energyKwhInt = parsedKwh;
+    }
+
     await HapticService.buttonPress();
     // Server input (server/routers/payments.ts -> initiate): amount is an
-    // integer in cents; paymentMethod uses the server enum.
+    // integer in cents; paymentMethod uses the server enum; energyKwh is an
+    // integer number of kWh, only for token purchases.
     initiatePaymentMutation.mutate({
-      paymentType: 'invoice',
+      paymentType,
       amount: amountTzs * 100, // TZS -> cents
       paymentMethod: selectedGateway,
       phoneNumber,
+      ...(paymentType === 'token_purchase'
+        ? { energyKwh: energyKwhInt }
+        : {}),
     });
   };
 
@@ -103,6 +137,12 @@ export default function PaymentsScreen() {
             onPress={() => setModalVisible(true)}
           >
             <Text style={styles.balanceButtonText}>💳 Top Up</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.balanceButton}
+            onPress={() => navigation.navigate('QRPayment')}
+          >
+            <Text style={styles.balanceButtonText}>📷 Scan to Pay</Text>
           </TouchableOpacity>
         </View>
       </View>
@@ -158,7 +198,50 @@ export default function PaymentsScreen() {
       >
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
-            <Text style={styles.modalTitle}>Top Up Balance</Text>
+            <Text style={styles.modalTitle}>
+              {paymentType === 'token_purchase'
+                ? 'Buy Energy Token'
+                : 'Top Up Balance'}
+            </Text>
+
+            {/* Payment Type Selection */}
+            <Text style={styles.inputLabel}>Payment Type</Text>
+            <View style={styles.gatewaySelector}>
+              <TouchableOpacity
+                style={[
+                  styles.gatewayButton,
+                  paymentType === 'invoice' && styles.gatewayButtonActive,
+                ]}
+                onPress={() => setPaymentType('invoice')}
+              >
+                <Text style={styles.gatewayIcon}>🧾</Text>
+                <Text
+                  style={[
+                    styles.gatewayText,
+                    paymentType === 'invoice' && styles.gatewayTextActive,
+                  ]}
+                >
+                  Bill / Invoice
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[
+                  styles.gatewayButton,
+                  paymentType === 'token_purchase' && styles.gatewayButtonActive,
+                ]}
+                onPress={() => setPaymentType('token_purchase')}
+              >
+                <Text style={styles.gatewayIcon}>⚡</Text>
+                <Text
+                  style={[
+                    styles.gatewayText,
+                    paymentType === 'token_purchase' && styles.gatewayTextActive,
+                  ]}
+                >
+                  Energy Token
+                </Text>
+              </TouchableOpacity>
+            </View>
 
             {/* Gateway Selection */}
             <Text style={styles.inputLabel}>Select Payment Method</Text>
@@ -235,6 +318,20 @@ export default function PaymentsScreen() {
               onChangeText={setAmount}
               keyboardType="numeric"
             />
+
+            {/* Energy amount (token purchases only) */}
+            {paymentType === 'token_purchase' && (
+              <>
+                <Text style={styles.inputLabel}>Energy Amount (kWh)</Text>
+                <TextInput
+                  style={styles.input}
+                  placeholder="e.g., 20"
+                  value={energyKwh}
+                  onChangeText={setEnergyKwh}
+                  keyboardType="numeric"
+                />
+              </>
+            )}
 
             <View style={styles.modalButtons}>
               <TouchableOpacity

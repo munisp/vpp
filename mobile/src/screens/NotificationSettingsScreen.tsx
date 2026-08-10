@@ -8,14 +8,60 @@ import {
   TouchableOpacity,
   ActivityIndicator,
   Platform,
+  Alert,
 } from 'react-native';
-import { trpc } from '../lib/trpc';
+import { trpc } from '../services/trpc';
 import { Ionicons } from '@expo/vector-icons';
 import DateTimePicker from '@react-native-community/datetimepicker';
 
+// Server-side preference fields (server/routers/notificationPreferences.ts).
+// The server has no master "enablePush"/"enableEmail" or generic
+// "notifyTrade" flags — only per-category flags — so the group toggles
+// below are derived from / mapped onto these real fields.
+const PUSH_FLAGS = [
+  'pushPaymentReceived',
+  'pushAchievementUnlocked',
+  'pushDREventReminder',
+  'pushDREventCreated',
+  'pushLeaderboardRankChange',
+  'pushTradeExecuted',
+  'pushTradeFailed',
+  'pushSystemAlert',
+  'pushBillingAlert',
+] as const;
+
+const EMAIL_FLAGS = [
+  'emailPaymentReceived',
+  'emailTradeExecuted',
+  'emailTradeFailed',
+  'emailSystemAlert',
+  'emailAchievementUnlocked',
+  'emailDREventReminder',
+  'emailDREventCreated',
+  'emailLeaderboardRankChange',
+] as const;
+
+// Maps each local group toggle to the server field(s) it controls.
+const GROUP_TO_SERVER_FLAGS: Record<string, readonly string[]> = {
+  notifyTrade: ['pushTradeExecuted', 'pushTradeFailed'],
+  notifyPayment: ['pushPaymentReceived'],
+  notifyDR: ['pushDREventReminder', 'pushDREventCreated'],
+  notifyAchievement: ['pushAchievementUnlocked'],
+  notifySystem: ['pushSystemAlert'],
+  notifyBilling: ['pushBillingAlert'],
+};
+
 export default function NotificationSettingsScreen() {
   const { data: preferences, isLoading } = trpc.notificationPreferences.get.useQuery();
-  const updatePreferences = trpc.notificationPreferences.update.useMutation();
+  const utils = trpc.useUtils();
+  const updatePreferences = trpc.notificationPreferences.update.useMutation({
+    onSuccess: () => {
+      utils.notificationPreferences.get.invalidate();
+    },
+    onError: (error) => {
+      Alert.alert('Error', `Could not update preferences: ${error.message}`);
+    },
+  });
 
   const [localPrefs, setLocalPrefs] = useState({
     enablePush: true,
@@ -40,32 +86,70 @@ export default function NotificationSettingsScreen() {
 
   useEffect(() => {
     if (preferences) {
+      const prefs = preferences as unknown as Record<string, unknown>;
+      // Master toggles are "on" only when every underlying server flag is
+      // enabled (same convention as SettingsScreen's push toggle).
       setLocalPrefs({
-        enablePush: preferences.enablePush ?? true,
-        enableEmail: preferences.enableEmail ?? false,
-        enableSound: preferences.enableSound ?? true,
-        notifyTrade: preferences.notifyTrade ?? true,
-        notifyPayment: preferences.notifyPayment ?? true,
-        notifyDR: preferences.notifyDR ?? true,
-        notifyAchievement: preferences.notifyAchievement ?? true,
-        notifySystem: preferences.notifySystem ?? true,
-        notifyBilling: preferences.notifyBilling ?? true,
-        emailWeeklySummary: preferences.emailWeeklySummary ?? false,
-        emailMonthlySummary: preferences.emailMonthlySummary ?? false,
-        frequency: (preferences.frequency as any) || 'instant',
-        quietHoursEnabled: preferences.quietHoursEnabled ?? false,
-        quietHoursStart: preferences.quietHoursStart || '22:00:00',
-        quietHoursEnd: preferences.quietHoursEnd || '07:00:00',
+        enablePush: PUSH_FLAGS.every((flag) => prefs[flag] === true),
+        enableEmail: EMAIL_FLAGS.every((flag) => prefs[flag] === true),
+        enableSound: (prefs.notificationSound as boolean) ?? true,
+        notifyTrade:
+          ((prefs.pushTradeExecuted as boolean) ?? true) &&
+          ((prefs.pushTradeFailed as boolean) ?? true),
+        notifyPayment: (prefs.pushPaymentReceived as boolean) ?? true,
+        notifyDR:
+          ((prefs.pushDREventReminder as boolean) ?? true) &&
+          ((prefs.pushDREventCreated as boolean) ?? true),
+        notifyAchievement: (prefs.pushAchievementUnlocked as boolean) ?? true,
+        notifySystem: (prefs.pushSystemAlert as boolean) ?? true,
+        notifyBilling: (prefs.pushBillingAlert as boolean) ?? true,
+        emailWeeklySummary: (prefs.emailWeeklySummary as boolean) ?? false,
+        emailMonthlySummary: (prefs.emailMonthlySummary as boolean) ?? false,
+        frequency:
+          (prefs.notificationFrequency as 'instant' | 'hourly' | 'daily') ||
+          'instant',
+        quietHoursEnabled: (prefs.quietHoursEnabled as boolean) ?? false,
+        quietHoursStart: (prefs.quietHoursStart as string) || '22:00:00',
+        quietHoursEnd: (prefs.quietHoursEnd as string) || '07:00:00',
       });
     }
   }, [preferences]);
+
+  // Translate a local toggle into the server schema's real field names
+  // before sending; unknown keys would be silently dropped by the server.
+  const buildServerPayload = (
+    key: keyof typeof localPrefs,
+    value: any
+  ): Record<string, unknown> => {
+    if (key === 'enablePush') {
+      return Object.fromEntries(PUSH_FLAGS.map((flag) => [flag, value]));
+    }
+    if (key === 'enableEmail') {
+      return Object.fromEntries(EMAIL_FLAGS.map((flag) => [flag, value]));
+    }
+    if (key === 'enableSound') {
+      return { notificationSound: value };
+    }
+    if (key === 'frequency') {
+      return { notificationFrequency: value };
+    }
+    if (key in GROUP_TO_SERVER_FLAGS) {
+      return Object.fromEntries(
+        GROUP_TO_SERVER_FLAGS[key].map((flag) => [flag, value])
+      );
+    }
+    // emailWeeklySummary, emailMonthlySummary, quietHours* map 1:1.
+    return { [key]: value };
+  };
 
   const handleToggle = async (key: keyof typeof localPrefs, value: any) => {
     const newPrefs = { ...localPrefs, [key]: value };
     setLocalPrefs(newPrefs);
 
     try {
-      await updatePreferences.mutateAsync(newPrefs);
+      await updatePreferences.mutateAsync(
+        buildServerPayload(key, value) as any
+      );
     } catch (error) {
       console.error('Failed to update preferences:', error);
       // Revert on error

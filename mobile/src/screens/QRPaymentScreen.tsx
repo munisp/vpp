@@ -7,6 +7,7 @@ import {
   Alert,
   Modal,
   ScrollView,
+  TextInput,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import QRScanner from '../components/QRScanner';
@@ -16,13 +17,19 @@ import { HapticService } from '../services/hapticService';
 export default function QRPaymentScreen({ navigation }: any) {
   const [scannerVisible, setScannerVisible] = useState(false);
   const [scannedData, setScannedData] = useState<any>(null);
+  const [phoneNumber, setPhoneNumber] = useState('');
 
-  const initiatePaymentMutation = trpc.paymentProcessing.initiatePayment.useMutation({
+  // Server endpoint: trpc.payments.initiate (server/routers/payments.ts).
+  // Input: paymentType enum, amount in integer cents, paymentMethod enum,
+  // optional phoneNumber (required for the mobile-money gateway prompt).
+  const initiatePaymentMutation = trpc.payments.initiate.useMutation({
     onSuccess: async (data) => {
       await HapticService.paymentCompleted();
       Alert.alert(
         'Payment Initiated',
-        `Check your phone for payment prompt. Reference: ${data.referenceId}`,
+        `${data.message || 'Please check your phone to complete the payment.'}${
+          data.payment?.id ? `\nReference: PAY${data.payment.id}` : ''
+        }`,
         [
           {
             text: 'OK',
@@ -78,6 +85,14 @@ export default function QRPaymentScreen({ navigation }: any) {
   const handleConfirmPayment = () => {
     if (!scannedData) return;
 
+    if (!phoneNumber.trim()) {
+      Alert.alert(
+        'Phone Number Required',
+        'Enter the mobile money phone number that will receive the M-Pesa payment prompt.'
+      );
+      return;
+    }
+
     Alert.alert(
       'Confirm Payment',
       `Pay ${(scannedData.amount / 100).toFixed(0)} TZS to ${scannedData.recipient}?`,
@@ -86,14 +101,13 @@ export default function QRPaymentScreen({ navigation }: any) {
         {
           text: 'Confirm',
           onPress: () => {
+            // amount from the QR is already integer cents; the gateway
+            // prompt is only sent when a phone number is provided.
             initiatePaymentMutation.mutate({
+              paymentType: 'invoice',
               amount: scannedData.amount,
-              gateway: 'mpesa',
-              description: `Payment to ${scannedData.recipient}`,
-              metadata: {
-                recipient: scannedData.recipient,
-                reference: scannedData.reference,
-              },
+              paymentMethod: 'mpesa',
+              phoneNumber: phoneNumber || undefined,
             });
           },
         },
@@ -155,6 +169,16 @@ export default function QRPaymentScreen({ navigation }: any) {
                 </View>
               )}
             </View>
+
+            <Text style={styles.phoneLabel}>M-Pesa phone number</Text>
+            <TextInput
+              style={styles.phoneInput}
+              placeholder="e.g. 2557XXXXXXXX"
+              placeholderTextColor="#9ca3af"
+              keyboardType="phone-pad"
+              value={phoneNumber}
+              onChangeText={setPhoneNumber}
+            />
 
             <TouchableOpacity
               style={styles.confirmButton}
@@ -321,6 +345,22 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '600',
     color: '#111827',
+  },
+  phoneLabel: {
+    fontSize: 14,
+    color: '#6b7280',
+    marginBottom: 8,
+  },
+  phoneInput: {
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
+    borderRadius: 12,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    fontSize: 16,
+    color: '#111827',
+    marginBottom: 16,
+    backgroundColor: '#f9fafb',
   },
   confirmButton: {
     backgroundColor: '#10b981',

@@ -3,6 +3,7 @@ import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { useAuth } from '../contexts/AuthContext';
+import { trpc } from '../services/trpc';
 import { ActivityIndicator, View, StyleSheet } from 'react-native';
 
 // Import screens
@@ -24,6 +25,13 @@ import AuditLogsScreen from '../screens/AuditLogsScreen';
 import NotificationSettingsScreen from '../screens/NotificationSettingsScreen';
 import OnboardingScreen from '../screens/OnboardingScreen';
 import WorkflowMonitorScreen from '../screens/WorkflowMonitorScreen';
+import WalletScreen from '../screens/WalletScreen';
+import AdvisorScreen from '../screens/AdvisorScreen';
+import CarbonScreen from '../screens/CarbonScreen';
+import BatteryHealthScreen from '../screens/BatteryHealthScreen';
+import SolarYieldScreen from '../screens/SolarYieldScreen';
+import PriceAlertsScreen from '../screens/PriceAlertsScreen';
+import OrderBookScreen from '../screens/OrderBookScreen';
 
 const Stack = createNativeStackNavigator();
 const Tab = createBottomTabNavigator();
@@ -97,7 +105,17 @@ function TabIcon({ icon, color }: { icon: string; color: string }) {
 export default function AppNavigator() {
   const { user, loading } = useAuth();
 
-  if (loading) {
+  // Onboarding completion is a real server-side signal
+  // (server/routers/onboarding.ts -> getStatus, backed by the
+  // users.onboardingCompleted column). Logged-in users who have not
+  // completed onboarding are routed to the Onboarding screen first.
+  const { data: onboardingStatus, isLoading: onboardingLoading } =
+    trpc.onboarding.getStatus.useQuery(undefined, {
+      enabled: !!user,
+      retry: 1,
+    });
+
+  if (loading || (!!user && onboardingLoading)) {
     return (
       <View style={styles.loading}>
         <ActivityIndicator size="large" color="#10b981" />
@@ -105,9 +123,19 @@ export default function AppNavigator() {
     );
   }
 
+  // If the status query fails, fall back to the main app rather than
+  // trapping the user on a spinner.
+  const needsOnboarding =
+    !!user && onboardingStatus != null && onboardingStatus.completed === false;
+
   return (
     <NavigationContainer>
-      <Stack.Navigator screenOptions={{ headerShown: false }}>
+      <Stack.Navigator
+        screenOptions={{ headerShown: false }}
+        initialRouteName={
+          !user ? 'Login' : needsOnboarding ? 'Onboarding' : 'Main'
+        }
+      >
         {!user ? (
           <Stack.Screen name="Login" component={LoginScreen} />
         ) : (
@@ -125,6 +153,13 @@ export default function AppNavigator() {
       <Stack.Screen name="NotificationSettings" component={NotificationSettingsScreen} />
       <Stack.Screen name="Onboarding" component={OnboardingScreen} />
       <Stack.Screen name="WorkflowMonitor" component={WorkflowMonitorScreen} />
+      <Stack.Screen name="Wallet" component={WalletScreen} />
+      <Stack.Screen name="Advisor" component={AdvisorScreen} />
+      <Stack.Screen name="Carbon" component={CarbonScreen} />
+      <Stack.Screen name="BatteryHealth" component={BatteryHealthScreen} />
+      <Stack.Screen name="SolarYield" component={SolarYieldScreen} />
+      <Stack.Screen name="PriceAlerts" component={PriceAlertsScreen} />
+      <Stack.Screen name="OrderBook" component={OrderBookScreen} />
           </>
         )}
       </Stack.Navigator>

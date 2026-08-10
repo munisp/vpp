@@ -10,7 +10,7 @@ import {
   ActivityIndicator,
   RefreshControl,
 } from 'react-native';
-import { trpc } from '../lib/trpc';
+import { trpc } from '../services/trpc';
 import { Ionicons } from '@expo/vector-icons';
 
 type ActionFilter = 'all' | 'create' | 'update' | 'delete' | 'approve' | 'suspend';

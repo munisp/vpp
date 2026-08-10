@@ -10,7 +10,7 @@ import {
   Alert,
   FlatList,
 } from 'react-native';
-import { trpc } from '../lib/trpc';
+import { trpc } from '../services/trpc';
 import { Ionicons } from '@expo/vector-icons';
 
 const { width } = Dimensions.get('window');
@@ -46,9 +46,15 @@ export default function OnboardingScreen({ navigation }: any) {
   const [currentStep, setCurrentStep] = useState(0);
   const flatListRef = useRef<FlatList>(null);
 
+  const utils = trpc.useUtils();
   const registerAsset = trpc.assets.register.useMutation();
   const updateOnboarding = trpc.onboarding.updateStep.useMutation();
-  const completeOnboarding = trpc.onboarding.complete.useMutation();
+  const completeOnboarding = trpc.onboarding.complete.useMutation({
+    onSuccess: () => {
+      // Keep AppNavigator's routing signal (onboarding.getStatus) in sync.
+      utils.onboarding.getStatus.invalidate();
+    },
+  });
 
   // Step 1: Asset Registration
   const [assetForm, setAssetForm] = useState({

@@ -25,7 +25,7 @@ const PUSH_FLAGS = [
   'pushBillingAlert',
 ] as const;
 
-export default function SettingsScreen() {
+export default function SettingsScreen({ navigation }: any) {
   const { user, logout } = useAuth();
   const utils = trpc.useUtils();
 
@@ -146,6 +146,12 @@ export default function SettingsScreen() {
             />
           }
         />
+        <SettingItem
+          icon="🎛️"
+          title="Notification Settings"
+          description="Categories, frequency and quiet hours"
+          onPress={() => navigation.navigate('NotificationSettings')}
+        />
       </View>
 
       {/* Trading Preferences */}
@@ -228,6 +234,12 @@ export default function SettingsScreen() {
           title="Data Usage"
           description="Manage offline sync settings"
           onPress={() => Alert.alert('Coming soon')}
+        />
+        <SettingItem
+          icon="🧭"
+          title="Replay Onboarding"
+          description="Walk through the account setup steps again"
+          onPress={() => navigation.navigate('Onboarding')}
         />
       </View>
 

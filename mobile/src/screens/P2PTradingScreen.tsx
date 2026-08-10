@@ -164,6 +164,18 @@ export default function P2PTradingScreen({ navigation }: any) {
         </TouchableOpacity>
       </View>
 
+      {/* Link to the order-book matcher */}
+      <TouchableOpacity
+        style={styles.orderBookLink}
+        onPress={() => navigation.navigate('OrderBook')}
+      >
+        <Ionicons name="book-outline" size={18} color="#10b981" />
+        <Text style={styles.orderBookLinkText}>
+          View live order book & place matched orders
+        </Text>
+        <Ionicons name="chevron-forward" size={18} color="#6b7280" />
+      </TouchableOpacity>
+
       {/* Create Offer Form */}
       {createModalVisible && (
         <View style={styles.createForm}>
@@ -465,6 +477,21 @@ const styles = StyleSheet.create({
   },
   addButton: {
     padding: 8,
+  },
+  orderBookLink: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#ecfdf5',
+    borderRadius: 12,
+    padding: 12,
+    marginBottom: 12,
+    gap: 8,
+  },
+  orderBookLinkText: {
+    flex: 1,
+    fontSize: 13,
+    color: '#065f46',
+    fontWeight: '600',
   },
   createForm: {
     backgroundColor: 'white',

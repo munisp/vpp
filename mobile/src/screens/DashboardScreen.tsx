@@ -238,6 +238,68 @@ export default function DashboardScreen({ navigation }: any) {
         </View>
       </View>
 
+      {/* Insights & Tools */}
+      <View style={styles.actionsCard}>
+        <Text style={styles.sectionTitle}>Insights & Tools</Text>
+        <View style={styles.actionsGrid}>
+          <ActionButton
+            icon="👛"
+            label="Wallet"
+            onPress={() => navigation.navigate('Wallet')}
+          />
+          <ActionButton
+            icon="🤖"
+            label="Advisor"
+            onPress={() => navigation.navigate('Advisor')}
+          />
+          <ActionButton
+            icon="🌱"
+            label="Carbon"
+            onPress={() => navigation.navigate('Carbon')}
+          />
+          <ActionButton
+            icon="🔋"
+            label="Battery"
+            onPress={() => navigation.navigate('BatteryHealth')}
+          />
+          <ActionButton
+            icon="☀️"
+            label="Solar Yield"
+            onPress={() => navigation.navigate('SolarYield')}
+          />
+          <ActionButton
+            icon="🔔"
+            label="Price Alerts"
+            onPress={() => navigation.navigate('PriceAlerts')}
+          />
+          <ActionButton
+            icon="📖"
+            label="Order Book"
+            onPress={() => navigation.navigate('OrderBook')}
+          />
+          <ActionButton
+            icon="🤝"
+            label="P2P Market"
+            onPress={() => navigation.navigate('P2PTrading')}
+          />
+          <ActionButton
+            icon="📷"
+            label="QR Payment"
+            onPress={() => navigation.navigate('QRPayment')}
+          />
+          <ActionButton
+            icon="📲"
+            label="Register Device"
+            onPress={() => navigation.navigate('QRDeviceRegistration')}
+          />
+          <ActionButton
+            icon="🏆"
+            label="Rewards"
+            onPress={() => navigation.navigate('Gamification')}
+          />
+        </View>
+      </View>
+
       {/* Admin Actions (only for admins) */}
       {currentUser?.role === 'admin' && (
         <View style={styles.actionsCard}>

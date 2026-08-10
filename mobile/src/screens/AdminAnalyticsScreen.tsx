@@ -10,7 +10,7 @@ import {
   RefreshControl,
 } from 'react-native';
 import { LineChart, BarChart, PieChart } from 'react-native-chart-kit';
-import { trpc } from '../lib/trpc';
+import { trpc } from '../services/trpc';
 import { Ionicons } from '@expo/vector-icons';
 
 const screenWidth = Dimensions.get('window').width;

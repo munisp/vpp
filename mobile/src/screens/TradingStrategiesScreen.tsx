@@ -12,7 +12,7 @@ import {
   ActivityIndicator,
   RefreshControl,
 } from 'react-native';
-import { trpc } from '../lib/trpc';
+import { trpc } from '../services/trpc';
 import { Ionicons } from '@expo/vector-icons';
 
 export default function TradingStrategiesScreen() {

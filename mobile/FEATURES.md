@@ -38,9 +38,10 @@ The VPP Platform mobile app is a full-featured React Native application that pro
 
 ### 5. Payment Processing
 - Multiple payment gateways (M-Pesa, Airtel Money, Tigo Pesa)
+- Payment type selector: bill/invoice payment or energy token purchase (`token_purchase` with an `energyKwh` amount; the meter token is generated server-side only after the payment is confirmed, and may be marked `pending_issuance` when STS vending is not configured — the app displays the server's real response message and never claims a token was issued at initiation time)
 - Payment history and tracking
 - Balance management
-- QR code-based payments
+- QR code-based payments ("Scan to Pay" from the Payments screen, or "QR Payment" from the Dashboard)
 - Payment receipts and confirmations
 
 ### 6. Demand Response (DR)
@@ -53,15 +54,19 @@ The VPP Platform mobile app is a full-featured React Native application that pro
 
 ### 7. Settings & Preferences
 - User profile management
-- Notification preferences
+- Notification preferences (master push toggle) plus a dedicated Notification Settings screen (per-category toggles, frequency, quiet hours)
+- Replay Onboarding entry (re-runs the setup wizard)
 - Security settings
-- Biometric authentication setup
 - App preferences
+
+### 7a. Onboarding
+- First-login routing: logged-in users whose server-side `onboardingCompleted` flag (via `trpc.onboarding.getStatus`) is false are routed to the Onboarding wizard before the main app
+- Also reachable from Settings → "Replay Onboarding"
 
 ## Advanced Features
 
 ### 8. QR Scanner
-**Location**: Separate screens accessible from Dashboard and Payments
+**Location**: QR Payment is accessible from the Dashboard "Insights & Tools" quick-actions grid and from the Payments screen ("Scan to Pay"). QR device registration is accessible from the Dashboard "Insights & Tools" quick-actions grid ("Register Device").
 
 **Capabilities**:
 - **QR Payment Processing**
@@ -83,7 +88,7 @@ Device: vpp://device?type=solar&name=Solar Panel&capacity=5000&serial=SP123456
 ```
 
 ### 9. Gamification
-**Location**: Accessible from Dashboard or Settings
+**Location**: Accessible from the Dashboard "Insights & Tools" quick-actions grid ("Rewards")
 
 **Features**:
 - **Leaderboard**
@@ -179,6 +184,8 @@ Device: vpp://device?type=solar&name=Solar Panel&capacity=5000&serial=SP123456
 ## Native Mobile Features
 
 ### 12. Push Notifications
+**Status**: Planned (not yet wired). The service module exists (`src/services/pushNotifications.ts`) but is never initialized or invoked from any screen. Notification *preferences* are functional and stored server-side; actual push delivery is not wired up.
+
 **Service**: Expo Notifications
 
 **Notification Types**:
@@ -217,6 +224,8 @@ Device: vpp://device?type=solar&name=Solar Panel&capacity=5000&serial=SP123456
 - Sound and vibration
 
 ### 13. Biometric Authentication
+**Status**: Planned (not yet wired). The service module exists (`src/services/biometricAuth.ts`) but is never initialized or invoked from any screen; no login or payment flow currently requires biometric confirmation.
+
 **Service**: Expo Local Authentication
 
 **Supported Methods**:
@@ -238,6 +247,8 @@ Device: vpp://device?type=solar&name=Solar Panel&capacity=5000&serial=SP123456
 - Secure credential storage
 
 ### 14. Offline Storage
+**Status**: Planned (not yet wired). The service module exists (`src/services/offlineStorage.ts`) but is never initialized or invoked from any screen; there is currently no offline caching of server data.
+
 **Service**: AsyncStorage + SQLite
 
 **Cached Data**:
@@ -254,6 +265,8 @@ Device: vpp://device?type=solar&name=Solar Panel&capacity=5000&serial=SP123456
 - Secure storage
 
 ### 15. Background Sync
+**Status**: Planned (not yet wired). The service module exists (`src/services/syncService.ts`) but is never initialized or invoked from any screen; no periodic background synchronization currently runs.
+
 **Service**: Custom sync service
 
 **Sync Operations**:
@@ -289,10 +302,9 @@ Device: vpp://device?type=solar&name=Solar Panel&capacity=5000&serial=SP123456
 
 ### Security
 - Secure token storage (Expo SecureStore)
-- Biometric authentication
 - SSL/TLS encryption
-- JWT token refresh
 - Session management
+- (Planned) Biometric authentication — see Feature 13
 
 ## Installation & Setup
 

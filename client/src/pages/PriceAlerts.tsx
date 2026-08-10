@@ -9,9 +9,277 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Switch } from "@/components/ui/switch";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Badge } from "@/components/ui/badge";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { toast } from "sonner";
-import { Bell, BellOff, Plus, Trash2, Edit, TrendingUp, TrendingDown, Activity, Mail, Smartphone, MessageSquare } from "lucide-react";
+import { Bell, BellOff, Plus, Trash2, Edit, TrendingUp, TrendingDown, Activity, Mail, Smartphone, MessageSquare, Globe, Play } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useAuth } from "@/_core/hooks/useAuth";
+
+/**
+ * Market-scoped price alert subscriptions backed by the price alert engine
+ * (country + tariff-band scope, evaluated against real market prices).
+ */
+function MarketSubscriptions() {
+  const { user } = useAuth();
+  const isAdmin = user?.role === "admin";
+  const utils = trpc.useUtils();
+  const [open, setOpen] = useState(false);
+  const [form, setForm] = useState({
+    name: "",
+    alertType: "above" as "above" | "below" | "between",
+    targetPrice: "",
+    minPrice: "",
+    maxPrice: "",
+    country: "tanzania" as "nigeria" | "tanzania",
+    priceType: "peak" as "off_peak" | "shoulder" | "peak" | "super_peak",
+    notifyPush: true,
+    notifySMS: false,
+    cooldownMinutes: 60,
+  });
+
+  const subs = trpc.priceAlertEngine.listMySubscriptions.useQuery();
+  const subscribeMutation = trpc.priceAlertEngine.subscribe.useMutation({
+    onSuccess: () => {
+      toast.success("Subscription created");
+      setOpen(false);
+      utils.priceAlertEngine.listMySubscriptions.invalidate();
+    },
+    onError: (e) => toast.error(e.message || "Failed to subscribe"),
+  });
+  const unsubscribeMutation = trpc.priceAlertEngine.unsubscribe.useMutation({
+    onSuccess: () => {
+      toast.success("Unsubscribed");
+      utils.priceAlertEngine.listMySubscriptions.invalidate();
+    },
+    onError: (e) => toast.error(e.message || "Failed to unsubscribe"),
+  });
+  const runEvalMutation = trpc.priceAlertEngine.runEvaluation.useMutation({
+    onSuccess: (r) => {
+      toast.success(
+        `Evaluation complete — ${r.activeAlerts} active alert(s), ${r.triggered} triggered, ${r.skippedNoPrice} skipped (no real price)`
+      );
+    },
+    onError: (e) => toast.error(e.message || "Evaluation failed"),
+  });
+
+  const handleSubscribe = () => {
+    if (!form.name.trim()) return toast.error("Name is required");
+    const payload: any = {
+      name: form.name.trim(),
+      alertType: form.alertType,
+      country: form.country,
+      priceType: form.priceType,
+      notifyPush: form.notifyPush,
+      notifySMS: form.notifySMS,
+      cooldownMinutes: form.cooldownMinutes,
+    };
+    if (form.alertType === "between") {
+      payload.minPrice = parseInt(form.minPrice, 10);
+      payload.maxPrice = parseInt(form.maxPrice, 10);
+    } else {
+      payload.targetPrice = parseInt(form.targetPrice, 10);
+    }
+    subscribeMutation.mutate(payload);
+  };
+
+  const thresholdLabel = (s: any) => {
+    if (s.alertType === "between") return `${s.minPrice}–${s.maxPrice}¢`;
+    return `${s.alertType} ${s.targetPrice}¢`;
+  };
+
+  return (
+    <Card className="mt-10">
+      <CardHeader>
+        <div className="flex items-center justify-between flex-wrap gap-3">
+          <div>
+            <CardTitle className="flex items-center gap-2">
+              <Globe className="h-5 w-5" /> Market price subscriptions
+            </CardTitle>
+            <CardDescription>
+              Evaluated by the alert engine against real published market prices per country and tariff band
+            </CardDescription>
+          </div>
+          <div className="flex gap-2">
+            {isAdmin && (
+              <Button
+                variant="outline"
+                onClick={() => runEvalMutation.mutate()}
+                disabled={runEvalMutation.isPending}
+              >
+                <Play className="mr-2 h-4 w-4" />
+                {runEvalMutation.isPending ? "Evaluating…" : "Run evaluation"}
+              </Button>
+            )}
+            <Dialog open={open} onOpenChange={setOpen}>
+              <DialogTrigger asChild>
+                <Button variant="outline">
+                  <Plus className="mr-2 h-4 w-4" /> Subscribe
+                </Button>
+              </DialogTrigger>
+              <DialogContent className="max-w-lg">
+                <DialogHeader>
+                  <DialogTitle>Subscribe to a market price threshold</DialogTitle>
+                  <DialogDescription>
+                    Alerts fire when the real market price for the chosen band crosses your threshold
+                  </DialogDescription>
+                </DialogHeader>
+                <div className="space-y-4 py-2">
+                  <div className="space-y-2">
+                    <Label>Name *</Label>
+                    <Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="e.g., Peak price spike" />
+                  </div>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="space-y-2">
+                      <Label>Country</Label>
+                      <Select value={form.country} onValueChange={(v: any) => setForm({ ...form, country: v })}>
+                        <SelectTrigger><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="nigeria">Nigeria</SelectItem>
+                          <SelectItem value="tanzania">Tanzania</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="space-y-2">
+                      <Label>Tariff band</Label>
+                      <Select value={form.priceType} onValueChange={(v: any) => setForm({ ...form, priceType: v })}>
+                        <SelectTrigger><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="off_peak">Off-peak</SelectItem>
+                          <SelectItem value="shoulder">Shoulder</SelectItem>
+                          <SelectItem value="peak">Peak</SelectItem>
+                          <SelectItem value="super_peak">Super-peak</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Condition</Label>
+                    <Select value={form.alertType} onValueChange={(v: any) => setForm({ ...form, alertType: v })}>
+                      <SelectTrigger><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="above">Price above</SelectItem>
+                        <SelectItem value="below">Price below</SelectItem>
+                        <SelectItem value="between">Price between</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  {form.alertType === "between" ? (
+                    <div className="grid grid-cols-2 gap-4">
+                      <div className="space-y-2">
+                        <Label>Min (cents/kWh)</Label>
+                        <Input type="number" min="1" value={form.minPrice} onChange={(e) => setForm({ ...form, minPrice: e.target.value })} />
+                      </div>
+                      <div className="space-y-2">
+                        <Label>Max (cents/kWh)</Label>
+                        <Input type="number" min="1" value={form.maxPrice} onChange={(e) => setForm({ ...form, maxPrice: e.target.value })} />
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="space-y-2">
+                      <Label>Target (cents/kWh)</Label>
+                      <Input type="number" min="1" value={form.targetPrice} onChange={(e) => setForm({ ...form, targetPrice: e.target.value })} />
+                    </div>
+                  )}
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <Smartphone className="h-4 w-4 text-muted-foreground" />
+                      <span className="text-sm">Push</span>
+                    </div>
+                    <Switch checked={form.notifyPush} onCheckedChange={(c) => setForm({ ...form, notifyPush: c })} />
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <MessageSquare className="h-4 w-4 text-muted-foreground" />
+                      <span className="text-sm">SMS</span>
+                    </div>
+                    <Switch checked={form.notifySMS} onCheckedChange={(c) => setForm({ ...form, notifySMS: c })} />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Cooldown (minutes)</Label>
+                    <Input
+                      type="number"
+                      min="1"
+                      value={form.cooldownMinutes}
+                      onChange={(e) => setForm({ ...form, cooldownMinutes: parseInt(e.target.value) || 60 })}
+                    />
+                  </div>
+                </div>
+                <DialogFooter>
+                  <Button onClick={handleSubscribe} disabled={subscribeMutation.isPending}>
+                    {subscribeMutation.isPending ? "Subscribing…" : "Subscribe"}
+                  </Button>
+                </DialogFooter>
+              </DialogContent>
+            </Dialog>
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent>
+        {subs.isLoading ? (
+          <p className="text-sm text-muted-foreground py-4">Loading subscriptions…</p>
+        ) : subs.error ? (
+          <p className="text-sm text-muted-foreground py-4">{subs.error.message}</p>
+        ) : !subs.data || subs.data.subscriptions.length === 0 ? (
+          <p className="text-sm text-muted-foreground py-4">
+            No market subscriptions yet. Subscribe above to get alerted when a real market price band
+            crosses your threshold.
+          </p>
+        ) : (
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Name</TableHead>
+                <TableHead>Market scope</TableHead>
+                <TableHead>Condition</TableHead>
+                <TableHead>Channels</TableHead>
+                <TableHead>Triggered</TableHead>
+                <TableHead>Status</TableHead>
+                <TableHead></TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {subs.data.subscriptions.map((s: any) => (
+                <TableRow key={s.id}>
+                  <TableCell className="font-medium">{s.name}</TableCell>
+                  <TableCell className="text-sm">
+                    {s.scope ? (
+                      <Badge variant="outline">
+                        {s.scope.country} · {String(s.scope.priceType).replace(/_/g, "-")}
+                      </Badge>
+                    ) : (
+                      <span className="text-muted-foreground">no market scope</span>
+                    )}
+                  </TableCell>
+                  <TableCell className="text-sm">{thresholdLabel(s)}</TableCell>
+                  <TableCell>
+                    <div className="flex gap-1">
+                      {s.notifyPush && <Smartphone className="h-4 w-4" />}
+                      {s.notifySMS && <MessageSquare className="h-4 w-4" />}
+                    </div>
+                  </TableCell>
+                  <TableCell className="text-sm">{s.triggerCount}×</TableCell>
+                  <TableCell>
+                    {s.isActive ? <Badge variant="default">active</Badge> : <Badge variant="secondary">inactive</Badge>}
+                  </TableCell>
+                  <TableCell>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      onClick={() => unsubscribeMutation.mutate({ priceAlertId: s.id })}
+                      disabled={unsubscribeMutation.isPending}
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </Button>
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
 
 export default function PriceAlerts() {
   const [isCreateDialogOpen, setIsCreateDialogOpen] = useState(false);
@@ -453,6 +721,8 @@ export default function PriceAlerts() {
             </Card>
           ))}
         </div>
+
+        <MarketSubscriptions />
       </div>
     </DashboardLayout>
   );

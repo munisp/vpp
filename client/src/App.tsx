@@ -52,6 +52,20 @@ import QRGenerator from "./pages/QRGenerator";
 import ReferralLeaderboard from "./pages/ReferralLeaderboard";
 import QRHistory from "@/pages/QRHistory";
 import UserAnalyticsDashboard from "@/pages/AnalyticsDashboard";
+import EnergyAdvisor from "@/pages/EnergyAdvisor";
+import Tariffs from "@/pages/Tariffs";
+import BatteryHealth from "@/pages/BatteryHealth";
+import OrderBook from "@/pages/OrderBook";
+import CarbonCredits from "@/pages/CarbonCredits";
+import GridAnomalies from "@/pages/GridAnomalies";
+import V2G from "@/pages/V2G";
+import Wallet from "@/pages/Wallet";
+import CommunityPools from "@/pages/CommunityPools";
+import DRForecast from "@/pages/DRForecast";
+import SmsCenter from "@/pages/SmsCenter";
+import SolarYield from "@/pages/SolarYield";
+import NtlDashboard from "@/pages/NtlDashboard";
+import ComplianceReports from "@/pages/ComplianceReports";
 
 function Router() {
   return (
@@ -100,7 +114,21 @@ function Router() {
       <Route path="/admin/performance" component={PerformanceDashboard} />
       <Route path="/admin/iot-devices" component={IoTDeviceMonitoring} />
       <Route path="/leaderboard" component={Leaderboard} />
-      <Route path="/analytics" component={Analytics} />
+      <Route path="/insights/advisor" component={EnergyAdvisor} />
+      <Route path="/insights/solar-yield" component={SolarYield} />
+      <Route path="/insights/battery-health" component={BatteryHealth} />
+      <Route path="/insights/carbon" component={CarbonCredits} />
+      <Route path="/market/tariffs" component={Tariffs} />
+      <Route path="/market/order-book" component={OrderBook} />
+      <Route path="/wallet" component={Wallet} />
+      <Route path="/v2g" component={V2G} />
+      <Route path="/grid/anomalies" component={GridAnomalies} />
+      <Route path="/grid/dr-forecast" component={DRForecast} />
+      <Route path="/grid/ntl" component={NtlDashboard} />
+      <Route path="/grid/compliance-reports" component={ComplianceReports} />
+      <Route path="/community-pools" component={CommunityPools} />
+      <Route path="/sms-center" component={SmsCenter} />
+      <Route path="/energy-analytics" component={Analytics} />
       <Route path="/404" component={NotFound} />
       <Route component={NotFound} />
     </Switch>

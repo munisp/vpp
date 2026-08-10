@@ -33,7 +33,21 @@ import {
   Bell,
   Settings,
   Shield,
-  BarChart3
+  BarChart3,
+  Sparkles,
+  Sun,
+  BatteryCharging,
+  Leaf,
+  ArrowDownUp,
+  Wallet as WalletIcon,
+  CalendarClock,
+  AlertTriangle,
+  CloudSun,
+  ShieldAlert,
+  FileCheck,
+  Users,
+  MessageSquare,
+  Globe
 } from "lucide-react";
 import { CSSProperties, useEffect, useRef, useState } from "react";
 import { useLocation } from "wouter";
@@ -42,22 +56,78 @@ import { Button } from "./ui/button";
 import { NotificationCenter } from './NotificationCenter';
 import { QrCode, Gift, History } from 'lucide-react';
 
-const getMenuItems = (userRole?: string) => [
-  { icon: LayoutDashboard, label: "Dashboard", path: "/" },
-  { icon: Zap, label: "My Assets", path: "/assets" },
-  { icon: Activity, label: "Monitoring", path: "/monitoring" },
-  { icon: TrendingUp, label: "Trading", path: "/trading" },
-  { icon: Zap, label: "Energy Insights", path: "/energy-insights" },
-  { icon: Receipt, label: "Billing", path: "/billing" },
-  { icon: CreditCard, label: "Payments", path: "/payments" },
-  { icon: Bell, label: "Alerts", path: "/alerts" },
-  { icon: BarChart3, label: "Analytics", path: "/analytics" },
-  { icon: Zap, label: "Demand Response", path: "/demand-response" },
-  { icon: QrCode, label: "QR Scanner", path: "/qr-scanner" },
-  { icon: History, label: "QR History", path: "/qr-history" },
-  { icon: Gift, label: "Referrals", path: "/referrals" },
-  { icon: Settings, label: "Settings", path: "/settings" },
-  ...(userRole === 'admin' ? [{ icon: Shield, label: "Admin", path: "/admin" }] : []),
+type MenuItem = { icon: any; label: string; path: string };
+type MenuSection = { label?: string; items: MenuItem[] };
+
+const getMenuSections = (userRole?: string): MenuSection[] => [
+  {
+    items: [
+      { icon: LayoutDashboard, label: "Dashboard", path: "/" },
+      { icon: Zap, label: "My Assets", path: "/assets" },
+      { icon: Activity, label: "Monitoring", path: "/monitoring" },
+      { icon: TrendingUp, label: "Trading", path: "/trading" },
+      { icon: Zap, label: "Energy Insights", path: "/energy-insights" },
+      { icon: Receipt, label: "Billing", path: "/billing" },
+      { icon: CreditCard, label: "Payments", path: "/payments" },
+      { icon: Bell, label: "Alerts", path: "/alerts" },
+      { icon: BarChart3, label: "Analytics", path: "/analytics" },
+      { icon: Zap, label: "Demand Response", path: "/demand-response" },
+    ],
+  },
+  {
+    label: "Insights",
+    items: [
+      { icon: BarChart3, label: "Energy Analytics", path: "/energy-analytics" },
+      { icon: Sparkles, label: "Energy Advisor", path: "/insights/advisor" },
+      { icon: Sun, label: "Solar Yield", path: "/insights/solar-yield" },
+      { icon: BatteryCharging, label: "Battery Health", path: "/insights/battery-health" },
+      { icon: Leaf, label: "Carbon Credits", path: "/insights/carbon" },
+    ],
+  },
+  {
+    label: "Market",
+    items: [
+      { icon: TrendingUp, label: "Tariffs", path: "/market/tariffs" },
+      { icon: ArrowDownUp, label: "Order Book", path: "/market/order-book" },
+      { icon: Globe, label: "Price Alerts", path: "/trading/price-alerts" },
+    ],
+  },
+  {
+    label: "Wallet & V2G",
+    items: [
+      { icon: WalletIcon, label: "Wallet", path: "/wallet" },
+      { icon: CalendarClock, label: "V2G Optimizer", path: "/v2g" },
+    ],
+  },
+  {
+    label: "Grid Ops",
+    items: [
+      { icon: AlertTriangle, label: "Anomalies", path: "/grid/anomalies" },
+      { icon: CloudSun, label: "DR Forecast", path: "/grid/dr-forecast" },
+      ...(userRole === 'admin'
+        ? [
+            { icon: ShieldAlert, label: "NTL Detection", path: "/grid/ntl" },
+            { icon: FileCheck, label: "Compliance Reports", path: "/grid/compliance-reports" },
+          ]
+        : []),
+    ],
+  },
+  {
+    label: "Community",
+    items: [
+      { icon: Users, label: "Community Pools", path: "/community-pools" },
+      { icon: MessageSquare, label: "SMS Center", path: "/sms-center" },
+    ],
+  },
+  {
+    items: [
+      { icon: QrCode, label: "QR Scanner", path: "/qr-scanner" },
+      { icon: History, label: "QR History", path: "/qr-history" },
+      { icon: Gift, label: "Referrals", path: "/referrals" },
+      { icon: Settings, label: "Settings", path: "/settings" },
+      ...(userRole === 'admin' ? [{ icon: Shield, label: "Admin", path: "/admin" }] : []),
+    ],
+  },
 ];
 
 const SIDEBAR_WIDTH_KEY = "sidebar-width";
@@ -149,8 +219,9 @@ function DashboardLayoutContent({
   const isCollapsed = state === "collapsed";
   const [isResizing, setIsResizing] = useState(false);
   const sidebarRef = useRef<HTMLDivElement>(null);
-  const menuItems = getMenuItems(user?.role);
-  const activeMenuItem = menuItems.find(item => item.path === location);
+  const menuSections = getMenuSections(user?.role);
+  const allMenuItems = menuSections.flatMap(s => s.items);
+  const activeMenuItem = allMenuItems.find(item => item.path === location);
   const isMobile = useIsMobile();
 
   useEffect(() => {
@@ -237,26 +308,35 @@ function DashboardLayoutContent({
           </SidebarHeader>
 
           <SidebarContent className="gap-0">
-            <SidebarMenu className="px-2 py-1">
-              {menuItems.map(item => {
-                const isActive = location === item.path;
-                return (
-                  <SidebarMenuItem key={item.path}>
-                    <SidebarMenuButton
-                      isActive={isActive}
-                      onClick={() => setLocation(item.path)}
-                      tooltip={item.label}
-                      className={`h-10 transition-all font-normal`}
-                    >
-                      <item.icon
-                        className={`h-4 w-4 ${isActive ? "text-primary" : ""}`}
-                      />
-                      <span>{item.label}</span>
-                    </SidebarMenuButton>
-                  </SidebarMenuItem>
-                );
-              })}
-            </SidebarMenu>
+            {menuSections.map((section, si) => (
+              <div key={si}>
+                {section.label && (
+                  <p className="px-4 pt-3 pb-1 text-xs font-medium uppercase tracking-wide text-muted-foreground group-data-[collapsible=icon]:hidden">
+                    {section.label}
+                  </p>
+                )}
+                <SidebarMenu className="px-2 py-1">
+                  {section.items.map(item => {
+                    const isActive = location === item.path;
+                    return (
+                      <SidebarMenuItem key={item.path}>
+                        <SidebarMenuButton
+                          isActive={isActive}
+                          onClick={() => setLocation(item.path)}
+                          tooltip={item.label}
+                          className={`h-10 transition-all font-normal`}
+                        >
+                          <item.icon
+                            className={`h-4 w-4 ${isActive ? "text-primary" : ""}`}
+                          />
+                          <span>{item.label}</span>
+                        </SidebarMenuButton>
+                      </SidebarMenuItem>
+                    );
+                  })}
+                </SidebarMenu>
+              </div>
+            ))}
           </SidebarContent>
 
           <SidebarFooter className="p-3">

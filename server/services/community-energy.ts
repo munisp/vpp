@@ -6,10 +6,12 @@
  */
 
 import { getDb } from '../db';
-import { sql } from 'drizzle-orm';
+import { sql, and, gte, lte } from 'drizzle-orm';
 import { settlementLedger } from './settlement-ledger';
 import { derCapabilities } from './der-capabilities';
 import { kafkaPublisher } from '../integration/kafka-publisher';
+import { marketPrices } from '../../drizzle/schema';
+import { pricePredictionService } from '../ml/price-prediction';
 
 // Types for community energy
 export interface EnergyCommunity {
@@ -84,6 +86,7 @@ export interface MicrogridStatus {
   criticalLoadsServed: boolean;
   estimatedAutonomyHours: number | null;
   lastTransition: Date | null;
+  telemetryAvailable: boolean; // false when no recent telemetry exists for community assets
   alerts: string[];
 }
 
@@ -377,9 +380,8 @@ export class CommunityEnergyService {
       totalImportWh = totalConsumptionWh - totalGenerationWh;
     }
 
-    // Calculate financial values (simplified pricing)
-    const exportPrice = 45; // cents/kWh
-    const importPrice = 55; // cents/kWh
+    // Calculate financial values from real market prices (throws if unavailable)
+    const { exportPrice, importPrice } = await this.getPeriodPrices(periodStart, periodEnd);
     const totalRevenue = Math.round((totalExportWh / 1000) * exportPrice);
     const totalCost = Math.round((totalImportWh / 1000) * importPrice);
     const netValue = totalRevenue - totalCost;
@@ -606,13 +608,56 @@ export class CommunityEnergyService {
       totalGenerationKw: Math.round(totalGenerationKw * 100) / 100,
       totalLoadKw: Math.round(totalLoadKw * 100) / 100,
       batterySOC,
-      frequencyHz: 50.0, // Would come from grid monitoring
-      voltageV: 230, // Would come from grid monitoring
+      // Real telemetry readings; null (never hardcoded) when none are available
+      frequencyHz: latestFrequencyHz,
+      voltageV: latestVoltageV,
       criticalLoadsServed,
       estimatedAutonomyHours,
       lastTransition: null, // Would track from state changes
+      telemetryAvailable: telemetryRowsSeen > 0,
       alerts,
     };
+  }
+
+  /**
+   * Resolve real export/import prices (cents/kWh) for an allocation period.
+   *
+   * Uses the average recorded market price over the period from market_prices
+   * (same access path as server/ml/price-prediction.ts). Falls back to the ML
+   * price forecast average when no recorded prices exist. Throws when neither
+   * source is available — real money shares must never use invented rates.
+   */
+  private async getPeriodPrices(periodStart: Date, periodEnd: Date): Promise<{ exportPrice: number; importPrice: number }> {
+    try {
+      const db = await getDb();
+      if (db) {
+        const rows = await db
+          .select({ price: marketPrices.price })
+          .from(marketPrices)
+          .where(and(gte(marketPrices.timestamp, periodStart), lte(marketPrices.timestamp, periodEnd)));
+
+        if (rows.length > 0) {
+          const avgPrice = rows.reduce((sum, r) => sum + r.price, 0) / rows.length;
+          console.log(`[CommunityEnergy] Using average market price ${avgPrice.toFixed(2)}c/kWh from ${rows.length} recorded prices`);
+          return { exportPrice: avgPrice, importPrice: avgPrice };
+        }
+      }
+    } catch (error) {
+      console.warn('[CommunityEnergy] Failed to load market prices, trying ML forecast:', error);
+    }
+
+    try {
+      const predictions = await pricePredictionService.predictPrices(24);
+      if (predictions.length > 0) {
+        const avgPrice = predictions.reduce((sum, p) => sum + p.predictedPrice, 0) / predictions.length;
+        console.log(`[CommunityEnergy] Using ML forecast average price ${avgPrice.toFixed(2)}c/kWh`);
+        return { exportPrice: avgPrice, importPrice: avgPrice };
+      }
+    } catch (error) {
+      console.warn('[CommunityEnergy] ML price forecast unavailable:', error);
+    }
+
+    throw new Error('[CommunityEnergy] No market price data or ML price forecast available; cannot calculate allocation values');
   }
 
   /**
@@ -622,44 +667,135 @@ export class CommunityEnergyService {
     success: boolean;
     message: string;
     newMode: string;
+    transitionInitiated: boolean;
+    reason?: string;
   }> {
     const db = await getDb();
     if (!db) throw new Error('Database not available');
 
     const community = await this.getCommunity(communityId);
-    if (!community) return { success: false, message: 'Community not found', newMode: 'unknown' };
-    if (!community.canIsland) return { success: false, message: 'Community cannot island', newMode: community.islandingMode };
+    if (!community) return { success: false, message: 'Community not found', newMode: 'unknown', transitionInitiated: false };
+    if (!community.canIsland) return { success: false, message: 'Community cannot island', newMode: community.islandingMode, transitionInitiated: false };
 
     // Check if safe to island
     const status = await this.getMicrogridStatus(communityId);
     if (status.totalGenerationKw < status.totalLoadKw * 0.5) {
-      return { 
-        success: false, 
-        message: 'Insufficient generation to support island mode', 
-        newMode: community.islandingMode 
+      return {
+        success: false,
+        message: 'Insufficient generation to support island mode',
+        newMode: community.islandingMode,
+        transitionInitiated: false,
       };
     }
 
-    // Transition to islanded mode
+    // Record the transition request as pending operator confirmation.
+    // islanding_mode is NOT changed here: physically disconnecting from the
+    // grid requires switchgear actuation that this platform cannot perform or
+    // verify. The mode only changes when an operator explicitly confirms the
+    // physical transition via confirmModeTransition().
+    const pendingTransition = JSON.stringify({
+      targetMode: 'islanded',
+      status: 'pending_operator_confirmation',
+      reason,
+      requestedAt: new Date().toISOString(),
+    });
     await db.execute(sql`
       UPDATE energy_communities SET
-        islanding_mode = 'transitioning',
-        metadata = JSON_SET(COALESCE(metadata, '{}'), '$.islandingReason', ${reason}, '$.islandingInitiated', ${new Date().toISOString()}),
+        metadata = JSON_SET(COALESCE(metadata, '{}'), '$.pendingTransition', CAST(${pendingTransition} AS JSON)),
         updated_at = NOW()
       WHERE id = ${communityId}
     `);
 
-    // Simulate transition delay (in production, would coordinate with actual switchgear)
+    console.log(`[CommunityEnergy] Islanding requested for community ${communityId} (pending operator confirmation): ${reason}`);
+
+    return {
+      success: true,
+      transitionInitiated: false,
+      reason: 'physical_switchgear_confirmation_required',
+      message: 'Islanding request recorded; islanding_mode will change only after an operator confirms the physical switchgear transition',
+      newMode: community.islandingMode,
+    };
+  }
+
+  /**
+   * Operator confirmation for a pending islanding/reconnection transition.
+   *
+   * This is the ONLY path that changes islanding_mode: it must be called by
+   * an operator after the physical switchgear transition has been performed
+   * and verified on site. Without a pending request, or with approve=false,
+   * the mode is left unchanged.
+   */
+  async confirmModeTransition(communityId: number, operatorId: number, approve: boolean): Promise<{
+    success: boolean;
+    message: string;
+    newMode: string;
+  }> {
+    const db = await getDb();
+    if (!db) throw new Error('Database not available');
+
+    const result = await db.execute(sql`
+      SELECT islanding_mode, metadata FROM energy_communities WHERE id = ${communityId} LIMIT 1
+    `);
+    const row = (result as any)[0]?.[0] ?? (result as any)[0];
+    if (!row) return { success: false, message: 'Community not found', newMode: 'unknown' };
+
+    let pending: { targetMode?: string; status?: string; reason?: string } | null = null;
+    try {
+      const metadata = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata;
+      pending = metadata?.pendingTransition ?? null;
+    } catch {
+      pending = null;
+    }
+
+    if (!pending || pending.status !== 'pending_operator_confirmation' || !pending.targetMode) {
+      return {
+        success: false,
+        message: 'No pending islanding transition to confirm for this community',
+        newMode: row.islanding_mode,
+      };
+    }
+
+    const confirmedAt = new Date().toISOString();
+    if (!approve) {
+      await db.execute(sql`
+        UPDATE energy_communities SET
+          metadata = JSON_SET(
+            COALESCE(metadata, '{}'),
+            '$.pendingTransition.status', 'rejected',
+            '$.pendingTransition.rejectedBy', ${operatorId},
+            '$.pendingTransition.rejectedAt', ${confirmedAt}
+          ),
+          updated_at = NOW()
+        WHERE id = ${communityId}
+      `);
+      console.log(`[CommunityEnergy] Transition to ${pending.targetMode} rejected by operator ${operatorId} for community ${communityId}`);
+      return {
+        success: true,
+        message: `Transition to ${pending.targetMode} rejected; community remains ${row.islanding_mode}`,
+        newMode: row.islanding_mode,
+      };
+    }
+
     await db.execute(sql`
       UPDATE energy_communities SET
-        islanding_mode = 'islanded',
+        islanding_mode = ${pending.targetMode},
+        metadata = JSON_SET(
+          COALESCE(metadata, '{}'),
+          '$.pendingTransition.status', 'confirmed',
+          '$.pendingTransition.confirmedBy', ${operatorId},
+          '$.pendingTransition.confirmedAt', ${confirmedAt}
+        ),
         updated_at = NOW()
       WHERE id = ${communityId}
     `);
 
-    console.log(`[CommunityEnergy] Community ${communityId} transitioned to island mode: ${reason}`);
+    console.log(`[CommunityEnergy] Community ${communityId} transitioned to ${pending.targetMode} (confirmed by operator ${operatorId})`);
 
-    return { success: true, message: 'Successfully transitioned to island mode', newMode: 'islanded' };
+    return {
+      success: true,
+      message: `Transition to ${pending.targetMode} confirmed by operator`,
+      newMode: pending.targetMode,
+    };
   }
 
   /**
@@ -669,37 +805,46 @@ export class CommunityEnergyService {
     success: boolean;
     message: string;
     newMode: string;
+    transitionInitiated: boolean;
+    reason?: string;
   }> {
     const db = await getDb();
     if (!db) throw new Error('Database not available');
 
     const community = await this.getCommunity(communityId);
-    if (!community) return { success: false, message: 'Community not found', newMode: 'unknown' };
+    if (!community) return { success: false, message: 'Community not found', newMode: 'unknown', transitionInitiated: false };
 
     if (community.islandingMode !== 'islanded') {
-      return { success: false, message: 'Community is not in island mode', newMode: community.islandingMode };
+      return { success: false, message: 'Community is not in island mode', newMode: community.islandingMode, transitionInitiated: false };
     }
 
-    // Transition back to grid-tied
+    // Record the reconnection request as pending operator confirmation.
+    // Reconnecting to the grid requires physical synchronization
+    // (frequency/voltage match at the point of interconnection) that this
+    // platform cannot perform or verify. islanding_mode only changes when an
+    // operator confirms via confirmModeTransition().
+    const pendingTransition = JSON.stringify({
+      targetMode: 'grid_tied',
+      status: 'pending_operator_confirmation',
+      reason: 'grid_reconnection_requested',
+      requestedAt: new Date().toISOString(),
+    });
     await db.execute(sql`
       UPDATE energy_communities SET
-        islanding_mode = 'transitioning',
+        metadata = JSON_SET(COALESCE(metadata, '{}'), '$.pendingTransition', CAST(${pendingTransition} AS JSON)),
         updated_at = NOW()
       WHERE id = ${communityId}
     `);
 
-    // Simulate synchronization (in production, would verify frequency/voltage match)
-    await db.execute(sql`
-      UPDATE energy_communities SET
-        islanding_mode = 'grid_tied',
-        metadata = JSON_SET(COALESCE(metadata, '{}'), '$.reconnectedAt', ${new Date().toISOString()}),
-        updated_at = NOW()
-      WHERE id = ${communityId}
-    `);
+    console.log(`[CommunityEnergy] Grid reconnection requested for community ${communityId} (pending operator confirmation)`);
 
-    console.log(`[CommunityEnergy] Community ${communityId} reconnected to grid`);
-
-    return { success: true, message: 'Successfully reconnected to grid', newMode: 'grid_tied' };
+    return {
+      success: true,
+      transitionInitiated: false,
+      reason: 'physical_switchgear_confirmation_required',
+      message: 'Reconnection request recorded; islanding_mode will change only after an operator confirms physical synchronization with the grid',
+      newMode: community.islandingMode,
+    };
   }
 
   /**

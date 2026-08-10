@@ -51,16 +51,17 @@ export function useBiometricAuth() {
     }
   };
 
-  const register = async (): Promise<boolean> => {
+  const register = async (): Promise<{ success: boolean; verified: boolean; message?: string }> => {
     if (!state.isSupported) {
       setState(prev => ({ ...prev, error: 'Biometric authentication not supported' }));
-      return false;
+      return { success: false, verified: false };
     }
 
     setState(prev => ({ ...prev, isLoading: true, error: null }));
 
     try {
-      // Get registration options from server
+      // Get registration options from server (the server derives the WebAuthn
+      // user handle from the authenticated session — never hardcoded here).
       const options = await registerMutation.mutateAsync({ action: 'get-options' });
 
       // Create credential
@@ -94,21 +95,30 @@ export function useBiometricAuth() {
         throw new Error('Failed to create credential');
       }
 
-      // Send credential to server
+      // Send credential to server; the server only stores it after validating
+      // the challenge and parsing the attestation object.
       const response = credential.response as AuthenticatorAttestationResponse;
-      await registerMutation.mutateAsync({
+      const result: any = await registerMutation.mutateAsync({
         action: 'verify',
         credentialId: arrayBufferToBase64(credential.rawId),
         attestationObject: arrayBufferToBase64(response.attestationObject),
         clientDataJSON: arrayBufferToBase64(response.clientDataJSON),
       });
 
+      if (!result?.success) {
+        throw new Error(result?.message || 'Server did not store the credential');
+      }
+
       setState(prev => ({ ...prev, isRegistered: true, isLoading: false }));
-      return true;
+      return {
+        success: true,
+        verified: result.verified ?? false,
+        message: result.message,
+      };
     } catch (error: any) {
       const errorMessage = error.message || 'Failed to register biometric authentication';
       setState(prev => ({ ...prev, isLoading: false, error: errorMessage }));
-      return false;
+      return { success: false, verified: false, message: errorMessage };
     }
   };
 

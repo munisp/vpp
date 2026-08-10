@@ -2,10 +2,14 @@
  * Notification Service
  * 
  * Handles multi-channel notifications:
- * - Email notifications
+ * - Email notifications (delegated to the real SMTP emailService)
  * - SMS notifications (via Africa's Talking)
- * - Push notifications (web push)
+ * - Push notifications (delegated to the real web-push implementation)
  */
+
+import axios from 'axios';
+import { sendEmail as sendSmtpEmail } from './emailService';
+import { sendPushNotification as sendWebPush } from './sendNotification';
 
 export interface EmailNotification {
   to: string;
@@ -33,43 +37,33 @@ export interface PushNotification {
 }
 
 /**
- * Send email notification
- * In production, integrate with SendGrid, AWS SES, or similar
+ * Send email notification via the configured SMTP transporter (emailService).
+ * Returns the real delivery result — false on failure, never a fake true.
  */
 export async function sendEmail(notification: EmailNotification): Promise<boolean> {
   try {
-    // Demo mode: Log email instead of sending
-    console.log('[Email] Sending email notification:', {
+    const html = notification.html || (notification.body ? `<p>${notification.body.replace(/\n/g, '<br>')}</p>` : '');
+    if (!html && !notification.body) {
+      console.error('[Email] Refusing to send email with no content:', notification.subject);
+      return false;
+    }
+
+    const result = await sendSmtpEmail({
       to: notification.to,
       subject: notification.subject,
-      preview: notification.body?.substring(0, 100) || notification.html?.substring(0, 100) || 'No content',
+      html,
+      text: notification.body,
+      attachments: notification.attachments?.map((a) => ({
+        filename: a.filename,
+        content: a.content,
+        contentType: a.contentType,
+      })),
     });
 
-    // In production, uncomment and configure:
-    /*
-    const response = await fetch('https://api.sendgrid.com/v3/mail/send', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${process.env.SENDGRID_API_KEY}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        personalizations: [{
-          to: [{ email: notification.to }],
-        }],
-        from: { email: process.env.FROM_EMAIL || 'noreply@vpp.com' },
-        subject: notification.subject,
-        content: [{
-          type: notification.html ? 'text/html' : 'text/plain',
-          value: notification.html || notification.body,
-        }],
-      }),
-    });
-
-    return response.ok;
-    */
-
-    return true;
+    if (!result.success) {
+      console.error('[Email] Delivery failed:', result.error);
+    }
+    return result.success;
   } catch (error) {
     console.error('[Email] Failed to send email:', error);
     return false;
@@ -77,86 +71,82 @@ export async function sendEmail(notification: EmailNotification): Promise<boolea
 }
 
 /**
- * Send SMS notification via Africa's Talking
+ * Send SMS notification via Africa's Talking.
+ * Missing configuration or delivery failure returns false with a loud
+ * warning (callers are fire-and-forget, so we do not throw).
  */
 export async function sendSMS(notification: SMSNotification): Promise<boolean> {
+  const apiKey = process.env.AT_API_KEY;
+  const username = process.env.AT_USERNAME;
+  const baseUrl = process.env.AT_BASE_URL || 'https://api.africastalking.com';
+
+  if (!apiKey || !username) {
+    console.warn('[SMS] Africa\'s Talking not configured (AT_API_KEY/AT_USERNAME missing). SMS NOT sent to', notification.to);
+    return false;
+  }
+
   try {
-    // Demo mode: Log SMS instead of sending
-    console.log('[SMS] Sending SMS notification:', {
-      to: notification.to,
-      message: notification.message,
-    });
-
-    // In production, uncomment and configure:
-    /*
-    const apiKey = process.env.AFRICAS_TALKING_API_KEY;
-    const username = process.env.AFRICAS_TALKING_USERNAME;
-
-    if (!apiKey || !username) {
-      throw new Error('Africa\'s Talking credentials not configured');
-    }
-
-    const response = await fetch('https://api.africastalking.com/version1/messaging', {
-      method: 'POST',
-      headers: {
-        'apiKey': apiKey,
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'Accept': 'application/json',
-      },
-      body: new URLSearchParams({
+    const response = await axios.post(
+      `${baseUrl}/version1/messaging`,
+      new URLSearchParams({
         username,
         to: notification.to,
         message: notification.message,
-      }),
-    });
+      }).toString(),
+      {
+        headers: {
+          apiKey,
+          'Content-Type': 'application/x-www-form-urlencoded',
+          Accept: 'application/json',
+        },
+      }
+    );
 
-    const data = await response.json();
-    return data.SMSMessageData?.Recipients?.[0]?.status === 'Success';
-    */
+    const recipients = response.data?.SMSMessageData?.Recipients;
+    if (!Array.isArray(recipients) || recipients.length === 0) {
+      console.error('[SMS] Africa\'s Talking returned no recipients:', response.data);
+      return false;
+    }
+
+    const failed = recipients.filter((r: any) => r?.status !== 'Success');
+    if (failed.length > 0) {
+      console.error('[SMS] Delivery failed for some recipients:', failed);
+      return false;
+    }
 
     return true;
-  } catch (error) {
-    console.error('[SMS] Failed to send SMS:', error);
+  } catch (error: any) {
+    console.error('[SMS] Failed to send SMS:', error?.response?.data || error.message || error);
     return false;
   }
 }
 
 /**
  * Send push notification
- * Uses Web Push API for browser notifications
+ * Delegates to the real web-push implementation (sendNotification.ts),
+ * which looks up the user's stored push subscriptions and delivers via
+ * the Web Push protocol. Returns false loudly on delivery failure.
  */
 export async function sendPushNotification(notification: PushNotification): Promise<boolean> {
   try {
-    // Demo mode: Log push notification
-    console.log('[Push] Sending push notification:', {
-      userId: notification.userId,
-      title: notification.title,
-      body: notification.body,
-    });
-
-    // In production, integrate with web-push library:
-    /*
-    const webpush = require('web-push');
-    
-    webpush.setVapidDetails(
-      'mailto:admin@vpp.com',
-      process.env.VAPID_PUBLIC_KEY!,
-      process.env.VAPID_PRIVATE_KEY!
-    );
-
-    // Get user's push subscription from database
-    const subscription = await getUserPushSubscription(notification.userId);
-    
-    if (subscription) {
-      await webpush.sendNotification(subscription, JSON.stringify({
+    const result = await sendWebPush(
+      notification.userId,
+      {
         title: notification.title,
         body: notification.body,
-        icon: notification.icon || '/logo.png',
+        icon: notification.icon,
         data: notification.data,
-      }));
-    }
-    */
+      }
+    );
 
+    if (!result.success || result.errors > 0) {
+      console.error('[Push] Push delivery failed or partial:', result);
+      return false;
+    }
+    if (result.sentCount === 0) {
+      console.warn('[Push] No active push subscriptions accepted the notification for user', notification.userId);
+      return false;
+    }
     return true;
   } catch (error) {
     console.error('[Push] Failed to send push notification:', error);

@@ -5,6 +5,8 @@
  * API Documentation: https://developers.airtel.africa/documentation
  */
 
+import { randomBytes } from 'crypto';
+
 export interface AirtelMoneyConfig {
   clientId: string;
   clientSecret: string;
@@ -117,7 +119,7 @@ class AirtelMoneyService {
           amount: request.amount,
           country: 'TZ',
           currency: 'TZS',
-          id: `TXN-${Date.now()}-${Math.random().toString(36).substring(7)}`,
+          id: `TXN-${Date.now()}-${randomBytes(8).toString('hex')}`,
         },
       };
 

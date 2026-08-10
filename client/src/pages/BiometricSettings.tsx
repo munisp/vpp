@@ -96,8 +96,8 @@ export default function BiometricSettings() {
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
-            <CheckCircle2 className="h-5 w-5 text-green-600" />
-            Biometric Login Enabled
+            <CheckCircle2 className={`h-5 w-5 ${credentials.length > 0 ? "text-green-600" : "text-muted-foreground"}`} />
+            {credentials.length > 0 ? "Biometric Login Enabled" : "Biometric Login Not Enabled"}
           </CardTitle>
           <CardDescription>
             You have {credentials.length} device{credentials.length !== 1 ? "s" : ""} registered for biometric authentication
@@ -256,7 +256,12 @@ export default function BiometricSettings() {
               Add biometric authentication for this device
             </DialogDescription>
           </DialogHeader>
-          <BiometricRegistration />
+          <BiometricRegistration
+            onRegistered={() => {
+              refetch();
+              setRegisterDialogOpen(false);
+            }}
+          />
         </DialogContent>
       </Dialog>
 

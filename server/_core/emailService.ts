@@ -29,8 +29,28 @@ function getTransporter(): Transporter {
   const password = process.env.EMAIL_PASSWORD;
 
   if (!host || !user || !password) {
-    console.warn('[Email] Email service not configured. Set EMAIL_HOST, EMAIL_USER, and EMAIL_PASSWORD environment variables.');
-    // Return a test transporter for development
+    const missing = [
+      !host && 'EMAIL_HOST',
+      !user && 'EMAIL_USER',
+      !password && 'EMAIL_PASSWORD',
+    ].filter(Boolean).join(', ');
+
+    // In production there is no silent fallback: missing SMTP configuration
+    // is a hard misconfiguration and must fail loudly instead of pointing at
+    // a localhost dev server that cannot deliver mail.
+    if (process.env.NODE_ENV === 'production') {
+      throw new Error(
+        `[Email] SMTP is not configured in production (missing: ${missing}). ` +
+        `Set EMAIL_HOST, EMAIL_USER and EMAIL_PASSWORD — refusing to fall back to a local test transporter.`
+      );
+    }
+
+    console.warn(
+      `[Email] SMTP not configured (missing: ${missing}). ` +
+      `Falling back to localhost:1025 test transporter — emails will NOT be delivered. ` +
+      `This fallback is disabled in production.`
+    );
+    // Return a test transporter for development only
     transporter = nodemailer.createTransport({
       host: 'localhost',
       port: 1025,

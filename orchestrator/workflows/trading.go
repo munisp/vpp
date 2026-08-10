@@ -45,11 +45,21 @@ ctx = workflow.WithActivityOptions(ctx, ao)
 		return err
 	}
 	
+	// Fetch the real battery state of charge from telemetry. Without it,
+	// strategy conditions cannot be evaluated honestly, so skip trading with
+	// an explicit reason instead of feeding in a hardcoded value.
+	var batterySOC float64
+	err = workflow.ExecuteActivity(ctx, "GetBatteryStateOfChargeActivity", assetID).Get(ctx, &batterySOC)
+	if err != nil {
+		logger.Warn("Skipping trading: battery state of charge unavailable", "assetID", assetID, "error", err)
+		return nil
+	}
+
 	// Prepare market data for strategy evaluation
 	marketData := map[string]interface{}{
 		"exportPrice":     price,
 		"importPrice":     price * 1.2, // Assume import is 20% higher
-		"batterySOC":      75.0,         // TODO: Get actual battery SOC
+		"batterySOC":      batterySOC,
 		"availableEnergy": surplus,
 	}
 	
@@ -82,18 +92,11 @@ ctx = workflow.WithActivityOptions(ctx, ao)
 			return err
 		}
 		
-		// Update strategy performance if strategy was used
-		if strategyToExecute != nil {
-			tradeResult := map[string]interface{}{
-				"success":      true,
-				"profit":       surplus * price,
-				"energyAmount": surplus,
-			}
-			err = workflow.ExecuteActivity(ctx, "UpdateStrategyPerformanceActivity", strategyToExecute["id"], tradeResult).Get(ctx, nil)
-			if err != nil {
-				logger.Warn("Failed to update strategy performance", "error", err)
-			}
-		}
+		// NOTE: the sell order created above is only PENDING. Strategy
+		// performance (and profit) must only be recorded for EXECUTED trades;
+		// no execution path exists in this module yet, so nothing is recorded
+		// here. Recording surplus*price as profit at this point would be
+		// fabricating revenue.
 
 // Publish trading event
 err = workflow.ExecuteActivity(ctx, "PublishKafkaEventActivity", "trade.created", orderID).Get(ctx, nil)

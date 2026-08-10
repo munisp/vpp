@@ -1,7 +1,7 @@
-import { router, publicProcedure } from "../_core/trpc";
+import { router, publicProcedure, adminProcedure } from "../_core/trpc";
 import { z } from "zod";
-import { randomBytes } from "crypto";
 import { mpesaService } from "../services/mpesa-service";
+import { generateSTSToken } from "../_core/paymentGateway";
 import { getDb } from "../db";
 import { payments, billings, tokens, users } from "../../drizzle/schema";
 import { eq } from "drizzle-orm";
@@ -110,9 +110,21 @@ export const mpesaWebhookRouter = router({
             // Generate energy token for token_purchase payments
             if (payment.paymentType === 'token_purchase') {
               const metadata = payment.metadata ? JSON.parse(payment.metadata) : {};
-              const energyKwh = metadata.energyKwh || 0;
-              if (energyKwh > 0) {
-                const tokenCode = Array.from(randomBytes(20)).map(b => (b % 10).toString()).join('');
+              const energyKwh = Number(metadata.energyKwh);
+              if (Number.isInteger(energyKwh) && energyKwh > 0) {
+                let tokenCode: string;
+                let tokenStatus: 'active' | 'pending_issuance' = 'active';
+                try {
+                  tokenCode = generateSTSToken(energyKwh, payment.amount);
+                } catch (stsError) {
+                  if (stsError instanceof Error && stsError.message === 'STS_VENDING_NOT_CONFIGURED') {
+                    // Record the owed token as pending issuance; never fabricate a code.
+                    tokenCode = `PENDING_ISSUANCE_${payment.id}`;
+                    tokenStatus = 'pending_issuance';
+                  } else {
+                    throw stsError;
+                  }
+                }
                 await db.insert(tokens).values({
                   userId: payment.userId,
                   paymentId: payment.id,
@@ -120,9 +132,11 @@ export const mpesaWebhookRouter = router({
                   energyKwh,
                   amount: payment.amount,
                   validUntil: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000),
-                  status: 'active',
+                  status: tokenStatus,
                 });
-                console.log('[MPesa Webhook] Energy token generated for payment', payment.id);
+                console.log('[MPesa Webhook] Energy token recorded for payment', payment.id, 'status:', tokenStatus);
+              } else {
+                console.error('[MPesa Webhook] token_purchase payment missing valid energyKwh metadata:', payment.id);
               }
             }
 
@@ -194,9 +208,9 @@ export const mpesaWebhookRouter = router({
     }),
 
   /**
-   * Test M-Pesa integration
+   * Test M-Pesa integration (admin only: triggers a real STK push)
    */
-  testPayment: publicProcedure
+  testPayment: adminProcedure
     .input(
       z.object({
         phoneNumber: z.string(),
@@ -216,9 +230,9 @@ export const mpesaWebhookRouter = router({
     }),
 
   /**
-   * Query payment status
+   * Query payment status (admin only: queries the live M-Pesa gateway)
    */
-  queryStatus: publicProcedure
+  queryStatus: adminProcedure
     .input(
       z.object({
         checkoutRequestId: z.string(),

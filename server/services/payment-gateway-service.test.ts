@@ -141,12 +141,16 @@ describe('PaymentGatewayService', () => {
   });
 
   describe('processRefund', () => {
-    it('should process refund for completed payment', async () => {
+    it('should refuse an unconfirmable M-Pesa refund and flag manual review', async () => {
       const { paymentGatewayService } = await import('./payment-gateway-service');
-      
+
+      // The mocked payment has no mpesaReceiptNumber in its metadata, so the
+      // gateway cannot confirm a reversal: the refund must fail honestly and
+      // be flagged for manual review — never reported as refunded.
       const result = await paymentGatewayService.processRefund(1, 'Customer request');
 
-      expect(result.success).toBe(true);
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('refund_not_supported');
       expect(result.refundId).toBeDefined();
       expect(result.refundId).toMatch(/^REF-1-/);
     });

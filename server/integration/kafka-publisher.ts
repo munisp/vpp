@@ -710,7 +710,7 @@ export class KafkaEventPublisher {
     jurisdiction: string;
     subjectType: string;
     subjectId: string;
-    result: 'pass' | 'fail' | 'warning';
+    result: 'pass' | 'fail' | 'warning' | 'pending_review';
     evidenceRef?: string;
     timestamp: Date;
   }): Promise<void> {

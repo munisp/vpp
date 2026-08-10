@@ -14,6 +14,7 @@ interface WeatherForecast {
   precipitation: number; // mm
   windSpeed: number; // m/s
   solarIrradiance: number; // W/m² (estimated from cloud cover)
+  mock?: boolean; // true when this point comes from generated mock data
 }
 
 interface WeatherCache {
@@ -26,15 +27,17 @@ interface WeatherCache {
 // const weatherCache = new Map<string, WeatherCache>();
 // const CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
 
-// Check if mock data is allowed (only in development/demo mode)
-const ALLOW_MOCK_WEATHER = process.env.NODE_ENV !== 'production' || process.env.ALLOW_MOCK_WEATHER === 'true';
+// Mock data is allowed ONLY when explicitly opted in via ALLOW_MOCK_WEATHER=true,
+// regardless of NODE_ENV. Never silently fall back to mock data otherwise.
+const ALLOW_MOCK_WEATHER = process.env.ALLOW_MOCK_WEATHER === 'true';
 
 /**
  * Get weather forecast for a location
- * In production, requires OPENWEATHER_API_KEY or ALLOW_MOCK_WEATHER=true
+ * Requires OPENWEATHER_API_KEY unless ALLOW_MOCK_WEATHER=true is explicitly set.
+ * Mock forecasts are marked with `mock: true` so downstream consumers can tell.
  */
 export async function getWeatherForecast(lat: number, lon: number, hours: number = 24): Promise<WeatherForecast[]> {
-  
+
   // Use real API if key is available
   if (ENV.openWeatherApiKey) {
     try {
@@ -42,19 +45,19 @@ export async function getWeatherForecast(lat: number, lon: number, hours: number
     } catch (error) {
       console.error('[Weather] API call failed:', error);
       if (!ALLOW_MOCK_WEATHER) {
-        throw new Error('Weather API unavailable and mock data not allowed in production');
+        throw new Error('Weather API unavailable and mock data not allowed (set ALLOW_MOCK_WEATHER=true to opt in)');
       }
-      console.warn('[Weather] Falling back to mock data (non-production mode)');
+      console.warn('[Weather] Falling back to mock data (ALLOW_MOCK_WEATHER=true)');
       return generateMockForecast(hours);
     }
   }
-  
-  // No API key - check if mock is allowed
+
+  // No API key - check if mock is explicitly allowed
   if (!ALLOW_MOCK_WEATHER) {
-    throw new Error('OPENWEATHER_API_KEY is required in production. Set ALLOW_MOCK_WEATHER=true to use mock data.');
+    throw new Error('OPENWEATHER_API_KEY is required. Set ALLOW_MOCK_WEATHER=true to explicitly use mock data.');
   }
-  
-  console.warn('[Weather] No API key configured, using mock data (non-production mode)');
+
+  console.warn('[Weather] No API key configured, using mock data (ALLOW_MOCK_WEATHER=true)');
   return generateMockForecast(hours);
 }
 
@@ -88,6 +91,12 @@ async function getWeatherFromAPI(lat: number, lon: number, hours: number, apiKey
     return forecasts;
   } catch (error: any) {
     console.error('[Weather API] Failed to fetch forecast:', error);
+    // Respect the mock gate: never silently substitute mock data for a real API
+    // failure. In production this must surface as an explicit error.
+    if (!ALLOW_MOCK_WEATHER) {
+      throw new Error(`Weather API fetch failed and mock data not allowed (set ALLOW_MOCK_WEATHER=true to opt in): ${error?.message || error}`);
+    }
+    console.warn('[Weather API] Falling back to mock data (ALLOW_MOCK_WEATHER=true)');
     return generateMockForecast(hours);
   }
 }
@@ -143,6 +152,7 @@ function generateMockForecast(hours: number): WeatherForecast[] {
       precipitation: Math.random() < 0.1 ? Math.random() * 5 : 0,
       windSpeed: 2 + Math.random() * 3,
       solarIrradiance,
+      mock: true, // explicitly marked so downstream consumers can detect mock data
     });
   }
 

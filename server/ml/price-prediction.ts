@@ -16,14 +16,14 @@ import { desc, gte, lte, and, eq } from 'drizzle-orm';
 export interface PricePrediction {
   timestamp: Date;
   predictedPrice: number; // cents per kWh
-  confidence: number; // 0-100
+  confidence: number | null; // 0-100, null when the model has never been trained
   priceChange: number; // percentage change from current
   trend: 'rising' | 'falling' | 'stable';
 }
 
 export interface TradingRecommendation {
   action: 'buy' | 'sell' | 'hold';
-  confidence: number; // 0-100
+  confidence: number | null; // 0-100, null when the model has never been trained
   expectedProfit: number; // cents
   reasoning: string;
   optimalTime: Date;
@@ -31,12 +31,13 @@ export interface TradingRecommendation {
 }
 
 export interface ModelMetrics {
-  accuracy: number; // percentage
-  mse: number; // mean squared error
-  mae: number; // mean absolute error
-  r2Score: number; // R² score
-  lastTrained: Date;
+  accuracy: number | null; // percentage, null when untrained
+  mse: number | null; // mean squared error, null when untrained
+  mae: number | null; // mean absolute error, null when untrained
+  r2Score: number | null; // R² score, null when untrained
+  lastTrained: Date | null;
   trainingDataPoints: number;
+  trained: boolean; // false until the model has been trained on real data
 }
 
 interface ModelWeights {
@@ -51,10 +52,10 @@ class PricePredictionService {
   private modelLoaded: boolean = false;
   private lastTraining: Date | null = null;
   private trainingDataPoints: number = 0;
-  private modelAccuracy: number = 0;
-  private modelMSE: number = 0;
-  private modelMAE: number = 0;
-  private modelR2: number = 0;
+  private modelAccuracy: number | null = null;
+  private modelMSE: number | null = null;
+  private modelMAE: number | null = null;
+  private modelR2: number | null = null;
   
   private weights: ModelWeights = {
     hourCoefficients: new Array(24).fill(0),
@@ -140,10 +141,12 @@ class PricePredictionService {
     this.weights.intercept = 45; // Base price in cents
     
     this.trainingDataPoints = 0;
-    this.modelAccuracy = 75;
-    this.modelMSE = 5.0;
-    this.modelMAE = 3.5;
-    this.modelR2 = 0.65;
+    // No fabricated metrics: the model has never been trained, so all quality
+    // metrics are null until real training data produces real measurements.
+    this.modelAccuracy = null;
+    this.modelMSE = null;
+    this.modelMAE = null;
+    this.modelR2 = null;
   }
   
   /**
@@ -246,6 +249,15 @@ class PricePredictionService {
       throw new Error('ML model not loaded');
     }
 
+    // An untrained model must never emit intercept-based pseudo-predictions:
+    // return an explicit insufficient-data result (empty array) instead.
+    // Consumers (ml-predictions router, community-energy, ev-charging) treat
+    // an empty array as "no forecast available" and fail or omit accordingly.
+    if (this.trainingDataPoints === 0) {
+      console.warn('[ML] Model has never been trained on real market data — returning no predictions (insufficient training data)');
+      return [];
+    }
+
     // Check cache first
     const cached = await redisCache.getMLPrediction(0, hoursAhead);
     if (cached) {
@@ -298,9 +310,12 @@ class PricePredictionService {
         if (priceChange > 5) trend = 'rising';
         else if (priceChange < -5) trend = 'falling';
 
-        // Confidence is based on model accuracy and decays slightly with horizon
-        const baseConfidence = this.modelAccuracy;
-        const confidence = Math.max(50, baseConfidence - i * 0.4);
+        // Confidence is derived from the trained model's measured accuracy and
+        // decays slightly with horizon. Null when the model was never trained
+        // on real data (no fabricated confidence).
+        const confidence = this.modelAccuracy !== null
+          ? Math.max(0, Math.min(100, this.modelAccuracy - i * 0.4))
+          : null;
 
         predictions.push({
           timestamp: predictionTime,
@@ -311,7 +326,7 @@ class PricePredictionService {
         });
       }
 
-      console.log(`[ML] Generated ${predictions.length} price predictions (model accuracy: ${this.modelAccuracy.toFixed(1)}%)`);
+      console.log(`[ML] Generated ${predictions.length} price predictions (model accuracy: ${this.modelAccuracy !== null ? this.modelAccuracy.toFixed(1) + '%' : 'untrained'})`);
 
       // Cache predictions
       await redisCache.cacheMLPrediction(0, hoursAhead, predictions);
@@ -324,6 +339,20 @@ class PricePredictionService {
   }
 
   /**
+   * Derive a 0-100 confidence score from the model's measured training metrics
+   * (scaled R² blended with MAE-based accuracy). Returns null when the model
+   * has never been trained on real data — no fabricated confidence.
+   */
+  private derivedConfidence(): number | null {
+    if (this.trainingDataPoints === 0 || this.modelR2 === null || this.modelAccuracy === null) {
+      return null;
+    }
+    const r2Scaled = Math.max(0, Math.min(1, this.modelR2)) * 100;
+    const blended = 0.5 * r2Scaled + 0.5 * Math.max(0, Math.min(100, this.modelAccuracy));
+    return Math.round(Math.max(0, Math.min(100, blended)));
+  }
+
+  /**
    * Get trading recommendation
    */
   async getTradingRecommendation(
@@ -333,6 +362,18 @@ class PricePredictionService {
   ): Promise<TradingRecommendation> {
     try {
       const predictions = await this.predictPrices(24);
+
+      if (predictions.length === 0) {
+        // Insufficient training data — no fabricated recommendation.
+        return {
+          action: 'hold',
+          confidence: null,
+          expectedProfit: 0,
+          reasoning: 'Price prediction model has insufficient training data (never trained on real market prices); no trading recommendation is available. Hold until the model has been trained.',
+          optimalTime: new Date(),
+          priceAtTime: currentPrice,
+        };
+      }
 
       // Find optimal selling time (highest price)
       const optimalSellTime = predictions.reduce((max, pred) =>
@@ -350,7 +391,8 @@ class PricePredictionService {
       let optimalTime = new Date();
       let priceAtTime = currentPrice;
       let expectedProfit = 0;
-      let confidence = 75;
+      // Confidence is derived from measured model metrics; null when untrained.
+      let confidence: number | null = this.derivedConfidence();
 
       if (energyAvailable > 0 && currentPrice >= optimalSellTime.predictedPrice * 0.95) {
         // Sell now if price is near peak
@@ -359,7 +401,7 @@ class PricePredictionService {
         optimalTime = new Date();
         priceAtTime = currentPrice;
         expectedProfit = energyAvailable * currentPrice;
-        confidence = 85;
+        confidence = this.derivedConfidence();
       } else if (energyAvailable > 0 && optimalSellTime.predictedPrice > currentPrice * 1.15) {
         // Hold and sell later at higher price
         action = 'hold';
@@ -375,7 +417,7 @@ class PricePredictionService {
         optimalTime = new Date();
         priceAtTime = currentPrice;
         expectedProfit = assetCapacity * (optimalSellTime.predictedPrice - currentPrice);
-        confidence = 80;
+        confidence = this.derivedConfidence();
       } else {
         // Hold
         reasoning = `Current price (${currentPrice}¢) is moderate. Monitor for better opportunities.`;
@@ -401,13 +443,17 @@ class PricePredictionService {
    * Get model performance metrics
    */
   async getModelMetrics(): Promise<ModelMetrics> {
+    const trained = this.trainingDataPoints > 0;
     return {
-      accuracy: this.modelAccuracy,
-      mse: this.modelMSE,
-      mae: this.modelMAE,
-      r2Score: this.modelR2,
-      lastTrained: this.lastTraining || new Date(),
+      // Null metrics when the model has never been trained on real data —
+      // callers must check `trained` rather than trusting fabricated numbers.
+      accuracy: trained ? this.modelAccuracy : null,
+      mse: trained ? this.modelMSE : null,
+      mae: trained ? this.modelMAE : null,
+      r2Score: trained ? this.modelR2 : null,
+      lastTrained: trained ? this.lastTraining : null,
       trainingDataPoints: this.trainingDataPoints,
+      trained,
     };
   }
 
@@ -477,16 +523,17 @@ class PricePredictionService {
     peakHours: number[];
     offPeakHours: number[];
     averagePrice: number;
-    priceVolatility: number;
+    priceVolatility: number | null; // null when no historical data available
     bestTradingDays: string[];
   }> {
     const db = await getDb();
-    
+
     // Default values if no data available
     let peakHours: number[] = [];
     let offPeakHours: number[] = [];
     let averagePrice = this.weights.intercept;
-    let priceVolatility = 15.0;
+    // No fabricated volatility: null until computed from real historical data.
+    let priceVolatility: number | null = null;
     let bestTradingDays: string[] = [];
     
     if (db) {
@@ -536,7 +583,7 @@ class PricePredictionService {
       peakHours,
       offPeakHours,
       averagePrice: Math.round(averagePrice * 100) / 100,
-      priceVolatility: Math.round(priceVolatility * 10) / 10,
+      priceVolatility: priceVolatility !== null ? Math.round(priceVolatility * 10) / 10 : null,
       bestTradingDays,
     };
   }

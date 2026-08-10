@@ -10,7 +10,9 @@ export const participantScores = mysqlTable("participant_scores", {
   
   // Performance metrics
   reliabilityScore: int("reliabilityScore").notNull(), // 0-100
-  responseTimeScore: int("responseTimeScore").notNull(), // 0-100
+  // Nullable: null when no DR response can be matched to a real event
+  // creation timestamp (factor skipped, overall score renormalized).
+  responseTimeScore: int("responseTimeScore"), // 0-100
   reductionAccuracyScore: int("reductionAccuracyScore").notNull(), // 0-100
   participationRateScore: int("participationRateScore").notNull(), // 0-100
   

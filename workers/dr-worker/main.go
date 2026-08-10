@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"time"
 
@@ -90,10 +91,11 @@ func DREventWorkflow(ctx workflow.Context, input DREventWorkflowInput) (DREventW
 		EventID: input.EventID,
 		Type:    "event_start",
 	}).Get(ctx, &notifResult); err != nil {
-		logger.Warn("Failed to send start notifications", "error", err)
-	} else {
-		result.NotificationsSent = notifResult.SentCount
+		logger.Error("Failed to send start notifications", "error", err)
+		result.Error = err.Error()
+		return result, err
 	}
+	result.NotificationsSent = notifResult.SentCount
 
 	// Step 4: Wait for event start time
 	if time.Now().Before(input.StartTime) {
@@ -115,10 +117,14 @@ func DREventWorkflow(ctx workflow.Context, input DREventWorkflowInput) (DREventW
 			TargetKW:     input.TargetKW,
 			StartTime:    input.StartTime,
 		}).Get(ctx, nil); err != nil {
-			logger.Warn("Compliance monitoring error", "error", err)
+			logger.Error("Compliance monitoring error", "error", err)
+			result.Error = err.Error()
+			return result, err
 		}
 		if elapsed+monitorInterval < eventDuration {
-			workflow.Sleep(ctx, monitorInterval)
+			if err := workflow.Sleep(ctx, monitorInterval); err != nil {
+				return result, err
+			}
 		}
 	}
 
@@ -137,13 +143,19 @@ func DREventWorkflow(ctx workflow.Context, input DREventWorkflowInput) (DREventW
 	// Step 7: Update event status to completed
 	if err := workflow.ExecuteActivity(ctx, UpdateEventStatusActivity, input.EventID, "completed").Get(ctx, nil); err != nil {
 		logger.Error("Failed to update event status to completed", "error", err)
+		result.Error = err.Error()
+		return result, err
 	}
 
 	// Step 8: Send completion notifications
-	workflow.ExecuteActivity(ctx, SendNotificationsActivity, SendNotificationsInput{
+	if err := workflow.ExecuteActivity(ctx, SendNotificationsActivity, SendNotificationsInput{
 		EventID: input.EventID,
 		Type:    "event_complete",
-	}).Get(ctx, nil)
+	}).Get(ctx, nil); err != nil {
+		logger.Error("Failed to send completion notifications", "error", err)
+		result.Error = err.Error()
+		return result, err
+	}
 
 	result.Success = true
 	logger.Info("DR Event Workflow completed successfully", "eventId", input.EventID)
@@ -191,8 +203,10 @@ type CalculateCompensationInput struct {
 
 func UpdateEventStatusActivity(ctx context.Context, eventID int, status string) error {
 	log.Printf("[Activity] Updating event %d status to %s", eventID, status)
+	// Real table per drizzle/schema.ts: demandResponseEvents
+	// (status enum: scheduled/active/completed/cancelled)
 	_, err := db.ExecContext(ctx,
-		"UPDATE demand_response_events SET status = ?, updatedAt = NOW() WHERE id = ?",
+		"UPDATE demandResponseEvents SET status = ?, updatedAt = NOW() WHERE id = ?",
 		status, eventID,
 	)
 	if err != nil {
@@ -214,20 +228,37 @@ func EnrollParticipantsActivity(ctx context.Context, input EnrollParticipantsInp
 	}
 	defer rows.Close()
 
+	// drResponses.participationStatus enum: opted_in/opted_out/auto_enrolled
+	participationStatus := "opted_in"
+	if input.AutoEnroll {
+		participationStatus = "auto_enrolled"
+	}
+
 	count := 0
 	for rows.Next() {
 		var userID int
 		if err := rows.Scan(&userID); err != nil {
-			continue
+			return result, fmt.Errorf("failed to scan participant row: %w", err)
 		}
+		// Real table per drizzle/schema.ts: drResponses. No unique key exists on
+		// (eventId, userId), so idempotency under Temporal activity retries is
+		// enforced with WHERE NOT EXISTS instead of ON DUPLICATE KEY UPDATE.
 		_, err = db.ExecContext(ctx, `
-			INSERT INTO dr_event_participants (eventId, userId, status, enrolledAt)
-			VALUES (?, ?, 'enrolled', NOW())
-			ON DUPLICATE KEY UPDATE status = 'enrolled'
-		`, input.EventID, userID)
-		if err == nil {
-			count++
+			INSERT INTO drResponses (eventId, userId, participationStatus, responseTime)
+			SELECT ?, ?, ?, NOW() FROM DUAL
+			WHERE NOT EXISTS (
+				SELECT 1 FROM drResponses WHERE eventId = ? AND userId = ?
+			)
+		`, input.EventID, userID, participationStatus, input.EventID, userID)
+		if err != nil {
+			// A DB error must fail the activity so Temporal retries — an event
+			// that enrolls 0 due to DB errors is a failure, not count=0 success.
+			return result, fmt.Errorf("failed to enroll user %d in event %d: %w", userID, input.EventID, err)
 		}
+		count++
+	}
+	if err := rows.Err(); err != nil {
+		return result, fmt.Errorf("error iterating participants: %w", err)
 	}
 
 	result.ParticipantCount = count
@@ -235,18 +266,19 @@ func EnrollParticipantsActivity(ctx context.Context, input EnrollParticipantsInp
 	return result, nil
 }
 
-// SendNotificationsActivity inserts notification rows into the database.
-// The Node.js notification service polls the notifications table and delivers
+// SendNotificationsActivity inserts user-facing rows into the real `alerts`
+// table. The Node.js notification service polls `alerts` and delivers
 // messages via FCM / APNS / email — this worker does not call those APIs directly.
 func SendNotificationsActivity(ctx context.Context, input SendNotificationsInput) (SendNotificationsResult, error) {
 	log.Printf("[Activity] Sending %s notifications for event %d", input.Type, input.EventID)
 	result := SendNotificationsResult{}
 
-	// Fetch event details for the notification body
+	// Fetch event details for the notification body.
+	// Real table: demandResponseEvents (column is eventName, not title).
 	var eventTitle string
 	var startTime, endTime time.Time
 	err := db.QueryRowContext(ctx,
-		"SELECT title, startTime, endTime FROM demand_response_events WHERE id = ?",
+		"SELECT eventName, startTime, endTime FROM demandResponseEvents WHERE id = ?",
 		input.EventID,
 	).Scan(&eventTitle, &startTime, &endTime)
 	if err != nil {
@@ -269,9 +301,10 @@ func SendNotificationsActivity(ctx context.Context, input SendNotificationsInput
 		body = fmt.Sprintf("Update for event '%s': %s", eventTitle, input.Type)
 	}
 
-	// Fetch all enrolled participants
+	// Fetch all enrolled participants from the real drResponses table.
 	rows, err := db.QueryContext(ctx,
-		"SELECT userId FROM dr_event_participants WHERE eventId = ? AND status = 'enrolled'",
+		`SELECT userId FROM drResponses
+		 WHERE eventId = ? AND participationStatus IN ('opted_in', 'auto_enrolled')`,
 		input.EventID,
 	)
 	if err != nil {
@@ -279,27 +312,36 @@ func SendNotificationsActivity(ctx context.Context, input SendNotificationsInput
 	}
 	defer rows.Close()
 
-	data, _ := json.Marshal(map[string]interface{}{
+	data, err := json.Marshal(map[string]interface{}{
 		"eventId": input.EventID,
 		"type":    input.Type,
 	})
+	if err != nil {
+		return result, fmt.Errorf("failed to marshal notification metadata: %w", err)
+	}
 
 	count := 0
 	for rows.Next() {
 		var userID int
 		if err := rows.Scan(&userID); err != nil {
-			continue
+			return result, fmt.Errorf("failed to scan participant row: %w", err)
 		}
+		// Real table per drizzle/schema.ts: alerts
+		// (alertType enum: system/trading/billing/maintenance)
 		_, err = db.ExecContext(ctx,
-			`INSERT INTO notifications (userId, title, body, type, data, createdAt)
-			 VALUES (?, ?, ?, 'dr_event', ?, NOW())`,
+			`INSERT INTO alerts (userId, alertType, severity, title, message, isRead, metadata, createdAt)
+			 VALUES (?, 'system', 'info', ?, ?, 0, ?, NOW())`,
 			userID, title, body, string(data),
 		)
-		if err == nil {
-			count++
-		} else {
-			log.Printf("[Activity] Failed to insert notification for user %d: %v", userID, err)
+		if err != nil {
+			// Fail loudly so Temporal retries instead of silently dropping
+			// participant notifications.
+			return result, fmt.Errorf("failed to insert notification for user %d: %w", userID, err)
 		}
+		count++
+	}
+	if err := rows.Err(); err != nil {
+		return result, fmt.Errorf("error iterating participants: %w", err)
 	}
 
 	result.SentCount = count
@@ -312,9 +354,10 @@ func SendNotificationsActivity(ctx context.Context, input SendNotificationsInput
 func MonitorComplianceActivity(ctx context.Context, input MonitorComplianceInput) error {
 	log.Printf("[Activity] Monitoring compliance for event %d (target %.1f kW)", input.EventID, input.TargetKW)
 
-	// Fetch enrolled participants
+	// Fetch enrolled participants from the real drResponses table
 	rows, err := db.QueryContext(ctx,
-		"SELECT userId FROM dr_event_participants WHERE eventId = ? AND status = 'enrolled'",
+		`SELECT userId FROM drResponses
+		 WHERE eventId = ? AND participationStatus IN ('opted_in', 'auto_enrolled')`,
 		input.EventID,
 	)
 	if err != nil {
@@ -328,7 +371,7 @@ func MonitorComplianceActivity(ctx context.Context, input MonitorComplianceInput
 	for rows.Next() {
 		var userID int
 		if err := rows.Scan(&userID); err != nil {
-			continue
+			return fmt.Errorf("failed to scan participant row: %w", err)
 		}
 
 		// Average power (W) for this user's assets over the monitoring window
@@ -340,27 +383,45 @@ func MonitorComplianceActivity(ctx context.Context, input MonitorComplianceInput
 			WHERE a.userId = ?
 			  AND t.timestamp BETWEEN ? AND ?
 		`, userID, windowStart, now).Scan(&avgPower)
-		if err != nil || !avgPower.Valid {
+		if err != nil {
+			return fmt.Errorf("failed to query telemetry for user %d: %w", userID, err)
+		}
+		if !avgPower.Valid {
+			// No telemetry in the window for this user — nothing to score yet.
 			continue
 		}
 
-		// Reduction = target minus actual (floor at 0)
+		// Reduction = target minus actual (floor at 0).
 		targetW := input.TargetKW * 1000
 		reductionW := targetW - avgPower.Float64
 		if reductionW < 0 {
 			reductionW = 0
 		}
+		// drResponses.actualReduction is stored in kW per drizzle/schema.ts.
+		reductionKW := int(math.Round(reductionW / 1000.0))
+		complianceScore := 0
+		if targetW > 0 {
+			complianceScore = int(math.Round(reductionW / targetW * 100))
+			if complianceScore > 100 {
+				complianceScore = 100
+			}
+		}
 
-		// Update the participant's compliance record
+		// Update the participant's compliance record. drResponses has no
+		// complianceScore column, so the score is kept in the metadata JSON.
 		_, err = db.ExecContext(ctx, `
-			UPDATE dr_event_participants
-			SET actualReduction = ?, complianceScore = LEAST(100, ROUND(? / ? * 100)),
+			UPDATE drResponses
+			SET actualReduction = ?,
+			    metadata = JSON_SET(COALESCE(metadata, JSON_OBJECT()), '$.complianceScore', ?),
 			    updatedAt = NOW()
 			WHERE eventId = ? AND userId = ?
-		`, reductionW, reductionW, targetW, input.EventID, userID)
+		`, reductionKW, complianceScore, input.EventID, userID)
 		if err != nil {
-			log.Printf("[Activity] Failed to update compliance for user %d: %v", userID, err)
+			return fmt.Errorf("failed to update compliance for user %d: %w", userID, err)
 		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("error iterating participants: %w", err)
 	}
 
 	return nil
@@ -373,9 +434,13 @@ func CalculateCompensationActivity(ctx context.Context, input CalculateCompensat
 
 	eventDurationHours := input.EndTime.Sub(input.StartTime).Hours()
 
+	// drResponses.actualReduction is kW (int); join users for the payout
+	// currency (drCompensation.currency enum: NGN/TZS/USD, NOT NULL).
 	rows, err := db.QueryContext(ctx,
-		`SELECT userId, actualReduction FROM dr_event_participants
-		 WHERE eventId = ? AND status = 'enrolled'`,
+		`SELECT r.id, r.userId, r.actualReduction, u.currency
+		 FROM drResponses r
+		 JOIN users u ON u.id = r.userId
+		 WHERE r.eventId = ? AND r.participationStatus IN ('opted_in', 'auto_enrolled')`,
 		input.EventID,
 	)
 	if err != nil {
@@ -384,38 +449,62 @@ func CalculateCompensationActivity(ctx context.Context, input CalculateCompensat
 	defer rows.Close()
 
 	for rows.Next() {
-		var userID int
-		var actualReductionW sql.NullFloat64
-		if err := rows.Scan(&userID, &actualReductionW); err != nil {
-			continue
+		var responseID, userID int
+		var actualReductionKW sql.NullInt64
+		var currency string
+		if err := rows.Scan(&responseID, &userID, &actualReductionKW, &currency); err != nil {
+			return fmt.Errorf("failed to scan participant reduction row: %w", err)
 		}
-		if !actualReductionW.Valid || actualReductionW.Float64 <= 0 {
+		if !actualReductionKW.Valid || actualReductionKW.Int64 <= 0 {
 			continue
 		}
 
-		// Energy reduced in kWh = (W / 1000) * hours
-		energyKWh := (actualReductionW.Float64 / 1000.0) * eventDurationHours
-		// Compensation in cents
+		// Energy reduced in kWh = kW * hours; compensation in cents.
+		energyKWh := float64(actualReductionKW.Int64) * eventDurationHours
 		compensationCents := int(energyKWh * float64(input.CompensationRate))
 		if compensationCents <= 0 {
 			continue
 		}
 
-		// Insert a compensation payment record
-		_, err = db.ExecContext(ctx, `
-			INSERT INTO dr_compensation (eventId, userId, energyKwh, compensationCents, status, createdAt)
-			VALUES (?, ?, ?, ?, 'pending', NOW())
-			ON DUPLICATE KEY UPDATE
-			  energyKwh = VALUES(energyKwh),
-			  compensationCents = VALUES(compensationCents),
-			  updatedAt = NOW()
-		`, input.EventID, userID, energyKWh, compensationCents)
+		// drCompensation has no energyKwh/compensationCents columns; the energy
+		// figure is kept in the metadata JSON, the money goes in `amount`.
+		metadata, err := json.Marshal(map[string]interface{}{
+			"energyKwh":         energyKWh,
+			"compensationRate":  input.CompensationRate,
+			"actualReductionKw": actualReductionKW.Int64,
+		})
 		if err != nil {
-			log.Printf("[Activity] Failed to insert compensation for user %d: %v", userID, err)
-			continue
+			return fmt.Errorf("failed to marshal compensation metadata for user %d: %w", userID, err)
 		}
 
-		log.Printf("[Activity] Compensation for user %d: %.3f kWh → %d cents", userID, energyKWh, compensationCents)
+		// Idempotent under Temporal retries: responseId is unique per
+		// user/event response, so guard on it (no unique key exists, hence
+		// WHERE NOT EXISTS rather than ON DUPLICATE KEY UPDATE).
+		_, err = db.ExecContext(ctx, `
+			INSERT INTO drCompensation (userId, eventId, responseId, amount, currency, status, metadata)
+			SELECT ?, ?, ?, ?, ?, 'pending', ? FROM DUAL
+			WHERE NOT EXISTS (
+				SELECT 1 FROM drCompensation WHERE responseId = ?
+			)
+		`, userID, input.EventID, responseID, compensationCents, currency, string(metadata), responseID)
+		if err != nil {
+			return fmt.Errorf("failed to insert compensation for user %d: %w", userID, err)
+		}
+
+		// Record the earned compensation on the response row itself.
+		_, err = db.ExecContext(ctx, `
+			UPDATE drResponses
+			SET compensation = ?, completedAt = COALESCE(completedAt, NOW()), updatedAt = NOW()
+			WHERE id = ?
+		`, compensationCents, responseID)
+		if err != nil {
+			return fmt.Errorf("failed to update compensation on response %d: %w", responseID, err)
+		}
+
+		log.Printf("[Activity] Compensation for user %d: %.3f kWh → %d %s cents", userID, energyKWh, compensationCents, currency)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("error iterating participant reductions: %w", err)
 	}
 
 	return nil

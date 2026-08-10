@@ -28,7 +28,9 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Gateway configuration (read from environment)
 # ---------------------------------------------------------------------------
-MPESA_BASE_URL      = os.getenv('MPESA_BASE_URL', 'https://sandbox.safaricom.co.ke')
+# No default: the base URL selects sandbox vs production and MUST be set
+# explicitly via the environment. Worker startup refuses to run without it.
+MPESA_BASE_URL      = os.getenv('MPESA_BASE_URL', '')
 MPESA_CONSUMER_KEY  = os.getenv('MPESA_CONSUMER_KEY', '')
 MPESA_CONSUMER_SECRET = os.getenv('MPESA_CONSUMER_SECRET', '')
 MPESA_SHORTCODE     = os.getenv('MPESA_SHORTCODE', '')
@@ -278,9 +280,33 @@ async def query_payment_status(gateway: str, transaction_id: str) -> dict:
             }
 
     elif gateway == 'tigo_pesa':
-        # Tigo Pesa uses callback-based confirmation; status is set by the webhook.
-        # Return 'pending' so the workflow polls until the webhook updates the DB.
-        return {'success': False, 'status': 'pending', 'result_code': 'PENDING', 'result_desc': 'Awaiting callback'}
+        # Tigo Pesa confirms payments via a server-to-server callback; the
+        # webhook handler writes the final status into the payments table.
+        # The real inquiry is therefore a DB read of the callback-recorded
+        # status for the payment carrying this transaction ID.
+        connection = get_db_connection()
+        cursor = connection.cursor(dictionary=True)
+        try:
+            cursor.execute(
+                "SELECT id, status FROM payments WHERE transactionId = %s ORDER BY id DESC LIMIT 1",
+                (transaction_id,),
+            )
+            row = cursor.fetchone()
+        finally:
+            cursor.close()
+            connection.close()
+        if not row:
+            raise RuntimeError(
+                f"Status inquiry failed: no payment row with transactionId '{transaction_id}'"
+            )
+        db_status = row['status']
+        return {
+            'success': db_status == 'completed',
+            'status': db_status if db_status in ('completed', 'failed') else 'pending',
+            'result_code': db_status.upper(),
+            'result_desc': 'Status recorded by Tigo Pesa payment callback',
+            'payment_id': row['id'],
+        }
 
     else:
         raise ValueError(f"Unsupported payment gateway: {gateway}")
@@ -295,11 +321,7 @@ async def update_payment_status(
 ) -> bool:
     """Update payment status in the database."""
     logger.info(f"Updating payment {payment_id} status to {status}")
-    try:
-        connection = get_db_connection()
-    except Exception as e:
-        logger.error(f"Failed to connect to database: {e}")
-        return False
+    connection = get_db_connection()
     cursor = connection.cursor()
     try:
         if transaction_id:
@@ -316,9 +338,8 @@ async def update_payment_status(
         logger.info(f"Payment {payment_id} updated successfully")
         return True
     except Error as e:
-        logger.error(f"Failed to update payment: {e}")
         connection.rollback()
-        return False
+        raise RuntimeError(f"Failed to update payment {payment_id}: {e}") from e
     finally:
         cursor.close()
         connection.close()
@@ -327,8 +348,10 @@ async def update_payment_status(
 @activity.defn
 async def send_payment_notification(user_id: int, payment_id: int, status: str, amount: int) -> bool:
     """
-    Insert a push notification record into the database.
-    The Node.js notification service polls this table and delivers to FCM/APNS.
+    Insert a user-facing alert row into the real `alerts` table.
+    The notification service polls `alerts` and delivers via FCM/APNS/email.
+    Raises on database failure so Temporal retries instead of silently
+    dropping the notification.
     """
     logger.info(f"Sending payment notification to user {user_id}: {status}, {amount}c")
     connection = get_db_connection()
@@ -340,18 +363,19 @@ async def send_payment_notification(user_id: int, payment_id: int, status: str, 
             if status == 'completed'
             else f"Your payment of {amount / 100:.2f} could not be completed."
         )
+        # alerts.alertType enum: system/trading/billing/maintenance
+        severity = 'info' if status == 'completed' else 'error'
         cursor.execute(
-            """INSERT INTO notifications (userId, title, body, type, data, createdAt)
-               VALUES (%s, %s, %s, 'payment', %s, NOW())""",
-            (user_id, title, body, json.dumps({'paymentId': payment_id, 'status': status})),
+            """INSERT INTO alerts (userId, alertType, severity, title, message, isRead, metadata, createdAt)
+               VALUES (%s, 'billing', %s, %s, %s, 0, %s, NOW())""",
+            (user_id, severity, title, body, json.dumps({'paymentId': payment_id, 'status': status})),
         )
         connection.commit()
         logger.info(f"Notification queued for user {user_id}")
         return True
     except Error as e:
-        logger.error(f"Failed to queue notification: {e}")
         connection.rollback()
-        return False
+        raise RuntimeError(f"Failed to queue notification for user {user_id}: {e}") from e
     finally:
         cursor.close()
         connection.close()
@@ -359,26 +383,59 @@ async def send_payment_notification(user_id: int, payment_id: int, status: str, 
 
 @activity.defn
 async def record_payment_audit(payment_id: int, action: str, details: dict) -> bool:
-    """Insert an audit log entry for the payment action."""
+    """
+    Append an entry to the real `payment_gateway_logs` audit trail
+    (drizzle paymentGatewayLogs, physical table payment_gateway_logs).
+    The gateway is resolved from the payment's recorded paymentMethod.
+    Raises on any failure: the workflow must never report success for a
+    payment that has no audit trail.
+    """
     logger.info(f"Recording audit log for payment {payment_id}: {action}")
+    connection = get_db_connection()
+    cursor = connection.cursor(dictionary=True)
     try:
-        connection = get_db_connection()
-    except Exception as e:
-        logger.error(f"Failed to connect to database: {e}")
-        return False
-    cursor = connection.cursor()
-    try:
+        cursor.execute("SELECT paymentMethod FROM payments WHERE id = %s", (payment_id,))
+        row = cursor.fetchone()
+        if not row:
+            raise ValueError(f"Cannot record audit: payment {payment_id} not found")
+        gateway = row['paymentMethod']
+        # payment_gateway_logs.gateway enum: mpesa/airtel_money/tigo_pesa
+        if gateway not in ('mpesa', 'airtel_money', 'tigo_pesa'):
+            raise ValueError(
+                f"Cannot record gateway audit for payment {payment_id}: "
+                f"paymentMethod '{gateway}' is not a mobile-money gateway"
+            )
+
+        # payment_gateway_logs.status enum: pending/success/failed/timeout
+        action_status_map = {
+            'payment_completed': 'success',
+            'payment_failed': 'failed',
+            'verification_timeout': 'timeout',
+        }
+        if action in action_status_map:
+            log_status = action_status_map[action]
+        elif details.get('status') == 'completed':
+            log_status = 'success'
+        elif details.get('status') == 'failed':
+            log_status = 'failed'
+        else:
+            log_status = 'pending'
+
+        error_message = None
+        if log_status in ('failed', 'timeout'):
+            error_message = details.get('error') or details.get('result_desc')
+
         cursor.execute(
-            """INSERT INTO payment_audit_logs (paymentId, action, details, createdAt)
-               VALUES (%s, %s, %s, NOW())""",
-            (payment_id, action, json.dumps(details)),
+            """INSERT INTO payment_gateway_logs
+               (payment_id, gateway, request_type, response_payload, status, error_message, created_at)
+               VALUES (%s, %s, %s, %s, %s, %s, NOW())""",
+            (payment_id, gateway, action[:50], json.dumps(details), log_status, error_message),
         )
         connection.commit()
         return True
     except Error as e:
-        logger.error(f"Failed to record audit log: {e}")
         connection.rollback()
-        return False
+        raise RuntimeError(f"Failed to record audit log for payment {payment_id}: {e}") from e
     finally:
         cursor.close()
         connection.close()
@@ -394,17 +451,23 @@ async def process_refund(payment_id: int, reason: str) -> bool:
     connection = get_db_connection()
     cursor = connection.cursor(dictionary=True)
     try:
+        # payments has no `gateway` column; the gateway is payments.paymentMethod
+        # (enum: mpesa/airtel_money/tigo_pesa/bank_transfer/card).
         cursor.execute(
-            "SELECT gateway, transactionId, amount, phoneNumber FROM payments WHERE id = %s",
+            "SELECT paymentMethod, transactionId, amount, phoneNumber, status FROM payments WHERE id = %s",
             (payment_id,),
         )
         payment = cursor.fetchone()
         if not payment:
-            logger.error(f"Payment {payment_id} not found for refund")
-            return False
+            raise ValueError(f"Payment {payment_id} not found for refund")
+        if payment['status'] != 'completed':
+            raise RuntimeError(
+                f"Cannot refund payment {payment_id}: status is '{payment['status']}', "
+                "only 'completed' payments can be refunded"
+            )
 
-        gateway = payment.get('gateway') or payment.get('paymentMethod', '')
-        transaction_id = payment.get('transactionId', '')
+        gateway = payment['paymentMethod']
+        transaction_id = payment.get('transactionId') or ''
         amount = payment.get('amount', 0)
         phone = payment.get('phoneNumber', '')
 
@@ -433,33 +496,47 @@ async def process_refund(payment_id: int, reason: str) -> bool:
                 )
                 resp.raise_for_status()
                 data = resp.json()
-                success = data.get('ResponseCode') == '0'
+                if data.get('ResponseCode') != '0':
+                    raise RuntimeError(
+                        f"M-Pesa reversal rejected for payment {payment_id} "
+                        f"(txn: {transaction_id}): {data}"
+                    )
         else:
-            # Airtel and Tigo refunds require manual processing via their portals;
-            # log the request and mark for manual review.
+            # Airtel/Tigo/bank/card refunds cannot be executed through an
+            # automated reversal API here; they require manual processing via
+            # the provider portal. Record the request honestly in metadata and
+            # keep status 'completed' (the money has NOT been returned yet).
+            # payments.status enum is pending/completed/failed/refunded —
+            # 'refund_pending' is not a valid state and is not used.
             logger.warning(
                 f"Automated refund not supported for gateway '{gateway}'. "
-                f"Payment {payment_id} (txn: {transaction_id}) requires manual refund."
+                f"Payment {payment_id} (txn: {transaction_id}) flagged for manual refund."
             )
             cursor.execute(
-                "UPDATE payments SET status = 'refund_pending', updatedAt = NOW() WHERE id = %s",
-                (payment_id,),
+                """UPDATE payments
+                   SET metadata = JSON_SET(
+                       COALESCE(metadata, JSON_OBJECT()),
+                       '$.refundStatus', 'manual_review_required',
+                       '$.refundReason', %s
+                   ), updatedAt = NOW()
+                   WHERE id = %s""",
+                (reason, payment_id),
             )
             connection.commit()
             return True
 
-        if success:
-            cursor.execute(
-                "UPDATE payments SET status = 'refunded', updatedAt = NOW() WHERE id = %s",
-                (payment_id,),
-            )
-            connection.commit()
-            logger.info(f"Refund initiated for payment {payment_id}")
-        return success
+        # M-Pesa reversal accepted by the gateway.
+        cursor.execute(
+            "UPDATE payments SET status = 'refunded', updatedAt = NOW() WHERE id = %s",
+            (payment_id,),
+        )
+        connection.commit()
+        logger.info(f"Refund initiated for payment {payment_id}")
+        return True
 
-    except Exception as e:
-        logger.error(f"Refund failed for payment {payment_id}: {e}")
-        return False
+    except Error as e:
+        connection.rollback()
+        raise RuntimeError(f"Refund failed for payment {payment_id}: {e}") from e
     finally:
         cursor.close()
         connection.close()
@@ -524,21 +601,34 @@ class PaymentProcessingWorkflow:
                 if status_response['status'] == 'completed':
                     result.success = True
                     result.status = 'completed'
-                    await workflow.execute_activity(
+                    updated = await workflow.execute_activity(
                         update_payment_status,
                         args=[input.payment_id, 'completed', transaction_id, status_response],
                         start_to_close_timeout=timedelta(seconds=30),
                     )
-                    await workflow.execute_activity(
+                    if not updated:
+                        raise RuntimeError(
+                            f"Payment {input.payment_id} completed at gateway but DB status update failed"
+                        )
+                    notified = await workflow.execute_activity(
                         send_payment_notification,
                         args=[input.user_id, input.payment_id, 'completed', input.amount],
                         start_to_close_timeout=timedelta(seconds=30),
                     )
-                    await workflow.execute_activity(
+                    if not notified:
+                        raise RuntimeError(
+                            f"Payment {input.payment_id} completed but notification could not be queued"
+                        )
+                    # The workflow must not report success without an audit trail.
+                    audited = await workflow.execute_activity(
                         record_payment_audit,
                         args=[input.payment_id, 'payment_completed', status_response],
                         start_to_close_timeout=timedelta(seconds=30),
                     )
+                    if not audited:
+                        raise RuntimeError(
+                            f"Payment {input.payment_id} completed but audit trail write failed"
+                        )
                     logger.info(f"Payment {input.payment_id} completed successfully")
                     return result
 
@@ -551,6 +641,11 @@ class PaymentProcessingWorkflow:
                         start_to_close_timeout=timedelta(seconds=30),
                     )
                     await workflow.execute_activity(
+                        record_payment_audit,
+                        args=[input.payment_id, 'payment_failed', status_response],
+                        start_to_close_timeout=timedelta(seconds=30),
+                    )
+                    await workflow.execute_activity(
                         send_payment_notification,
                         args=[input.user_id, input.payment_id, 'failed', input.amount],
                         start_to_close_timeout=timedelta(seconds=30),
@@ -558,22 +653,25 @@ class PaymentProcessingWorkflow:
                     logger.warning(f"Payment {input.payment_id} failed: {result.error}")
                     return result
 
-                # Still pending — wait before next poll
-                await asyncio.sleep(poll_interval.total_seconds())
+                # Still pending — workflow-safe wait before next poll
+                await workflow.sleep(poll_interval.total_seconds())
 
-            # Timeout reached
-            result.status = 'pending'
-            result.error = "Payment verification timeout"
-            logger.warning(f"Payment {input.payment_id} verification timeout")
-            return result
-
-        except Exception as e:
-            logger.error(f"Payment processing error: {e}")
-            result.error = str(e)
+            # Poll window exhausted without a terminal gateway/callback status.
+            # The payment must not stay stuck in 'pending': mark it failed with
+            # reason 'verification_timeout' and record the audit trail entry.
             result.status = 'failed'
+            result.error = 'verification_timeout'
             await workflow.execute_activity(
                 update_payment_status,
-                args=[input.payment_id, 'failed', None, {'error': str(e)}],
+                args=[input.payment_id, 'failed', transaction_id,
+                      {'error': 'verification_timeout',
+                       'detail': 'No terminal status received within the poll window'}],
+                start_to_close_timeout=timedelta(seconds=30),
+            )
+            await workflow.execute_activity(
+                record_payment_audit,
+                args=[input.payment_id, 'verification_timeout',
+                      {'transaction_id': transaction_id, 'error': 'verification_timeout'}],
                 start_to_close_timeout=timedelta(seconds=30),
             )
             await workflow.execute_activity(
@@ -581,14 +679,58 @@ class PaymentProcessingWorkflow:
                 args=[input.user_id, input.payment_id, 'failed', input.amount],
                 start_to_close_timeout=timedelta(seconds=30),
             )
+            logger.warning(f"Payment {input.payment_id} verification timeout — marked failed")
             return result
+
+        except Exception as e:
+            logger.error(f"Payment processing error: {e}")
+            result.error = str(e)
+            if result.status != 'completed':
+                # Only downgrade payments that never reached a terminal success.
+                result.status = 'failed'
+                await workflow.execute_activity(
+                    update_payment_status,
+                    args=[input.payment_id, 'failed', None, {'error': str(e)}],
+                    start_to_close_timeout=timedelta(seconds=30),
+                )
+                await workflow.execute_activity(
+                    send_payment_notification,
+                    args=[input.user_id, input.payment_id, 'failed', input.amount],
+                    start_to_close_timeout=timedelta(seconds=30),
+                )
+            # Fail the workflow run loudly — Temporal records the failure
+            # instead of a swallowed "successful" result.
+            raise
 
 
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
+def validate_gateway_config():
+    """
+    Fail fast at worker startup if required gateway configuration is missing.
+    MPESA_BASE_URL in particular selects sandbox vs production and must be
+    an explicit operator decision — it is never defaulted.
+    """
+    required = (
+        'MPESA_BASE_URL',
+        'MPESA_CONSUMER_KEY',
+        'MPESA_CONSUMER_SECRET',
+        'MPESA_SHORTCODE',
+        'MPESA_PASSKEY',
+        'MPESA_CALLBACK_URL',
+    )
+    missing = [name for name in required if not os.getenv(name)]
+    if missing:
+        raise RuntimeError(
+            "Missing required payment gateway environment variables: "
+            + ", ".join(missing)
+        )
+
+
 async def main():
     """Start the payment worker."""
+    validate_gateway_config()
     temporal_address = os.getenv('TEMPORAL_ADDRESS', 'localhost:7233')
     client = await Client.connect(temporal_address)
 

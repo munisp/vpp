@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { protectedProcedure, router } from '../../_core/trpc';
+import { adminProcedure, protectedProcedure, router } from '../../_core/trpc';
 import { communityEnergy } from '../../services/community-energy';
 
 export const communityRouter = router({
@@ -69,6 +69,20 @@ export const communityRouter = router({
     .input(z.object({ communityId: z.number() }))
     .mutation(async ({ input }) => {
       return communityEnergy.reconnectToGrid(input.communityId);
+    }),
+
+  /**
+   * Operator-only confirmation that the physical switchgear transition for a
+   * pending islanding/reconnection request has been performed on site. This
+   * is the only path that actually changes islanding_mode.
+   */
+  confirmModeTransition: adminProcedure
+    .input(z.object({
+      communityId: z.number(),
+      approve: z.boolean(),
+    }))
+    .mutation(async ({ input, ctx }) => {
+      return communityEnergy.confirmModeTransition(input.communityId, ctx.user.id, input.approve);
     }),
 
   getUserCommunities: protectedProcedure

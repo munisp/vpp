@@ -1,10 +1,11 @@
 import { z } from 'zod';
-import { randomBytes } from 'crypto';
 import { router, protectedProcedure } from '../_core/trpc';
 import { TRPCError } from '@trpc/server';
 import * as db from '../db';
 import * as notifications from '../_core/notifications';
 import * as paymentGateway from '../_core/paymentGateway';
+import { payments, tokens, billings } from '../../drizzle/schema';
+import { eq, desc, and, inArray, sql } from 'drizzle-orm';
 
 const InitiatePaymentInputSchema = z.object({
   paymentType: z.enum(['invoice', 'token_purchase', 'monthly_fee']),
@@ -120,23 +121,24 @@ export const paymentsRouter = router({
           });
         }
 
-        // Verify payment with gateway
+        // Verify payment with gateway. Only mobile-money gateway providers
+        // support self-service verification via the gateway status query.
         const provider = payment.paymentMethod === 'mpesa' ? 'mpesa' 
           : payment.paymentMethod === 'airtel_money' ? 'airtel_money'
           : payment.paymentMethod === 'tigo_pesa' ? 'tigo_pesa'
           : null;
         
-        let verificationResult: { status: 'pending' | 'completed' | 'failed'; message: string } = { 
-          status: 'completed', 
-          message: 'Payment verified' 
-        };
-        
-        if (provider) {
-          verificationResult = await paymentGateway.verifyPaymentStatus(
-            input.transactionId,
-            provider
-          );
+        if (!provider) {
+          throw new TRPCError({
+            code: 'FORBIDDEN',
+            message: 'Bank transfer and card payments cannot be self-verified; they require admin reconciliation.',
+          });
         }
+
+        const verificationResult = await paymentGateway.verifyPaymentStatus(
+          input.transactionId,
+          provider
+        );
 
         if (verificationResult.status === 'completed') {
           await db.updatePaymentStatus(input.paymentId, 'completed', input.transactionId);
@@ -156,9 +158,47 @@ export const paymentsRouter = router({
           let token = null;
           if (payment.paymentType === 'token_purchase') {
             const metadata = payment.metadata ? JSON.parse(payment.metadata) : {};
-            const energyKwh = metadata.energyKwh || 10;
-            const tokenCode = paymentGateway.generateSTSToken(energyKwh, payment.amount);
-            
+            const energyKwh = Number(metadata.energyKwh);
+            if (!Number.isInteger(energyKwh) || energyKwh <= 0) {
+              throw new TRPCError({
+                code: 'BAD_REQUEST',
+                message: 'Energy amount (energyKwh) is missing or invalid on this token purchase payment.',
+              });
+            }
+
+            let tokenCode: string;
+            try {
+              tokenCode = paymentGateway.generateSTSToken(energyKwh, payment.amount);
+            } catch (stsError) {
+              if (stsError instanceof Error && stsError.message === 'STS_VENDING_NOT_CONFIGURED') {
+                // No STS vending provider configured: record the owed token as
+                // pending issuance instead of fabricating a token code.
+                token = await db.createToken({
+                  userId: ctx.user.id,
+                  paymentId: payment.id,
+                  tokenCode: `PENDING_ISSUANCE_${payment.id}`,
+                  energyKwh,
+                  amount: payment.amount,
+                  validUntil: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000), // 1 year
+                  status: 'pending_issuance',
+                });
+
+                await notifications.sendPushNotification({
+                  userId: ctx.user.id,
+                  title: 'Token Pending Issuance',
+                  body: `Your payment was confirmed. Your ${energyKwh} kWh token will be delivered once it is vended by the provider.`,
+                  data: { paymentId: String(payment.id), type: 'token_pending_issuance' },
+                });
+
+                return {
+                  success: true,
+                  message: 'Payment verified successfully. Your token is pending issuance and will be delivered once vended.',
+                  token,
+                };
+              }
+              throw stsError;
+            }
+
             token = await db.createToken({
               userId: ctx.user.id,
               paymentId: payment.id,
@@ -193,15 +233,6 @@ export const paymentsRouter = router({
               });
               tokenEmailNotif.to = user.email;
               await notifications.sendEmail(tokenEmailNotif);
-
-              // SMS notification with token
-              // Note: In production, get phone number from user profile
-              // const smsNotif = notifications.getTokenGeneratedSMS({
-              //   tokenCode: token.tokenCode,
-              //   energyKwh: token.energyKwh,
-              // });
-              // smsNotif.to = user.phone;
-              // await notifications.sendSMS(smsNotif);
 
               // Push notification
               const pushNotif = notifications.getTokenGeneratedPush({
@@ -286,12 +317,33 @@ export const paymentsRouter = router({
           });
         }
 
-        // Generate a cryptographically secure 20-digit numeric STS token.
-        // Each byte contributes one decimal digit via modulo 10.
-        const tokenCode = Array.from(randomBytes(20))
-          .map(b => (b % 10).toString())
-          .join('');
-        
+        // Vend the token through the configured STS provider. When no STS
+        // vending provider is configured, record the token as pending issuance
+        // rather than inventing a code.
+        let tokenCode: string;
+        try {
+          tokenCode = paymentGateway.generateSTSToken(energyKwh, payment.amount);
+        } catch (stsError) {
+          if (stsError instanceof Error && stsError.message === 'STS_VENDING_NOT_CONFIGURED') {
+            const pendingToken = await db.createToken({
+              userId: ctx.user.id,
+              paymentId: payment.id,
+              tokenCode: `PENDING_ISSUANCE_${payment.id}`,
+              energyKwh,
+              amount: payment.amount,
+              validUntil: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000), // 1 year
+              status: 'pending_issuance',
+            });
+
+            return {
+              success: true,
+              token: pendingToken,
+              message: 'Token is pending issuance and will be delivered once vended by the STS provider.',
+            };
+          }
+          throw stsError;
+        }
+
         const token = await db.createToken({
           userId: ctx.user.id,
           paymentId: payment.id,
@@ -337,6 +389,118 @@ export const paymentsRouter = router({
         throw new TRPCError({
           code: 'INTERNAL_SERVER_ERROR',
           message: 'Failed to retrieve token.',
+        });
+      }
+    }),
+
+  list: protectedProcedure
+    .input(z.object({ limit: z.number().int().positive().max(100).default(50) }).optional())
+    .query(async ({ ctx, input }) => {
+      try {
+        const dbInstance = await db.getDb();
+        if (!dbInstance) throw new Error('Database not available');
+
+        const rows = await dbInstance
+          .select({
+            id: payments.id,
+            amount: payments.amount,
+            currency: payments.currency,
+            status: payments.status,
+            paymentMethod: payments.paymentMethod,
+            transactionId: payments.transactionId,
+            createdAt: payments.createdAt,
+          })
+          .from(payments)
+          .where(eq(payments.userId, ctx.user.id))
+          .orderBy(desc(payments.createdAt))
+          .limit(input?.limit ?? 50);
+
+        return rows.map((row) => ({
+          ...row,
+          description: `${row.paymentMethod} payment`,
+        }));
+      } catch (error) {
+        console.error('Error listing payments:', error);
+        throw new TRPCError({
+          code: 'INTERNAL_SERVER_ERROR',
+          message: 'Failed to list payments.',
+        });
+      }
+    }),
+
+  listTokens: protectedProcedure
+    .query(async ({ ctx }) => {
+      try {
+        const dbInstance = await db.getDb();
+        if (!dbInstance) throw new Error('Database not available');
+
+        const rows = await dbInstance
+          .select({
+            id: tokens.id,
+            tokenCode: tokens.tokenCode,
+            status: tokens.status,
+            energyKwh: tokens.energyKwh,
+            amount: tokens.amount,
+            createdAt: tokens.createdAt,
+          })
+          .from(tokens)
+          .where(eq(tokens.userId, ctx.user.id))
+          .orderBy(desc(tokens.createdAt));
+
+        // Never expose a placeholder issuance marker as if it were a token.
+        return rows.map((row) => ({
+          id: row.id,
+          token: row.status === 'pending_issuance' ? null : row.tokenCode,
+          energyKwh: row.energyKwh,
+          amount: row.amount,
+          status: row.status,
+          createdAt: row.createdAt,
+        }));
+      } catch (error) {
+        console.error('Error listing tokens:', error);
+        throw new TRPCError({
+          code: 'INTERNAL_SERVER_ERROR',
+          message: 'Failed to list tokens.',
+        });
+      }
+    }),
+
+  getBalance: protectedProcedure
+    .query(async ({ ctx }) => {
+      try {
+        const dbInstance = await db.getDb();
+        if (!dbInstance) throw new Error('Database not available');
+
+        const [paidRow] = await dbInstance
+          .select({ total: sql<number>`COALESCE(SUM(${payments.amount}), 0)` })
+          .from(payments)
+          .where(and(eq(payments.userId, ctx.user.id), eq(payments.status, 'completed')));
+
+        // Amounts the user owes or has settled through invoiced billings.
+        const [billedRow] = await dbInstance
+          .select({ total: sql<number>`COALESCE(SUM(${billings.consumerShare}), 0)` })
+          .from(billings)
+          .where(
+            and(
+              eq(billings.userId, ctx.user.id),
+              inArray(billings.status, ['issued', 'paid', 'overdue'])
+            )
+          );
+
+        const totalPaidCents = Number(paidRow?.total ?? 0);
+        const totalBilledCents = Number(billedRow?.total ?? 0);
+
+        return {
+          balanceCents: totalPaidCents - totalBilledCents,
+          computed: true,
+          totalPaidCents,
+          totalBilledCents,
+        };
+      } catch (error) {
+        console.error('Error computing balance:', error);
+        throw new TRPCError({
+          code: 'INTERNAL_SERVER_ERROR',
+          message: 'Failed to compute balance.',
         });
       }
     }),

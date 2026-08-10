@@ -411,7 +411,8 @@ export async function awardDRCompensationActivity(
 ): Promise<{ success: boolean; totalCompensation?: number; error?: string }> {
   try {
     const { getDb } = await import('../db');
-    const { drCompensation } = await import('../../drizzle/schema');
+    const { drCompensation, drResponses } = await import('../../drizzle/schema');
+    const { eq, and } = await import('drizzle-orm');
 
     const db = await getDb();
     if (!db) throw new Error('Database not available');
@@ -419,12 +420,34 @@ export async function awardDRCompensationActivity(
     let totalCompensation = 0;
 
     for (const performance of input.performances) {
+      // Resolve the real drResponses row for this (event, user) so the
+      // compensation record references a valid FK.
+      const responses = await db
+        .select({ id: drResponses.id })
+        .from(drResponses)
+        .where(
+          and(
+            eq(drResponses.eventId, input.eventId),
+            eq(drResponses.userId, performance.userId)
+          )
+        )
+        .limit(1);
+
+      const response = responses[0];
+      if (!response) {
+        console.warn(
+          `[AwardDRCompensationActivity] No drResponses row for event ${input.eventId}, ` +
+          `user ${performance.userId} — skipping compensation to avoid an invalid FK`
+        );
+        continue;
+      }
+
       const compensation = performance.actualReduction * input.compensationRate;
-      
+
       await db.insert(drCompensation).values({
         userId: performance.userId,
         eventId: input.eventId,
-        responseId: 0, // Would need to fetch from drResponses
+        responseId: response.id,
         amount: Math.round(compensation * 100), // Convert to cents
         currency: 'USD',
         paymentMethod: 'mpesa',
@@ -441,6 +464,38 @@ export async function awardDRCompensationActivity(
     };
   } catch (error) {
     console.error('[AwardDRCompensationActivity] Error:', error);
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : 'Unknown error',
+    };
+  }
+}
+
+/**
+ * Get DR Event Participants Activity
+ *
+ * Returns the user IDs that have a drResponses row for the event — i.e. the
+ * participants who must be notified on cancellation.
+ */
+export async function getDRParticipantsActivity(
+  eventId: number
+): Promise<{ success: boolean; participantIds?: number[]; error?: string }> {
+  try {
+    const { getDb } = await import('../db');
+    const { drResponses } = await import('../../drizzle/schema');
+    const { eq } = await import('drizzle-orm');
+
+    const db = await getDb();
+    if (!db) throw new Error('Database not available');
+
+    const responses = await db
+      .select({ userId: drResponses.userId })
+      .from(drResponses)
+      .where(eq(drResponses.eventId, eventId));
+
+    return { success: true, participantIds: responses.map(r => r.userId) };
+  } catch (error) {
+    console.error('[GetDRParticipantsActivity] Error:', error);
     return {
       success: false,
       error: error instanceof Error ? error.message : 'Unknown error',

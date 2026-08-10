@@ -5,15 +5,30 @@
  * timeout handling, and compensation workflows.
  */
 
-import {
+import { proxyActivities, sleep } from '@temporalio/workflow';
+import type * as activities from './payment-activities';
+
+/**
+ * Activities are invoked through Temporal proxies so they execute on the
+ * worker (with retries) instead of being called directly inside the
+ * deterministic workflow sandbox.
+ */
+const {
   initiatePaymentActivity,
   verifyPaymentActivity,
   updatePaymentStatusActivity,
   updateBillingStatusActivity,
   sendPaymentNotificationActivity,
   refundPaymentActivity,
-  PaymentActivityInput,
-} from './payment-activities';
+} = proxyActivities<typeof activities>({
+  startToCloseTimeout: '2 minutes',
+  retry: {
+    initialInterval: '1s',
+    backoffCoefficient: 2,
+    maximumInterval: '60s',
+    maximumAttempts: 5,
+  },
+});
 
 /**
  * Payment Workflow Configuration
@@ -33,20 +48,19 @@ export interface PaymentWorkflowResult {
 }
 
 /**
- * Main Payment Workflow
+ * Main Payment Workflow (Temporal workflow type: "processPayment")
  *
  * Orchestrates the full payment lifecycle:
  * 1. Initiate payment with the mobile-money gateway.
- * 2. Poll for confirmation with exponential back-off.
+ * 2. Poll for confirmation with Temporal timers between attempts.
  * 3. Update payment and billing status on success.
  * 4. Send user notification.
  * 5. Compensate (mark failed, notify) on any error.
  *
- * This function is designed to run inside a Temporal workflow context.
- * The polling loop uses a real async sleep so that Temporal can replay
- * the history deterministically when the worker restarts.
+ * Exported under the exact type name the Temporal client starts
+ * (server/integration/temporal-client.ts uses 'processPayment').
  */
-export async function paymentWorkflow(
+export async function processPayment(
   input: PaymentWorkflowInput
 ): Promise<PaymentWorkflowResult> {
   let transactionId: string | undefined;
@@ -68,7 +82,7 @@ export async function paymentWorkflow(
     transactionId = initiateResult.transactionId;
 
     // Step 2: Poll for payment confirmation.
-    // Uses a real async sleep so Temporal can replay history correctly.
+    // Uses Temporal's deterministic timer so history replays correctly.
     let verified = false;
     let attempts = 0;
     const maxAttempts = 5;
@@ -77,8 +91,8 @@ export async function paymentWorkflow(
     while (!verified && attempts < maxAttempts) {
       attempts++;
 
-      // Wait before polling — this is a real async pause, not a simulation.
-      await new Promise<void>(resolve => setTimeout(resolve, verifyDelayMs));
+      // Deterministic Temporal timer — safe for workflow replay.
+      await sleep(verifyDelayMs);
 
       const verifyResult = await verifyPaymentActivity(
         transactionId,
@@ -93,7 +107,10 @@ export async function paymentWorkflow(
     }
 
     // Step 3: Update payment status to completed
-    await updatePaymentStatusActivity(transactionId, 'completed');
+    await updatePaymentStatusActivity(transactionId, 'completed', {
+      amount: input.amount,
+      gateway: input.gateway,
+    });
 
     // Step 4: Update billing status to paid
     await updateBillingStatusActivity(input.billingId, 'paid');
@@ -114,7 +131,10 @@ export async function paymentWorkflow(
 
     // Compensation: Mark payment as failed
     if (transactionId) {
-      await updatePaymentStatusActivity(transactionId, 'failed');
+      await updatePaymentStatusActivity(transactionId, 'failed', {
+        amount: input.amount,
+        gateway: input.gateway,
+      });
       await sendPaymentNotificationActivity(
         input.userId,
         transactionId,
@@ -149,13 +169,13 @@ export async function refundWorkflow(
       throw new Error(refundResult.error || 'Refund failed');
     }
 
-    // Step 2: Update payment status
-    await updatePaymentStatusActivity(transactionId, 'failed');
+    // The refund activity has already marked the payment 'refunded' after
+    // gateway confirmation — do not overwrite that status here.
 
-    // Step 3: Revert billing status
+    // Step 2: Revert billing status
     await updateBillingStatusActivity(billingId, 'issued');
 
-    // Step 4: Notify user
+    // Step 3: Notify user
     await sendPaymentNotificationActivity(userId, transactionId, 'failed');
 
     return {

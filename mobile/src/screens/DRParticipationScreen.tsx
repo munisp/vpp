@@ -14,9 +14,19 @@ import { ShareService } from '../services/shareService';
 import { HapticService } from '../services/hapticService';
 
 export default function DRParticipationScreen() {
-  const { data: drStatus, refetch } = trpc.demandResponse.getStatus.useQuery();
-  const { data: events } = trpc.demandResponse.getEvents.useQuery({ status: 'active' });
-  const { data: compensation } = trpc.demandResponse.getCompensation.useQuery();
+  const utils = trpc.useUtils();
+
+  // getEnrollment returns the caller's DrParticipant row (or null).
+  const {
+    data: enrollment,
+    refetch,
+    isLoading: enrollmentLoading,
+  } = trpc.demandResponse.getEnrollment.useQuery();
+  const { data: events } = trpc.demandResponse.getUpcomingEvents.useQuery();
+  // getMyCompensation returns an array of DrCompensation rows.
+  const { data: compensation } = trpc.demandResponse.getMyCompensation.useQuery();
+  // getMyResponses returns the caller's DR event responses.
+  const { data: myResponses } = trpc.demandResponse.getMyResponses.useQuery();
 
   const enrollMutation = trpc.demandResponse.enroll.useMutation({
     onSuccess: async () => {
@@ -30,11 +40,11 @@ export default function DRParticipationScreen() {
     },
   });
 
-  const participateMutation = trpc.demandResponse.participate.useMutation({
+  const respondMutation = trpc.demandResponse.respondToEvent.useMutation({
     onSuccess: async () => {
       await HapticService.drEventStarted();
-      Alert.alert('Success', 'Participating in DR event');
-      refetch();
+      Alert.alert('Success', 'Your response has been recorded');
+      utils.demandResponse.getMyResponses.invalidate();
     },
     onError: async (error) => {
       await HapticService.error();
@@ -44,6 +54,8 @@ export default function DRParticipationScreen() {
 
   const handleEnroll = async () => {
     await HapticService.buttonPress();
+    // Server input (server/routers/demandResponse.ts -> enroll):
+    // { autoOptIn, minCompensation? (cents/kWh), maxReduction? (kW) }
     enrollMutation.mutate({
       autoOptIn: true,
       minCompensation: 500, // 5 TZS per kWh
@@ -52,11 +64,30 @@ export default function DRParticipationScreen() {
 
   const handleParticipate = async (eventId: number, targetReduction: number) => {
     await HapticService.buttonPress();
-    participateMutation.mutate({
+    // Server input (respondToEvent): { eventId, participate, targetReduction? }
+    respondMutation.mutate({
       eventId,
+      participate: true,
       targetReduction,
     });
   };
+
+  const isEnrolled = !!enrollment && enrollment.status !== 'cancelled';
+
+  // Derived stats from real rows (amounts in cents).
+  const totalEarnedCents = (compensation ?? [])
+    .filter((c) => c.status === 'paid')
+    .reduce((sum, c) => sum + c.amount, 0);
+  const pendingCents = (compensation ?? [])
+    .filter((c) => c.status === 'pending')
+    .reduce((sum, c) => sum + c.amount, 0);
+  const eventsJoined = (myResponses ?? []).filter(
+    (r) => r.participationStatus !== 'opted_out'
+  ).length;
+  const totalReductionKw = (myResponses ?? []).reduce(
+    (sum, r) => sum + (r.actualReduction ?? 0),
+    0
+  );
 
   return (
     <ScrollView style={styles.container}>
@@ -67,7 +98,11 @@ export default function DRParticipationScreen() {
       </View>
 
       {/* Enrollment Status */}
-      {!drStatus?.isEnrolled ? (
+      {enrollmentLoading ? (
+        <View style={styles.enrollCard}>
+          <Text style={styles.enrollText}>Loading enrollment status…</Text>
+        </View>
+      ) : !isEnrolled ? (
         <View style={styles.enrollCard}>
           <Text style={styles.enrollIcon}>⚡</Text>
           <Text style={styles.enrollTitle}>Join Demand Response Program</Text>
@@ -76,9 +111,9 @@ export default function DRParticipationScreen() {
             reducing your energy consumption during peak times.
           </Text>
           <View style={styles.benefits}>
-            <BenefitItem text="Earn up to 10 TZS per kWh reduced" />
+            <BenefitItem text="Earn compensation per kWh reduced" />
             <BenefitItem text="Automatic participation in events" />
-            <BenefitItem text="Monthly compensation payments" />
+            <BenefitItem text="Compensation payments for participation" />
             <BenefitItem text="Help stabilize the grid" />
           </View>
           <TouchableOpacity
@@ -93,38 +128,38 @@ export default function DRParticipationScreen() {
         </View>
       ) : (
         <>
-          {/* Stats */}
+          {/* Stats (derived from real compensation and response rows) */}
           <View style={styles.statsGrid}>
             <StatCard
               title="Total Earned"
-              value={`${((compensation?.totalCompensation || 0) / 100).toFixed(0)} TZS`}
+              value={`${(totalEarnedCents / 100).toFixed(0)} TZS`}
               icon="💰"
               color="#10b981"
             />
             <StatCard
               title="Events Joined"
-              value={(drStatus?.eventsParticipated || 0).toString()}
+              value={eventsJoined.toString()}
               icon="🎯"
               color="#3b82f6"
             />
             <StatCard
               title="Total Reduction"
-              value={`${(drStatus?.totalReduction || 0)} kW`}
+              value={`${totalReductionKw} kW`}
               icon="⚡"
               color="#f59e0b"
             />
             <StatCard
               title="Pending"
-              value={`${((compensation?.pendingCompensation || 0) / 100).toFixed(0)} TZS`}
+              value={`${(pendingCents / 100).toFixed(0)} TZS`}
               icon="⏳"
               color="#8b5cf6"
             />
           </View>
 
-          {/* Active Events */}
+          {/* Upcoming Events */}
           {events && events.length > 0 && (
             <View style={styles.eventsCard}>
-              <Text style={styles.sectionTitle}>Active DR Events</Text>
+              <Text style={styles.sectionTitle}>Upcoming DR Events</Text>
               {events.map((event) => (
                 <DREventItem
                   key={event.id}
@@ -135,11 +170,11 @@ export default function DRParticipationScreen() {
             </View>
           )}
 
-          {/* Compensation History */}
-          {compensation && compensation.history && compensation.history.length > 0 && (
+          {/* Compensation History (getMyCompensation returns an array) */}
+          {compensation && compensation.length > 0 && (
             <View style={styles.historyCard}>
               <Text style={styles.sectionTitle}>Compensation History</Text>
-              {compensation.history.map((item: any) => (
+              {compensation.map((item) => (
                 <CompensationItem key={item.id} item={item} />
               ))}
             </View>
@@ -188,7 +223,9 @@ function DREventItem({
 }) {
   const startTime = new Date(event.startTime);
   const endTime = new Date(event.endTime);
-  const duration = (endTime.getTime() - startTime.getTime()) / (1000 * 60); // minutes
+  const duration = Math.round(
+    (endTime.getTime() - startTime.getTime()) / (1000 * 60)
+  ); // minutes
 
   return (
     <View style={styles.eventItem}>
@@ -234,7 +271,13 @@ function DREventItem({
           <Text style={styles.participateButtonText}>Participate</Text>
         </TouchableOpacity>
         <ShareButton
-          onPress={() => ShareService.shareDREvent(event)}
+          onPress={() =>
+            ShareService.shareDREvent(
+              event.eventName,
+              event.compensationRate,
+              startTime
+            )
+          }
           size="small"
         />
       </View>
@@ -263,20 +306,23 @@ function EventDetail({
 }
 
 function CompensationItem({ item }: { item: any }) {
+  // DrCompensation row: { id, eventId, amount (cents), currency, status, ... }
   return (
     <View style={styles.compensationItem}>
       <View style={styles.compensationLeft}>
-        <Text style={styles.compensationEvent}>{item.eventName}</Text>
+        <Text style={styles.compensationEvent}>DR Event #{item.eventId}</Text>
         <Text style={styles.compensationDate}>
           {new Date(item.createdAt).toLocaleDateString()}
         </Text>
       </View>
       <View style={styles.compensationRight}>
         <Text style={styles.compensationAmount}>
-          +{(item.amount / 100).toFixed(0)} TZS
+          +{(item.amount / 100).toFixed(0)} {item.currency || 'TZS'}
         </Text>
         <Text style={styles.compensationReduction}>
-          {item.actualReduction} kW reduced
+          {item.status === 'paid'
+            ? `Paid${item.paidAt ? ` on ${new Date(item.paidAt).toLocaleDateString()}` : ''}`
+            : item.status}
         </Text>
       </View>
     </View>

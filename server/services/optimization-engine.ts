@@ -15,6 +15,7 @@ import { derCapabilities, DispatchEligibility } from './der-capabilities';
 import { probabilisticForecasting, ForecastResult, ForecastQuantiles } from './probabilistic-forecasting';
 import { settlementLedger } from './settlement-ledger';
 import { kafkaPublisher } from '../integration/kafka-publisher';
+import { mqttBrokerService } from '../integration/mqtt-broker';
 
 // Types for optimization
 export type ObjectiveFunction = 
@@ -53,6 +54,9 @@ export interface DispatchSetpoint {
   expectedCost: number;
   expectedEmissionsSaved: number;
   confidence: number;
+  // true when expected revenue/cost were computed from the estimated fallback
+  // price curve rather than a real price forecast
+  economicsEstimated?: boolean;
 }
 
 export interface OptimizationResult {
@@ -95,6 +99,8 @@ interface IntervalContext {
   priceForecast: ForecastQuantiles;
   emissionsForecast: ForecastQuantiles;
   solarForecast?: ForecastQuantiles;
+  // true when priceForecast is the hardcoded fallback curve, not real forecast data
+  priceForecastEstimated?: boolean;
 }
 
 export class OptimizationEngine {
@@ -327,6 +333,10 @@ export class OptimizationEngine {
     const setpoints: DispatchSetpoint[] = [];
     const intervalsCount = (horizonHours * 60) / intervalMinutes;
 
+    if (!forecasts.price) {
+      warnings.push('No price forecast available: expected revenue/cost figures use an estimated fallback price curve with reduced confidence');
+    }
+
     // Track battery SoC through the schedule
     const batterySoc: Map<number, number> = new Map();
     for (const asset of assets) {
@@ -389,12 +399,18 @@ export class OptimizationEngine {
     const emissionsPoint = forecasts.emissions?.points[Math.floor(intervalIndex / 4)];
     const solarPoint = forecasts.solar?.points[intervalIndex];
 
+    // When no real price forecast exists we fall back to a static curve, but it
+    // is explicitly flagged `priceForecastEstimated: true` with heavily reduced
+    // confidence so downstream revenue figures are never silently trusted.
+    const priceForecastEstimated = !pricePoint;
+
     return {
       timestamp,
       loadForecast: loadPoint?.values || { p10: 0, p50: 0, p90: 0, mean: 0, confidence: 50 },
-      priceForecast: pricePoint?.values || { p10: 30, p50: 45, p90: 60, mean: 45, confidence: 50 },
+      priceForecast: pricePoint?.values || { p10: 30, p50: 45, p90: 60, mean: 45, confidence: 20 },
       emissionsForecast: emissionsPoint?.values || { p10: 350, p50: 400, p90: 450, mean: 400, confidence: 50 },
       solarForecast: solarPoint?.values,
+      priceForecastEstimated,
     };
   }
 
@@ -489,6 +505,7 @@ export class OptimizationEngine {
       expectedCost,
       expectedEmissionsSaved,
       confidence: Math.round((context.priceForecast.confidence + context.loadForecast.confidence) / 2),
+      economicsEstimated: context.priceForecastEstimated === true,
     };
   }
 
@@ -779,6 +796,7 @@ export class OptimizationEngine {
   async executeSchedule(scheduleId: string): Promise<{
     success: boolean;
     dispatchedCount: number;
+    queuedCount: number;
     errors: string[];
   }> {
     const db = await getDb();
@@ -786,6 +804,7 @@ export class OptimizationEngine {
 
     const errors: string[] = [];
     let dispatchedCount = 0;
+    let queuedCount = 0;
 
     // Get schedule and setpoints
     const scheduleResult = await db.execute(sql`
@@ -801,20 +820,34 @@ export class OptimizationEngine {
 
     for (const sp of setpoints) {
       try {
-        // Send command to device (via MQTT or edge gateway)
-        await this.dispatchToDevice(sp.asset_id, sp.target_power_watts);
+        // Send command to device via MQTT
+        const result = await this.dispatchToDevice(sp.asset_id, sp.target_power_watts);
 
-        // Update setpoint status
-        await db.execute(sql`
-          UPDATE dispatch_setpoints
-          SET status = 'dispatched', dispatched_at = NOW()
-          WHERE id = ${sp.id}
-        `);
+        if (result.dispatched) {
+          // Mark 'dispatched' ONLY when the command actually reached the broker
+          await db.execute(sql`
+            UPDATE dispatch_setpoints
+            SET status = 'dispatched', dispatched_at = NOW()
+            WHERE id = ${sp.id}
+          `);
+          dispatchedCount++;
+        } else {
+          // Command recorded but NOT sent. The setpoint stays in 'scheduled'
+          // status (the dispatch_setpoints enum has no 'queued' value) with the
+          // dispatch error recorded in metadata — it is never marked dispatched.
+          const dispatchError = result.error || 'Unknown dispatch failure';
+          errors.push(`Asset ${sp.asset_id}: not dispatched (unsent): ${dispatchError}`);
+          queuedCount++;
 
-        dispatchedCount++;
+          await db.execute(sql`
+            UPDATE dispatch_setpoints
+            SET metadata = JSON_SET(COALESCE(metadata, '{}'), '$.dispatchError', ${dispatchError}, '$.dispatchStatus', 'unsent')
+            WHERE id = ${sp.id}
+          `);
+        }
       } catch (error: any) {
         errors.push(`Asset ${sp.asset_id}: ${error.message}`);
-        
+
         await db.execute(sql`
           UPDATE dispatch_setpoints
           SET status = 'failed', metadata = JSON_SET(COALESCE(metadata, '{}'), '$.error', ${error.message})
@@ -832,19 +865,25 @@ export class OptimizationEngine {
       `);
     }
 
-    console.log(`[Optimization] Executed schedule ${scheduleId}: ${dispatchedCount} dispatched, ${errors.length} errors`);
+    console.log(`[Optimization] Executed schedule ${scheduleId}: ${dispatchedCount} dispatched, ${queuedCount} queued, ${errors.length} errors`);
 
     return {
       success: errors.length === 0,
       dispatchedCount,
+      queuedCount,
       errors,
     };
   }
 
   /**
-   * Dispatch command to device
+   * Dispatch command to device via MQTT.
+   *
+   * Records the command in device_commands, then publishes a set_power command
+   * through the MQTT broker. Returns { dispatched: true } only when the publish
+   * actually succeeds; otherwise the command stays 'queued' with the error
+   * recorded so nothing is ever reported as sent when it was not.
    */
-  private async dispatchToDevice(assetId: number, targetPowerWatts: number): Promise<void> {
+  private async dispatchToDevice(assetId: number, targetPowerWatts: number): Promise<{ dispatched: boolean; error?: string }> {
     const db = await getDb();
     if (!db) throw new Error('Database not available');
 
@@ -860,19 +899,41 @@ export class OptimizationEngine {
       throw new Error('Device not found or offline');
     }
 
-    // Create device command
-    await db.execute(sql`
+    // Create device command record
+    const commandResult = await db.execute(sql`
       INSERT INTO device_commands (
-        deviceId, command, payload, status, created_at
+        deviceId, command, payload, status, createdAt
       ) VALUES (
         ${device.id}, 'set_power',
         ${JSON.stringify({ targetPowerWatts, timestamp: new Date().toISOString() })},
         'pending', NOW()
       )
     `);
+    const commandId = (commandResult as any).insertId;
 
-    // In production, this would also publish to MQTT
-    console.log(`[Optimization] Dispatched set_power=${targetPowerWatts}W to device ${device.deviceId}`);
+    // Publish the set_power command to the device via MQTT
+    try {
+      await mqttBrokerService.publishCommand(device.deviceId, 'set_power', { targetPowerWatts });
+
+      await db.execute(sql`
+        UPDATE device_commands SET status = 'sent', sentAt = NOW() WHERE id = ${commandId}
+      `);
+
+      console.log(`[Optimization] Dispatched set_power=${targetPowerWatts}W to device ${device.deviceId}`);
+      return { dispatched: true };
+    } catch (error: any) {
+      const dispatchError = error?.message || String(error);
+
+      // Command stays 'pending' (unsent) with the error recorded in response
+      await db.execute(sql`
+        UPDATE device_commands
+        SET response = ${JSON.stringify({ dispatchError, failedAt: new Date().toISOString() })}
+        WHERE id = ${commandId}
+      `);
+
+      console.warn(`[Optimization] Failed to dispatch to device ${device.deviceId}, command left pending: ${dispatchError}`);
+      return { dispatched: false, error: dispatchError };
+    }
   }
 
   /**

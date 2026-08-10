@@ -1,5 +1,7 @@
 import { z } from "zod";
+import { TRPCError } from "@trpc/server";
 import { protectedProcedure, router } from "../_core/trpc";
+import { sendEmail, wrapEmailTemplate } from "../_core/emailService";
 import {
   createReferralCode,
   getUserReferralCode,
@@ -211,15 +213,61 @@ export const referralsRouter = router({
       const shareUrl = `${process.env.VITE_APP_URL || "https://vpp-platform.com"}/signup?ref=${referralCode.referralCode}`;
       const message = `Join VPP Consumer Platform and earn rewards! Use my referral code: ${referralCode.referralCode} or click: ${shareUrl}`;
 
-      // In a real implementation, you would:
-      // - Send email via email service
-      // - Send SMS via SMS gateway
-      // - Generate WhatsApp share link
-      // - Return copy-to-clipboard text
+      // 'copy' just returns the text for the client to copy — nothing to send.
+      if (input.channel === "copy") {
+        return {
+          success: true,
+          channel: input.channel,
+          message,
+          shareUrl,
+          referralCode: referralCode.referralCode,
+        };
+      }
 
+      // Email channel: actually send via the configured email service.
+      if (input.channel === "email") {
+        if (!input.recipient || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(input.recipient)) {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: "A valid recipient email address is required for the email channel",
+          });
+        }
+
+        const senderName = ctx.user.name || "A VPP Platform user";
+        const result = await sendEmail({
+          to: input.recipient,
+          subject: `${senderName} invited you to VPP Consumer Platform`,
+          html: wrapEmailTemplate(
+            `<p>${senderName} has invited you to join VPP Consumer Platform.</p>
+             <p>${message}</p>
+             <p><a href="${shareUrl}" class="button">Sign up with this referral</a></p>`,
+            "You're invited!"
+          ),
+          text: message,
+        });
+
+        if (!result.success) {
+          throw new TRPCError({
+            code: "INTERNAL_SERVER_ERROR",
+            message: `Failed to send referral email: ${result.error || "email service unavailable"}`,
+          });
+        }
+
+        return {
+          success: true,
+          channel: input.channel,
+          message,
+          shareUrl,
+          referralCode: referralCode.referralCode,
+        };
+      }
+
+      // sms / whatsapp: no SMS gateway or WhatsApp integration exists in this
+      // codebase — fail honestly instead of pretending something was sent.
       return {
-        success: true,
+        success: false,
         channel: input.channel,
+        reason: "channel_not_integrated",
         message,
         shareUrl,
         referralCode: referralCode.referralCode,

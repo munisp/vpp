@@ -40,6 +40,7 @@ export const assets = mysqlTable("assets", {
   serialNumber: varchar("serialNumber", { length: 255 }),
   installationDate: timestamp("installationDate"),
   status: mysqlEnum("status", ["active", "inactive", "maintenance", "fault"]).default("active").notNull(),
+  approvalStatus: mysqlEnum("approvalStatus", ["pending", "approved", "rejected"]).default("pending").notNull(),
   metadata: text("metadata"), // JSON string for additional data
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
@@ -193,7 +194,7 @@ export const tokens = mysqlTable("tokens", {
   energyKwh: int("energyKwh").notNull(),
   amount: int("amount").notNull(), // in cents
   validUntil: timestamp("validUntil").notNull(),
-  status: mysqlEnum("status", ["active", "used", "expired"]).default("active").notNull(),
+  status: mysqlEnum("status", ["active", "used", "expired", "pending_issuance"]).default("active").notNull(),
   usedAt: timestamp("usedAt"),
   metadata: text("metadata"),
   createdAt: timestamp("createdAt").defaultNow().notNull(),

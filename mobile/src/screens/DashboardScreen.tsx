@@ -16,8 +16,31 @@ const screenWidth = Dimensions.get('window').width;
 export default function DashboardScreen({ navigation }: any) {
   const { data: assets, isLoading: assetsLoading, refetch } = trpc.assets.list.useQuery();
   const { data: earnings } = trpc.trading.getEarnings.useQuery();
-  const { data: drStatus } = trpc.demandResponse.getStatus.useQuery();
+  const { data: drEnrollment } = trpc.demandResponse.getEnrollment.useQuery();
+  const { data: upcomingDrEvents } = trpc.demandResponse.getUpcomingEvents.useQuery();
   const { data: currentUser } = trpc.auth.me.useQuery();
+  const { data: recentPayments } = trpc.payments.list.useQuery({ limit: 5 });
+  const { data: recentTradesData } = trpc.trading.list.useQuery({ limit: 5 });
+
+  // 7-day telemetry window for the production chart (first asset).
+  const firstAssetId = assets && assets.length > 0 ? assets[0].id : null;
+  const chartWindow = React.useMemo(() => {
+    const endTime = new Date();
+    const startTime = new Date(endTime.getTime() - 7 * 24 * 60 * 60 * 1000);
+    return {
+      startTime: startTime.toISOString(),
+      endTime: endTime.toISOString(),
+    };
+  }, [firstAssetId]);
+  const { data: weekTelemetry, isLoading: weekLoading } =
+    trpc.telemetry.getHistorical.useQuery(
+      {
+        assetId: firstAssetId!,
+        startTime: chartWindow.startTime,
+        endTime: chartWindow.endTime,
+      },
+      { enabled: !!firstAssetId }
+    );
 
   const [refreshing, setRefreshing] = React.useState(false);
 
@@ -30,7 +53,65 @@ export default function DashboardScreen({ navigation }: any) {
   // Calculate totals
   const totalCapacity = assets?.reduce((sum, asset) => sum + asset.capacity, 0) || 0;
   const activeAssets = assets?.filter(a => a.status === 'active').length || 0;
-  const totalEarnings = earnings?.totalEarnings || 0;
+  const netEarningsCents = earnings?.netCents;
+
+  // Daily energy production (kWh) from real cumulative energy readings
+  // (watt-hours). Per-day production = last reading - first reading.
+  const dailyProduction = React.useMemo(() => {
+    if (!weekTelemetry || weekTelemetry.length === 0) return null;
+    const byDay = new Map<string, number[]>();
+    for (const row of weekTelemetry) {
+      if (row.energy == null) continue;
+      const day = new Date(row.timestamp).toDateString();
+      const list = byDay.get(day) ?? [];
+      list.push(row.energy);
+      byDay.set(day, list);
+    }
+    if (byDay.size === 0) return null;
+    const days = Array.from(byDay.entries()).sort(
+      (a, b) => new Date(a[0]).getTime() - new Date(b[0]).getTime()
+    );
+    const labels = days.map(([day]) =>
+      new Date(day).toLocaleDateString([], { weekday: 'short' })
+    );
+    const data = days.map(([, values]) => {
+      const min = Math.min(...values);
+      const max = Math.max(...values);
+      return Math.max(0, (max - min) / 1000); // Wh -> kWh
+    });
+    if (data.every((v) => v === 0)) return null;
+    return { labels, data };
+  }, [weekTelemetry]);
+
+  // Recent activity merged from real payments and trades.
+  const recentActivity = React.useMemo(() => {
+    const items: {
+      icon: string;
+      title: string;
+      description: string;
+      date: Date;
+    }[] = [];
+    for (const p of recentPayments ?? []) {
+      items.push({
+        icon: '💰',
+        title: 'Payment',
+        description: `${(p.amount / 100).toFixed(0)} ${p.currency || 'TZS'} · ${p.status}`,
+        date: new Date(p.createdAt),
+      });
+    }
+    for (const t of recentTradesData?.trades ?? []) {
+      const isSell = t.tradeType === 'export' || t.tradeType === 'p2p_sell';
+      items.push({
+        icon: '⚡',
+        title: isSell ? 'Energy Sold' : 'Energy Bought',
+        description: `${(t.energy / 1000).toFixed(2)} kWh · ${t.status}`,
+        date: new Date(t.createdAt),
+      });
+    }
+    return items
+      .sort((a, b) => b.date.getTime() - a.date.getTime())
+      .slice(0, 5);
+  }, [recentPayments, recentTradesData]);
 
   return (
     <ScrollView
@@ -60,47 +141,75 @@ export default function DashboardScreen({ navigation }: any) {
           color="#3b82f6"
         />
         <StatCard
-          title="Total Earnings"
-          value={`${(totalEarnings / 100).toFixed(0)} TZS`}
+          title="Net Earnings"
+          value={
+            netEarningsCents != null
+              ? `${(netEarningsCents / 100).toFixed(0)} TZS`
+              : '—'
+          }
           icon="💰"
           color="#f59e0b"
         />
         <StatCard
           title="DR Events"
-          value={drStatus?.activeEvents?.toString() || '0'}
+          value={(upcomingDrEvents?.length ?? 0).toString()}
           icon="🎯"
           color="#8b5cf6"
         />
       </View>
 
-      {/* Energy Production Chart */}
+      {/* Energy Production Chart (real telemetry; hidden fabrication removed) */}
       <View style={styles.chartCard}>
         <Text style={styles.chartTitle}>Energy Production (Last 7 Days)</Text>
-        <LineChart
-          data={{
-            labels: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'],
-            datasets: [
-              {
-                data: [45, 52, 48, 58, 55, 60, 54],
+        {firstAssetId == null ? (
+          <Text style={styles.chartEmpty}>
+            Register an asset to see energy production data.
+          </Text>
+        ) : weekLoading ? (
+          <Text style={styles.chartEmpty}>Loading production data…</Text>
+        ) : dailyProduction ? (
+          <LineChart
+            data={{
+              labels: dailyProduction.labels,
+              datasets: [{ data: dailyProduction.data }],
+            }}
+            width={screenWidth - 48}
+            height={200}
+            chartConfig={{
+              backgroundColor: '#fff',
+              backgroundGradientFrom: '#fff',
+              backgroundGradientTo: '#fff',
+              decimalPlaces: 0,
+              color: (opacity = 1) => `rgba(16, 185, 129, ${opacity})`,
+              style: {
+                borderRadius: 16,
               },
-            ],
-          }}
-          width={screenWidth - 48}
-          height={200}
-          chartConfig={{
-            backgroundColor: '#fff',
-            backgroundGradientFrom: '#fff',
-            backgroundGradientTo: '#fff',
-            decimalPlaces: 0,
-            color: (opacity = 1) => `rgba(16, 185, 129, ${opacity})`,
-            style: {
-              borderRadius: 16,
-            },
-          }}
-          bezier
-          style={styles.chart}
-        />
+            }}
+            bezier
+            style={styles.chart}
+          />
+        ) : (
+          <Text style={styles.chartEmpty}>
+            No production data recorded in the last 7 days.
+          </Text>
+        )}
       </View>
+
+      {/* DR enrollment banner */}
+      {drEnrollment === null && (
+        <View style={styles.actionsCard}>
+          <Text style={styles.sectionTitle}>Demand Response</Text>
+          <Text style={styles.drBannerText}>
+            You are not enrolled in the demand response program yet.
+          </Text>
+          <TouchableOpacity
+            style={styles.drBannerButton}
+            onPress={() => navigation.navigate('DR')}
+          >
+            <Text style={styles.drBannerButtonText}>Enroll Now</Text>
+          </TouchableOpacity>
+        </View>
+      )}
 
       {/* Quick Actions */}
       <View style={styles.actionsCard}>
@@ -163,30 +272,36 @@ export default function DashboardScreen({ navigation }: any) {
         </View>
       )}
 
-      {/* Recent Activity */}
+      {/* Recent Activity (real payments and trades) */}
       <View style={styles.activityCard}>
         <Text style={styles.sectionTitle}>Recent Activity</Text>
-        <ActivityItem
-          icon="⚡"
-          title="Energy Sold"
-          description="150 kWh sold to grid"
-          time="2 hours ago"
-        />
-        <ActivityItem
-          icon="💰"
-          title="Payment Received"
-          description="45,000 TZS credited"
-          time="5 hours ago"
-        />
-        <ActivityItem
-          icon="🎯"
-          title="DR Event Completed"
-          description="Peak shaving event - 25 kW reduced"
-          time="1 day ago"
-        />
+        {recentActivity.length === 0 ? (
+          <Text style={styles.chartEmpty}>No recent activity yet.</Text>
+        ) : (
+          recentActivity.map((item, index) => (
+            <ActivityItem
+              key={index}
+              icon={item.icon}
+              title={item.title}
+              description={item.description}
+              time={formatRelativeTime(item.date)}
+            />
+          ))
+        )}
       </View>
     </ScrollView>
   );
+}
+
+function formatRelativeTime(date: Date): string {
+  const diffMs = Date.now() - date.getTime();
+  const minutes = Math.floor(diffMs / 60000);
+  if (minutes < 1) return 'Just now';
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} h ago`;
+  const days = Math.floor(hours / 24);
+  return `${days} d ago`;
 }
 
 function StatCard({
@@ -323,6 +438,27 @@ const styles = StyleSheet.create({
   },
   chart: {
     borderRadius: 8,
+  },
+  chartEmpty: {
+    fontSize: 14,
+    color: '#6b7280',
+    textAlign: 'center',
+    paddingVertical: 24,
+  },
+  drBannerText: {
+    fontSize: 14,
+    color: '#6b7280',
+    marginBottom: 12,
+  },
+  drBannerButton: {
+    backgroundColor: '#8b5cf6',
+    paddingVertical: 12,
+    borderRadius: 8,
+    alignItems: 'center',
+  },
+  drBannerButtonText: {
+    color: '#fff',
+    fontWeight: '600',
   },
   actionsCard: {
     backgroundColor: '#fff',

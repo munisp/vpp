@@ -5,7 +5,15 @@
  * including participant enrollment, monitoring, and compensation.
  */
 
-import {
+import { proxyActivities, sleep } from '@temporalio/workflow';
+import type * as activities from './dr-event-activities';
+
+/**
+ * Activities are invoked through Temporal proxies so they execute on the
+ * worker (with retries) instead of being called directly inside the
+ * deterministic workflow sandbox.
+ */
+const {
   createDREventActivity,
   enrollParticipantsActivity,
   sendDRNotificationsActivity,
@@ -13,8 +21,16 @@ import {
   calculateDRPerformanceActivity,
   awardDRCompensationActivity,
   updateDREventStatusActivity,
-  DREventActivityInput,
-} from './dr-event-activities';
+  getDRParticipantsActivity,
+} = proxyActivities<typeof activities>({
+  startToCloseTimeout: '5 minutes',
+  retry: {
+    initialInterval: '1s',
+    backoffCoefficient: 2,
+    maximumInterval: '60s',
+    maximumAttempts: 3,
+  },
+});
 
 /**
  * DR Event Workflow Input
@@ -43,16 +59,19 @@ export interface DREventWorkflowResult {
 }
 
 /**
- * Main DR Event Workflow
- * 
+ * Main DR Event Workflow (Temporal workflow type: "orchestrateDREvent")
+ *
  * Orchestrates the complete DR event lifecycle:
  * 1. Create event in database
  * 2. Enroll eligible participants
  * 3. Send notifications
  * 4. Monitor participation during event
  * 5. Calculate performance and award compensation
+ *
+ * Exported under the exact type name the Temporal client starts
+ * (server/integration/temporal-client.ts uses 'orchestrateDREvent').
  */
-export async function drEventWorkflow(
+export async function orchestrateDREvent(
   input: DREventWorkflowInput
 ): Promise<DREventWorkflowResult> {
   let eventId: number | undefined;
@@ -93,12 +112,12 @@ export async function drEventWorkflow(
       participantIds: enrollResult.participantIds || [],
     });
 
-    // Step 4: Wait until event start time
+    // Step 4: Wait until event start time (deterministic Temporal timer)
     const now = new Date();
     const startTime = new Date(input.startTime);
     if (startTime > now) {
       const waitMs = startTime.getTime() - now.getTime();
-      await new Promise(resolve => setTimeout(resolve, waitMs));
+      await sleep(waitMs);
     }
 
     // Step 5: Update event status to active
@@ -119,12 +138,12 @@ export async function drEventWorkflow(
       targetReduction: input.targetReduction,
     });
 
-    // Step 8: Wait until event end time
+    // Step 8: Wait until event end time (deterministic Temporal timer)
     const endTime = new Date(input.endTime);
     const nowAfterStart = new Date();
     if (endTime > nowAfterStart) {
       const waitMs = endTime.getTime() - nowAfterStart.getTime();
-      await new Promise(resolve => setTimeout(resolve, waitMs));
+      await sleep(waitMs);
     }
 
     // Step 9: Calculate performance for all participants
@@ -190,14 +209,17 @@ export async function cancelDREventWorkflow(
     // Update event status to cancelled
     await updateDREventStatusActivity(eventId, 'cancelled');
 
-    // Get enrolled participants
-    // (This would need a new activity to fetch participants)
-    
+    // Get enrolled participants from their DR responses
+    const participants = await getDRParticipantsActivity(eventId);
+    if (!participants.success) {
+      throw new Error(participants.error || 'Failed to load event participants');
+    }
+
     // Send cancellation notifications
     await sendDRNotificationsActivity({
       eventId,
       type: 'event_cancelled',
-      participantIds: [], // Would be populated from database
+      participantIds: participants.participantIds || [],
       metadata: { reason },
     });
 
@@ -207,51 +229,6 @@ export async function cancelDREventWorkflow(
     return {
       success: false,
       error: error instanceof Error ? error.message : 'Cancellation workflow failed',
-    };
-  }
-}
-
-/**
- * Automated DR Event Forecasting Workflow
- * 
- * Uses ML forecasting to automatically create DR events
- * when grid stress is predicted
- */
-export async function drForecastingWorkflow(input: {
-  forecastHorizon: number; // hours
-  gridStressThreshold: number; // percentage
-}): Promise<{ success: boolean; eventsCreated: number; error?: string }> {
-  try {
-    // This would integrate with the forecasting service
-    // For now, it's a placeholder for the workflow structure
-    
-    // Step 1: Run forecasting model
-    // const forecast = await runForecastingActivity(input.forecastHorizon);
-    
-    // Step 2: Identify peak periods
-    // const peaks = await identifyPeakPeriodsActivity(forecast, input.gridStressThreshold);
-    
-    // Step 3: Create DR events for each peak
-    let eventsCreated = 0;
-    // for (const peak of peaks) {
-    //   const result = await drEventWorkflow({
-    //     type: 'scheduled',
-    //     startTime: peak.startTime,
-    //     endTime: peak.endTime,
-    //     targetReduction: peak.recommendedReduction,
-    //     compensationRate: peak.dynamicRate,
-    //     autoEnroll: true,
-    //   });
-    //   if (result.success) eventsCreated++;
-    // }
-
-    return { success: true, eventsCreated };
-  } catch (error) {
-    console.error('[DRForecastingWorkflow] Error:', error);
-    return {
-      success: false,
-      eventsCreated: 0,
-      error: error instanceof Error ? error.message : 'Forecasting workflow failed',
     };
   }
 }

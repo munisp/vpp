@@ -12,6 +12,7 @@ import { initScheduledReports } from "./scheduler";
 import { startStatusUpdateJob } from "./qrStatusUpdater";
 import { initScheduledReportJobs } from "./scheduledReports";
 import { handleMpesaCallback, handleAirtelCallback, handleTigoCallback } from "../webhooks/payment-callbacks";
+import { verifyWebhookSignature } from "../webhooks/verify-signature";
 import { webSocketService } from "../integration/websocket-service";
 
 function isPortAvailable(port: number): Promise<boolean> {
@@ -62,9 +63,9 @@ async function startServer() {
   });
 
   // Payment gateway webhooks
-  app.post("/api/webhooks/mpesa", handleMpesaCallback);
-  app.post("/api/webhooks/airtel", handleAirtelCallback);
-  app.post("/api/webhooks/tigo", handleTigoCallback);
+  app.post("/api/webhooks/mpesa", verifyWebhookSignature("mpesa"), handleMpesaCallback);
+  app.post("/api/webhooks/airtel", verifyWebhookSignature("airtel"), handleAirtelCallback);
+  app.post("/api/webhooks/tigo", verifyWebhookSignature("tigo"), handleTigoCallback);
   // tRPC API
   app.use(
     "/api/trpc",

@@ -107,15 +107,18 @@ export class SyncService {
         break;
 
       case 'create_trade':
-        await trpcClient.trading.createTrade.mutate(action.data);
+        // server/routers/trading.ts -> create
+        await trpcClient.trading.create.mutate(action.data);
         break;
 
       case 'participate_dr':
-        await trpcClient.demandResponse.participate.mutate(action.data);
+        // server/routers/demandResponse.ts -> respondToEvent
+        await trpcClient.demandResponse.respondToEvent.mutate(action.data);
         break;
 
       case 'initiate_payment':
-        await trpcClient.paymentProcessing.initiatePayment.mutate(action.data);
+        // server/routers/payments.ts -> initiate
+        await trpcClient.payments.initiate.mutate(action.data);
         break;
 
       default:
@@ -145,19 +148,22 @@ export class SyncService {
       const assets = await trpcClient.assets.list.query();
       await OfflineStorage.saveAssets(assets);
 
-      // Fetch and cache trades
-      const trades = await trpcClient.trading.getTrades.query({ status: 'active' });
-      await OfflineStorage.saveTrades(trades);
+      // Fetch and cache trades (trading.list returns { trades, count })
+      const tradesResult = await trpcClient.trading.list.query({ limit: 50 });
+      await OfflineStorage.saveTrades(tradesResult.trades);
 
       // Fetch and cache DR events
-      const drEvents = await trpcClient.demandResponse.getEvents.query({ status: 'active' });
+      const drEvents = await trpcClient.demandResponse.getUpcomingEvents.query();
       await OfflineStorage.saveDREvents(drEvents);
 
-      // Fetch and cache telemetry for each asset
+      // Fetch and cache telemetry for each asset (last 24 hours)
       for (const asset of assets) {
-        const telemetry = await trpcClient.monitoring.getTelemetry.query({
+        const endTime = new Date();
+        const startTime = new Date(endTime.getTime() - 24 * 60 * 60 * 1000);
+        const telemetry = await trpcClient.telemetry.getHistorical.query({
           assetId: asset.id,
-          hours: 24,
+          startTime: startTime.toISOString(),
+          endTime: endTime.toISOString(),
         });
         await OfflineStorage.saveTelemetry(asset.id, telemetry);
       }

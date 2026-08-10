@@ -254,29 +254,6 @@ export class PaymentGatewayManager {
   }
 
   /**
-   * Get payment statistics
-   */
-  static async getPaymentStats(
-    gatewayId?: 'mpesa' | 'airtel_money' | 'tigo_pesa'
-  ): Promise<{
-    total: number;
-    completed: number;
-    pending: number;
-    failed: number;
-    totalAmount: number;
-  }> {
-    // This would typically query the payments table
-    // For now, return placeholder stats - actual implementation would use getDb()
-    return {
-      total: 0,
-      completed: 0,
-      pending: 0,
-      failed: 0,
-      totalAmount: 0,
-    };
-  }
-
-  /**
    * Clear cached gateway instances (useful after credential updates)
    */
   static clearCache(): void {

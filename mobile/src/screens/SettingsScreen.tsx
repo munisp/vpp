@@ -9,12 +9,91 @@ import {
   Alert,
 } from 'react-native';
 import { useAuth } from '../contexts/AuthContext';
+import { trpc } from '../services/trpc';
+
+// All push-notification category flags stored server-side
+// (server/routers/notificationPreferences.ts).
+const PUSH_FLAGS = [
+  'pushPaymentReceived',
+  'pushAchievementUnlocked',
+  'pushDREventReminder',
+  'pushDREventCreated',
+  'pushLeaderboardRankChange',
+  'pushTradeExecuted',
+  'pushTradeFailed',
+  'pushSystemAlert',
+  'pushBillingAlert',
+] as const;
 
 export default function SettingsScreen() {
   const { user, logout } = useAuth();
-  const [notifications, setNotifications] = React.useState(true);
-  const [autoSell, setAutoSell] = React.useState(false);
-  const [drAutoOptIn, setDrAutoOptIn] = React.useState(true);
+  const utils = trpc.useUtils();
+
+  // Server-backed preferences
+  const { data: notifPrefs, isLoading: notifLoading } =
+    trpc.notificationPreferences.get.useQuery();
+  const { data: tradingPrefs, isLoading: tradingLoading } =
+    trpc.trading.getPreferences.useQuery();
+  const { data: drEnrollment, isLoading: drLoading } =
+    trpc.demandResponse.getEnrollment.useQuery();
+
+  const updateNotifPrefs = trpc.notificationPreferences.update.useMutation({
+    onSuccess: () => {
+      utils.notificationPreferences.get.invalidate();
+    },
+    onError: (error) => {
+      Alert.alert('Error', `Could not update notifications: ${error.message}`);
+    },
+  });
+
+  const updateTradingPrefs = trpc.trading.updatePreferences.useMutation({
+    onSuccess: () => {
+      utils.trading.getPreferences.invalidate();
+    },
+    onError: (error) => {
+      Alert.alert('Error', `Could not update trading preferences: ${error.message}`);
+    },
+  });
+
+  const updateDrEnrollment = trpc.demandResponse.updateEnrollment.useMutation({
+    onSuccess: () => {
+      utils.demandResponse.getEnrollment.invalidate();
+    },
+    onError: (error) => {
+      Alert.alert('Error', `Could not update DR settings: ${error.message}`);
+    },
+  });
+
+  // Push notifications: the toggle drives every push category flag; it
+  // reflects "on" only when all categories are enabled server-side.
+  const pushEnabled = notifPrefs
+    ? PUSH_FLAGS.every(
+        (flag) => (notifPrefs as Record<string, unknown>)[flag] === true
+      )
+    : false;
+
+  const handlePushToggle = (value: boolean) => {
+    updateNotifPrefs.mutate(
+      Object.fromEntries(PUSH_FLAGS.map((flag) => [flag, value]))
+    );
+  };
+
+  // Auto-sell: automatic trading mode sells surplus without intervention.
+  const autoSellEnabled = tradingPrefs?.tradingMode === 'automatic';
+
+  const handleAutoSellToggle = (value: boolean) => {
+    updateTradingPrefs.mutate({
+      tradingMode: value ? 'automatic' : 'manual',
+    });
+  };
+
+  // DR auto opt-in: only manageable once enrolled (there is a real
+  // updateEnrollment mutation, but no participant row exists before that).
+  const drAutoOptIn = drEnrollment?.autoOptIn ?? false;
+
+  const handleDrAutoOptInToggle = (value: boolean) => {
+    updateDrEnrollment.mutate({ autoOptIn: value });
+  };
 
   const handleLogout = () => {
     Alert.alert(
@@ -59,8 +138,9 @@ export default function SettingsScreen() {
           description="Receive alerts about DR events and trades"
           rightComponent={
             <Switch
-              value={notifications}
-              onValueChange={setNotifications}
+              value={pushEnabled}
+              onValueChange={handlePushToggle}
+              disabled={notifLoading || updateNotifPrefs.isLoading}
               trackColor={{ false: '#d1d5db', true: '#10b981' }}
               thumbColor="#fff"
             />
@@ -77,8 +157,9 @@ export default function SettingsScreen() {
           description="Automatically sell surplus energy at market price"
           rightComponent={
             <Switch
-              value={autoSell}
-              onValueChange={setAutoSell}
+              value={autoSellEnabled}
+              onValueChange={handleAutoSellToggle}
+              disabled={tradingLoading || updateTradingPrefs.isLoading}
               trackColor={{ false: '#d1d5db', true: '#10b981' }}
               thumbColor="#fff"
             />
@@ -87,7 +168,7 @@ export default function SettingsScreen() {
         <SettingItem
           icon="💰"
           title="Payment Method"
-          description="M-Pesa (255XXXXXXXXX)"
+          description="Add or manage payment methods"
           onPress={() => Alert.alert('Coming soon')}
         />
       </View>
@@ -98,14 +179,25 @@ export default function SettingsScreen() {
         <SettingItem
           icon="⚡"
           title="Auto Opt-in"
-          description="Automatically participate in DR events"
+          description={
+            drEnrollment
+              ? 'Automatically participate in DR events'
+              : 'Available after enrolling in the DR program'
+          }
           rightComponent={
-            <Switch
-              value={drAutoOptIn}
-              onValueChange={setDrAutoOptIn}
-              trackColor={{ false: '#d1d5db', true: '#10b981' }}
-              thumbColor="#fff"
-            />
+            drEnrollment ? (
+              <Switch
+                value={drAutoOptIn}
+                onValueChange={handleDrAutoOptInToggle}
+                disabled={drLoading || updateDrEnrollment.isLoading}
+                trackColor={{ false: '#d1d5db', true: '#10b981' }}
+                thumbColor="#fff"
+              />
+            ) : (
+              <Text style={styles.managedText}>
+                {drLoading ? 'Loading…' : 'Not enrolled'}
+              </Text>
+            )
           }
         />
         <SettingItem
@@ -318,6 +410,11 @@ const styles = StyleSheet.create({
   settingArrow: {
     fontSize: 24,
     color: '#d1d5db',
+  },
+  managedText: {
+    fontSize: 13,
+    color: '#6b7280',
+    fontStyle: 'italic',
   },
   logoutButton: {
     backgroundColor: '#fff',

@@ -18,8 +18,39 @@ export default function MonitoringScreen() {
   const [refreshing, setRefreshing] = useState(false);
 
   const { data: assets } = trpc.assets.list.useQuery();
-  const { data: telemetry, refetch } = trpc.monitoring.getTelemetry.useQuery(
-    { assetId: selectedAsset!, hours: 24 },
+
+  // telemetry.getLatest returns the single most recent reading (or null);
+  // telemetry.getHistorical returns the readings in a time range.
+  const {
+    data: latestData,
+    refetch: refetchLatest,
+    isLoading: latestLoading,
+    isError: latestError,
+  } = trpc.telemetry.getLatest.useQuery(
+    { assetId: selectedAsset! },
+    { enabled: !!selectedAsset }
+  );
+
+  // Stable 24h window per selected asset.
+  const historyWindow = React.useMemo(() => {
+    const endTime = new Date();
+    const startTime = new Date(endTime.getTime() - 24 * 60 * 60 * 1000);
+    return {
+      startTime: startTime.toISOString(),
+      endTime: endTime.toISOString(),
+    };
+  }, [selectedAsset]);
+
+  const {
+    data: history,
+    refetch: refetchHistory,
+    isLoading: historyLoading,
+  } = trpc.telemetry.getHistorical.useQuery(
+    {
+      assetId: selectedAsset!,
+      startTime: historyWindow.startTime,
+      endTime: historyWindow.endTime,
+    },
     { enabled: !!selectedAsset }
   );
 
@@ -31,26 +62,30 @@ export default function MonitoringScreen() {
 
   const onRefresh = async () => {
     setRefreshing(true);
-    await refetch();
+    await Promise.all([refetchLatest(), refetchHistory()]);
     setRefreshing(false);
   };
 
-  const latestData = telemetry && telemetry.length > 0 ? telemetry[0] : null;
-
-  // Prepare chart data
-  const chartData = telemetry
-    ? {
-        labels: telemetry.slice(0, 7).reverse().map((_, i) => `${i * 4}h`),
-        datasets: [
-          {
-            data: telemetry
-              .slice(0, 7)
-              .reverse()
-              .map((t) => (t.power || 0) / 1000), // Convert to kW
-          },
-        ],
-      }
-    : { labels: [], datasets: [{ data: [0] }] };
+  // Prepare chart data from real historical power readings (W -> kW).
+  const powerPoints = (history ?? [])
+    .filter((t) => t.power !== null && t.power !== undefined)
+    .slice(-7);
+  const chartData =
+    powerPoints.length > 0
+      ? {
+          labels: powerPoints.map((t) =>
+            new Date(t.timestamp).toLocaleTimeString([], {
+              hour: '2-digit',
+              minute: '2-digit',
+            })
+          ),
+          datasets: [
+            {
+              data: powerPoints.map((t) => (t.power as number) / 1000),
+            },
+          ],
+        }
+      : null;
 
   return (
     <ScrollView
@@ -88,46 +123,80 @@ export default function MonitoringScreen() {
       )}
 
       {/* Real-time Metrics */}
+      {selectedAsset && latestLoading && (
+        <View style={styles.metricsCard}>
+          <Text style={styles.cardTitle}>Real-time Metrics</Text>
+          <Text style={styles.emptyText}>Loading latest readings…</Text>
+        </View>
+      )}
+
+      {selectedAsset && !latestLoading && (latestError || !latestData) && (
+        <View style={styles.metricsCard}>
+          <Text style={styles.cardTitle}>Real-time Metrics</Text>
+          <Text style={styles.emptyText}>
+            {latestError
+              ? 'Could not load telemetry for this asset.'
+              : 'No telemetry data yet for this asset.'}
+          </Text>
+        </View>
+      )}
+
       {latestData && (
         <View style={styles.metricsCard}>
           <Text style={styles.cardTitle}>Real-time Metrics</Text>
           <View style={styles.metricsGrid}>
             <MetricItem
               label="Power"
-              value={`${((latestData.power || 0) / 1000).toFixed(2)} kW`}
+              value={
+                latestData.power != null
+                  ? `${(latestData.power / 1000).toFixed(2)} kW`
+                  : '—'
+              }
               icon="⚡"
               color="#10b981"
             />
             <MetricItem
               label="Voltage"
-              value={`${((latestData.voltage || 0) / 1000).toFixed(1)} V`}
+              value={
+                latestData.voltage != null
+                  ? `${(latestData.voltage / 1000).toFixed(1)} V`
+                  : '—'
+              }
               icon="🔌"
               color="#3b82f6"
             />
             <MetricItem
               label="Current"
-              value={`${((latestData.current || 0) / 1000).toFixed(2)} A`}
+              value={
+                latestData.current != null
+                  ? `${(latestData.current / 1000).toFixed(2)} A`
+                  : '—'
+              }
               icon="⚙️"
               color="#f59e0b"
             />
             <MetricItem
               label="Frequency"
-              value={`${((latestData.frequency || 0) / 1000).toFixed(2)} Hz`}
+              value={
+                latestData.frequency != null
+                  ? `${(latestData.frequency / 1000).toFixed(2)} Hz`
+                  : '—'
+              }
               icon="📊"
               color="#8b5cf6"
             />
-            {latestData.stateOfCharge !== null && (
+            {latestData.stateOfCharge != null && (
               <MetricItem
                 label="Battery SoC"
-                value={`${((latestData.stateOfCharge || 0) / 100).toFixed(0)}%`}
+                value={`${(latestData.stateOfCharge / 100).toFixed(0)}%`}
                 icon="🔋"
                 color="#06b6d4"
               />
             )}
-            {latestData.temperature !== null && (
+            {latestData.temperature != null && (
               <MetricItem
                 label="Temperature"
-                value={`${((latestData.temperature || 0) / 100).toFixed(1)}°C`}
+                value={`${(latestData.temperature / 100).toFixed(1)}°C`}
                 icon="🌡️"
                 color="#ef4444"
               />
@@ -137,11 +206,14 @@ export default function MonitoringScreen() {
       )}
 
       {/* Power Chart */}
-      {telemetry && telemetry.length > 0 && (
+      {selectedAsset && (
         <View style={styles.chartCard}>
           <Text style={styles.cardTitle}>Power Output (Last 24 Hours)</Text>
-          <LineChart
-            data={chartData}
+          {historyLoading ? (
+            <Text style={styles.emptyText}>Loading readings…</Text>
+          ) : chartData ? (
+            <LineChart
+              data={chartData}
             width={screenWidth - 48}
             height={220}
             chartConfig={{
@@ -160,9 +232,14 @@ export default function MonitoringScreen() {
                 stroke: '#10b981',
               },
             }}
-            bezier
-            style={styles.chart}
-          />
+              bezier
+              style={styles.chart}
+            />
+          ) : (
+            <Text style={styles.emptyText}>
+              No power readings in the last 24 hours.
+            </Text>
+          )}
         </View>
       )}
 
@@ -173,14 +250,18 @@ export default function MonitoringScreen() {
           <View style={styles.energyStats}>
             <View style={styles.energyStat}>
               <Text style={styles.energyValue}>
-                {((latestData.energy || 0) / 1000).toFixed(2)} kWh
+                {latestData.energy != null
+                  ? `${(latestData.energy / 1000).toFixed(2)} kWh`
+                  : '—'}
               </Text>
-              <Text style={styles.energyLabel}>Total Energy</Text>
+              <Text style={styles.energyLabel}>Total Energy (cumulative)</Text>
             </View>
             <View style={styles.energyDivider} />
             <View style={styles.energyStat}>
               <Text style={styles.energyValue}>
-                {((latestData.power || 0) / 1000).toFixed(2)} kW
+                {latestData.power != null
+                  ? `${(latestData.power / 1000).toFixed(2)} kW`
+                  : '—'}
               </Text>
               <Text style={styles.energyLabel}>Current Power</Text>
             </View>
@@ -188,34 +269,31 @@ export default function MonitoringScreen() {
         </View>
       )}
 
-      {/* Status Indicators */}
+      {/* Status Indicators (only values derivable from real telemetry) */}
       {latestData && (
         <View style={styles.statusCard}>
           <Text style={styles.cardTitle}>System Status</Text>
           <StatusItem
-            label="Grid Connection"
-            status="Connected"
-            color="#10b981"
-          />
-          <StatusItem
             label="Power Quality"
             status={
-              latestData.frequency &&
-              Math.abs(latestData.frequency - 50000) < 500
-                ? 'Good'
-                : 'Warning'
+              latestData.frequency == null
+                ? 'Unknown'
+                : Math.abs(latestData.frequency - 50000) < 500
+                  ? 'Good'
+                  : 'Warning'
             }
             color={
-              latestData.frequency &&
-              Math.abs(latestData.frequency - 50000) < 500
-                ? '#10b981'
-                : '#f59e0b'
+              latestData.frequency == null
+                ? '#6b7280'
+                : Math.abs(latestData.frequency - 50000) < 500
+                  ? '#10b981'
+                  : '#f59e0b'
             }
           />
           <StatusItem
-            label="Asset Health"
-            status="Operational"
-            color="#10b981"
+            label="Last Reading"
+            status={new Date(latestData.timestamp).toLocaleString()}
+            color="#6b7280"
           />
         </View>
       )}

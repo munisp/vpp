@@ -19,12 +19,16 @@ export default function GamificationScreen({ navigation }: any) {
   const [refreshing, setRefreshing] = useState(false);
 
   const { data: leaderboard, refetch: refetchLeaderboard } = trpc.gamification.getLeaderboard.useQuery({
-    timeframe: 'monthly',
+    period: 'monthly',
     limit: 50,
   });
 
-  const { data: userStats } = trpc.gamification.getUserStats.useQuery();
-  const { data: achievements } = trpc.gamification.getAchievements.useQuery();
+  // getMyRank returns the caller's leaderboard entry (or null).
+  const { data: myRank } = trpc.gamification.getMyRank.useQuery({
+    period: 'monthly',
+  });
+  // getMyAchievements returns [{ achievement, unlockedAt }] — all unlocked.
+  const { data: myAchievements } = trpc.gamification.getMyAchievements.useQuery();
 
   const onRefresh = async () => {
     setRefreshing(true);
@@ -61,22 +65,22 @@ export default function GamificationScreen({ navigation }: any) {
         <View style={{ width: 40 }} />
       </View>
 
-      {/* User Stats Card */}
-      {userStats && (
+      {/* User Stats Card (real leaderboard entry fields) */}
+      {myRank && (
         <View style={styles.statsCard}>
           <View style={styles.statItem}>
-            <Text style={styles.statValue}>{userStats.rank || '-'}</Text>
+            <Text style={styles.statValue}>#{myRank.rank}</Text>
             <Text style={styles.statLabel}>Your Rank</Text>
           </View>
           <View style={styles.statDivider} />
           <View style={styles.statItem}>
-            <Text style={styles.statValue}>{userStats.totalPoints || 0}</Text>
-            <Text style={styles.statLabel}>Total Points</Text>
+            <Text style={styles.statValue}>{myRank.score}</Text>
+            <Text style={styles.statLabel}>Score</Text>
           </View>
           <View style={styles.statDivider} />
           <View style={styles.statItem}>
-            <Text style={styles.statValue}>{userStats.level || 1}</Text>
-            <Text style={styles.statLabel}>Level</Text>
+            <Text style={styles.statValue}>{myRank.eventsParticipated}</Text>
+            <Text style={styles.statLabel}>Events</Text>
           </View>
         </View>
       )}
@@ -137,48 +141,53 @@ export default function GamificationScreen({ navigation }: any) {
       >
         {activeTab === 'leaderboard' && (
           <View style={styles.leaderboardContainer}>
-            {leaderboard?.users.map((user, index) => (
+            {/* Server shape: array of leaderboard entries + userName
+                (score-based, DR metrics: totalReduction in kW). */}
+            {leaderboard?.map((entry) => {
+              const isCurrentUser = myRank?.userId === entry.userId;
+              return (
               <View
-                key={user.id}
+                key={entry.id}
                 style={[
                   styles.leaderboardItem,
-                  user.isCurrentUser && styles.currentUserItem,
+                  isCurrentUser && styles.currentUserItem,
                 ]}
               >
                 <View style={styles.rankContainer}>
                   <Text
                     style={[
                       styles.rankText,
-                      { color: getRankColor(user.rank) },
+                      { color: getRankColor(entry.rank) },
                     ]}
                   >
-                    {getRankIcon(user.rank)}
+                    {getRankIcon(entry.rank)}
                   </Text>
                 </View>
 
                 <View style={styles.userInfo}>
                   <Text style={styles.userName}>
-                    {user.name}
-                    {user.isCurrentUser && (
+                    {entry.userName}
+                    {isCurrentUser && (
                       <Text style={styles.youBadge}> (You)</Text>
                     )}
                   </Text>
                   <View style={styles.userMeta}>
                     <Ionicons name="flash" size={12} color="#f59e0b" />
                     <Text style={styles.energyText}>
-                      {user.totalEnergyTraded.toFixed(0)} kWh
+                      {entry.totalReduction} kW reduced
                     </Text>
                   </View>
                 </View>
 
                 <View style={styles.pointsContainer}>
-                  <Text style={styles.pointsText}>{user.totalPoints}</Text>
+                  <Text style={styles.pointsText}>{entry.score}</Text>
                   <Text style={styles.pointsLabel}>pts</Text>
                 </View>
               </View>
-            ))}
+              );
+            })}
 
-            {!leaderboard?.users.length && (
+            {!leaderboard?.length && (
               <View style={styles.emptyState}>
                 <Ionicons name="trophy-outline" size={64} color="#d1d5db" />
                 <Text style={styles.emptyText}>No leaderboard data yet</Text>
@@ -192,53 +201,53 @@ export default function GamificationScreen({ navigation }: any) {
 
         {activeTab === 'achievements' && (
           <View style={styles.achievementsContainer}>
-            {achievements?.map((achievement) => (
-              <View
-                key={achievement.id}
-                style={[
-                  styles.achievementCard,
-                  !achievement.unlocked && styles.lockedAchievement,
-                ]}
-              >
+            {/* Server returns only unlocked achievements:
+                [{ achievement: {...}, unlockedAt }] */}
+            {myAchievements?.map(({ achievement, unlockedAt }) => (
+              <View key={achievement.id} style={styles.achievementCard}>
                 <View style={styles.achievementIcon}>
-                  <Text style={styles.achievementEmoji}>{achievement.icon}</Text>
-                  {achievement.unlocked && (
-                    <View style={styles.unlockedBadge}>
-                      <Ionicons name="checkmark" size={16} color="white" />
-                    </View>
-                  )}
+                  <Text style={styles.achievementEmoji}>🏅</Text>
+                  <View style={styles.unlockedBadge}>
+                    <Ionicons name="checkmark" size={16} color="white" />
+                  </View>
                 </View>
 
                 <View style={styles.achievementInfo}>
                   <Text style={styles.achievementName}>{achievement.name}</Text>
-                  <Text style={styles.achievementDescription}>
-                    {achievement.description}
-                  </Text>
+                  {achievement.description && (
+                    <Text style={styles.achievementDescription}>
+                      {achievement.description}
+                    </Text>
+                  )}
                   <View style={styles.achievementMeta}>
                     <Ionicons name="star" size={12} color="#f59e0b" />
                     <Text style={styles.achievementPoints}>
-                      {achievement.points} points
+                      {achievement.rewardPoints} points
                     </Text>
                   </View>
                 </View>
 
-                {achievement.unlocked && (
-                  <View style={styles.achievementActions}>
-                    {achievement.unlockedAt && (
-                      <Text style={styles.unlockedDateText}>
-                        {new Date(achievement.unlockedAt).toLocaleDateString()}
-                      </Text>
-                    )}
-                    <ShareButton
-                      onPress={() => ShareService.shareAchievement(achievement)}
-                      size="small"
-                    />
-                  </View>
-                )}
+                <View style={styles.achievementActions}>
+                  {unlockedAt && (
+                    <Text style={styles.unlockedDateText}>
+                      {new Date(unlockedAt).toLocaleDateString()}
+                    </Text>
+                  )}
+                  <ShareButton
+                    onPress={() =>
+                      ShareService.shareAchievement(
+                        achievement.name,
+                        achievement.description ?? '',
+                        achievement.rewardPoints
+                      )
+                    }
+                    size="small"
+                  />
+                </View>
               </View>
             ))}
 
-            {!achievements?.length && (
+            {!myAchievements?.length && (
               <View style={styles.emptyState}>
                 <Ionicons name="medal-outline" size={64} color="#d1d5db" />
                 <Text style={styles.emptyText}>No achievements yet</Text>

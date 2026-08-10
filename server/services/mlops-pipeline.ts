@@ -9,6 +9,7 @@ import { getDb } from '../db';
 import { sql } from 'drizzle-orm';
 import { createHash } from 'crypto';
 import { kafkaPublisher } from '../integration/kafka-publisher';
+import { redisCache } from './redis-cache';
 
 // Types for MLOps
 export interface ModelVersion {
@@ -224,6 +225,18 @@ export class MLOpsPipelineService {
 
     console.log(`[MLOps] Deployed model ${model.modelName} v${model.version}`);
 
+    // Capture a real feature baseline for drift detection at deploy time.
+    // If no predictions exist yet, the baseline is established on the first
+    // drift check and reported with baselineEstablished: 'just_now'.
+    try {
+      const captured = await this.captureFeatureBaseline(modelId);
+      console.log(captured
+        ? `[MLOps] Feature baseline captured for model ${modelId} at deploy time`
+        : `[MLOps] No prediction data yet for model ${modelId}; baseline will be established on first drift check`);
+    } catch (error) {
+      console.error('[MLOps] Failed to capture feature baseline at deploy:', error);
+    }
+
     return this.getModel(modelId) as Promise<ModelVersion>;
   }
 
@@ -331,9 +344,12 @@ export class MLOpsPipelineService {
       }
     }
 
-    // Check for data drift (feature distribution changes)
+    // Check for data drift (feature distribution changes vs persisted baseline)
     const featureDrift = await this.detectFeatureDrift(modelId, windowStart, windowEnd);
-    for (const fd of featureDrift) {
+    if (featureDrift.baselineEstablished === 'just_now') {
+      console.log(`[MLOps] Model ${modelId}: feature baseline just established; driftScore 0 for this window`);
+    }
+    for (const fd of featureDrift.results) {
       const event = await this.recordDriftEvent(modelId, {
         driftType: 'data_drift',
         severity: fd.driftScore > 0.5 ? 'high' : 'medium',
@@ -457,19 +473,47 @@ export class MLOpsPipelineService {
   }
 
   /**
-   * Detect feature drift
+   * Redis key for a model's persisted feature baseline distribution
    */
-  private async detectFeatureDrift(
-    modelId: number,
-    windowStart: Date,
-    windowEnd: Date
-  ): Promise<Array<{ featureName: string; baselineMean: number; currentMean: number; driftScore: number }>> {
-    // Simplified feature drift detection
-    // In production, would use statistical tests like KS test or PSI
+  private featureBaselineKey(modelId: number): string {
+    return `mlops:feature-baseline:${modelId}`;
+  }
+
+  /**
+   * Aggregate real feature statistics (mean/std/count) from prediction rows
+   */
+  private aggregateFeatureStats(predictions: any[]): Map<string, { mean: number; std: number; count: number }> {
+    const sums: Map<string, { sum: number; sumSq: number; count: number }> = new Map();
+
+    for (const p of predictions) {
+      const features = p.features ? JSON.parse(p.features) : {};
+      for (const [name, value] of Object.entries(features)) {
+        if (typeof value === 'number') {
+          const stats = sums.get(name) || { sum: 0, sumSq: 0, count: 0 };
+          stats.sum += value;
+          stats.sumSq += value * value;
+          stats.count++;
+          sums.set(name, stats);
+        }
+      }
+    }
+
+    const result: Map<string, { mean: number; std: number; count: number }> = new Map();
+    for (const [name, s] of Array.from(sums.entries())) {
+      const mean = s.sum / s.count;
+      const variance = Math.max(0, s.sumSq / s.count - mean * mean);
+      result.set(name, { mean, std: Math.sqrt(variance), count: s.count });
+    }
+    return result;
+  }
+
+  /**
+   * Fetch recent prediction feature rows for a model within a window
+   */
+  private async getPredictionFeatureRows(modelId: number, windowStart: Date, windowEnd: Date): Promise<any[]> {
     const db = await getDb();
     if (!db) return [];
 
-    // Get feature statistics from recent predictions
     const result = await db.execute(sql`
       SELECT features FROM model_predictions
       WHERE model_id = ${modelId}
@@ -479,38 +523,88 @@ export class MLOpsPipelineService {
       LIMIT 1000
     `);
 
-    const predictions = (result as any)[0] || [];
-    if (predictions.length === 0) return [];
+    return (result as any)[0] || [];
+  }
 
-    // Aggregate feature statistics
-    const featureStats: Map<string, { sum: number; count: number }> = new Map();
-    
-    for (const p of predictions) {
-      const features = p.features ? JSON.parse(p.features) : {};
-      for (const [name, value] of Object.entries(features)) {
-        if (typeof value === 'number') {
-          const stats = featureStats.get(name) || { sum: 0, count: 0 };
-          stats.sum += value;
-          stats.count++;
-          featureStats.set(name, stats);
-        }
-      }
+  /**
+   * Capture and persist a real feature baseline distribution (mean/std per
+   * feature) from recent predictions. Called at model deploy time.
+   * Returns false when there is no prediction data to baseline from.
+   */
+  private async captureFeatureBaseline(modelId: number): Promise<boolean> {
+    const windowEnd = new Date();
+    const windowStart = new Date(windowEnd.getTime() - 30 * 24 * 3600000);
+    const rows = await this.getPredictionFeatureRows(modelId, windowStart, windowEnd);
+    if (rows.length === 0) return false;
+
+    const stats = this.aggregateFeatureStats(rows);
+    if (stats.size === 0) return false;
+
+    await redisCache.set(this.featureBaselineKey(modelId), {
+      features: Object.fromEntries(stats),
+      establishedAt: new Date().toISOString(),
+      sampleCount: rows.length,
+    });
+    return true;
+  }
+
+  /**
+   * Detect feature drift against the persisted baseline distribution.
+   *
+   * If no baseline has been stored yet, the current distribution is stored as
+   * the baseline and driftScore is reported as 0 with
+   * baselineEstablished: 'just_now' — drift is never computed against a
+   * fabricated baseline.
+   */
+  private async detectFeatureDrift(
+    modelId: number,
+    windowStart: Date,
+    windowEnd: Date
+  ): Promise<{
+    results: Array<{ featureName: string; baselineMean: number; currentMean: number; driftScore: number }>;
+    baselineEstablished: 'existing' | 'just_now' | 'no_data';
+  }> {
+    const rows = await this.getPredictionFeatureRows(modelId, windowStart, windowEnd);
+    if (rows.length === 0) return { results: [], baselineEstablished: 'no_data' };
+
+    const currentStats = this.aggregateFeatureStats(rows);
+    if (currentStats.size === 0) return { results: [], baselineEstablished: 'no_data' };
+
+    // Load the real persisted baseline; if none exists, establish it now
+    const baseline = await redisCache.get<{
+      features: Record<string, { mean: number; std: number; count: number }>;
+      establishedAt: string;
+    }>(this.featureBaselineKey(modelId));
+
+    if (!baseline || !baseline.features) {
+      await redisCache.set(this.featureBaselineKey(modelId), {
+        features: Object.fromEntries(currentStats),
+        establishedAt: new Date().toISOString(),
+        sampleCount: rows.length,
+      });
+      console.log(`[MLOps] No stored baseline for model ${modelId}; stored current distribution as baseline (baselineEstablished: just_now, driftScore: 0)`);
+      return { results: [], baselineEstablished: 'just_now' };
     }
 
-    // Compare with baseline (simplified - would use stored baseline in production)
+    // Compare current distribution against the real stored baseline
     const driftResults: Array<{ featureName: string; baselineMean: number; currentMean: number; driftScore: number }> = [];
-    
-    for (const [name, stats] of Array.from(featureStats.entries())) {
-      const currentMean = stats.sum / stats.count;
-      const baselineMean = currentMean * 0.9; // Simplified baseline
-      const driftScore = Math.abs(currentMean - baselineMean) / Math.abs(baselineMean || 1);
-      
+
+    for (const [name, current] of Array.from(currentStats.entries())) {
+      const base = baseline.features[name];
+      if (!base) continue; // New feature with no baseline — skip rather than fabricate
+
+      const currentMean = current.mean;
+      const baselineMean = base.mean;
+      // Normalized shift relative to the baseline scale (mean magnitude or std)
+      const scale = Math.abs(baselineMean) || base.std || 1;
+      const driftScore = Math.abs(currentMean - baselineMean) / scale;
+
       if (driftScore > 0.2) {
         driftResults.push({ featureName: name, baselineMean, currentMean, driftScore });
       }
     }
 
-    return driftResults;
+    return { results: driftResults, baselineEstablished: 'existing' };
   }
 
   /**

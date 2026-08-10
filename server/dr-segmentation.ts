@@ -6,7 +6,7 @@ import {
   demandResponseEvents,
   InsertParticipantScore,
 } from '../drizzle/schema';
-import { eq, and, gte, desc, count, sum, avg, sql } from 'drizzle-orm';
+import { eq, and, gte, desc, count, sum, avg, sql, inArray } from 'drizzle-orm';
 
 /**
  * DR Participant Segmentation Engine
@@ -68,18 +68,41 @@ export class DRSegmentationEngine {
     const completionRate = participated > 0 ? (completedEvents / participated) * 100 : 0;
     const reliabilityScore = Math.round((participationRate * 0.6 + completionRate * 0.4));
 
-    // Response Time Score (0-100): How quickly they respond to events
+    // Response Time Score (0-100): How quickly they respond to events.
+    // Computed from real timestamps: seconds between the DR event being
+    // created (participants notified) and the participant's recorded
+    // response (drResponses.responseTime vs demandResponseEvents.createdAt).
+    const eventIds = [...new Set(responses.map(r => r.eventId).filter(id => id > 0))];
+    const events = eventIds.length > 0
+      ? await db
+          .select()
+          .from(demandResponseEvents)
+          .where(inArray(demandResponseEvents.id, eventIds))
+      : [];
+    const eventCreatedAtById = new Map(
+      events.map(e => [e.id, new Date(e.createdAt).getTime()])
+    );
+
     const responseTimes = responses
       .filter(r => r.responseTime && r.participationStatus !== 'opted_out')
       .map(r => {
-        // Calculate time between event start and response
-        return 300; // Placeholder: 5 minutes average
-      });
+        const createdAtMs = eventCreatedAtById.get(r.eventId);
+        if (!createdAtMs) return null; // response not linked to a known event
+        const seconds = (new Date(r.responseTime).getTime() - createdAtMs) / 1000;
+        return seconds >= 0 ? seconds : null;
+      })
+      .filter((v): v is number => v !== null);
+
+    // When no response can be matched to a real event creation timestamp the
+    // factor is not computable — avgResponseTime/responseTimeScore stay null
+    // and the overall score below skips this factor (weights renormalized).
     const avgResponseTime = responseTimes.length > 0
       ? responseTimes.reduce((a, b) => a + b, 0) / responseTimes.length
-      : 600;
+      : null;
     // Score: faster response = higher score (600s = 50, 60s = 100, 1200s = 0)
-    const responseTimeScore = Math.max(0, Math.min(100, Math.round(100 - (avgResponseTime / 12))));
+    const responseTimeScore = avgResponseTime !== null
+      ? Math.max(0, Math.min(100, Math.round(100 - (avgResponseTime / 12))))
+      : null;
 
     // Reduction Accuracy Score (0-100): How close actual reduction is to target
     const accuracyScores = responses
@@ -98,12 +121,21 @@ export class DRSegmentationEngine {
     // Participation Rate Score (0-100): Simply participation rate
     const participationRateScore = Math.round(participationRate);
 
-    // Calculate overall score (weighted average)
+    // Calculate overall score (weighted average). Factors that could not be
+    // computed from real data (null) are skipped and the remaining weights
+    // are renormalized — no factor is ever filled with a fabricated value.
+    const factors: Array<{ score: number | null; weight: number }> = [
+      { score: reliabilityScore, weight: 0.3 },
+      { score: responseTimeScore, weight: 0.2 },
+      { score: reductionAccuracyScore, weight: 0.3 },
+      { score: participationRateScore, weight: 0.2 },
+    ];
+    const usableFactors = factors.filter(
+      (f): f is { score: number; weight: number } => f.score !== null
+    );
+    const weightSum = usableFactors.reduce((s, f) => s + f.weight, 0);
     const overallScore = Math.round(
-      reliabilityScore * 0.3 +
-      responseTimeScore * 0.2 +
-      reductionAccuracyScore * 0.3 +
-      participationRateScore * 0.2
+      usableFactors.reduce((s, f) => s + f.score * f.weight, 0) / weightSum
     );
 
     // Calculate aggregate stats
@@ -134,9 +166,14 @@ export class DRSegmentationEngine {
       averageReduction,
       totalCompensationEarned,
       maxCapacity,
-      averageResponseTime: Math.round(avgResponseTime),
+      averageResponseTime: avgResponseTime !== null ? Math.round(avgResponseTime) : null,
       segment,
       lastCalculated: new Date(),
+      metadata: responseTimeScore === null
+        ? JSON.stringify({
+            note: 'responseTimeScore skipped: no DR responses could be matched to a demandResponseEvents creation timestamp',
+          })
+        : undefined,
     };
   }
 

@@ -38,6 +38,9 @@ export interface ForecastResult {
     mae: number | null;
     rmse: number | null;
     mape: number | null;
+    // true only when metrics come from a real backtest against actuals;
+    // false means the null metrics are simply "not yet measured"
+    metricsEstimated: boolean;
   };
   createdAt: Date;
 }
@@ -357,7 +360,7 @@ export class ProbabilisticForecastingService {
       points.push({ timestamp, values });
     }
 
-    const metrics = { mae: null, rmse: null, mape: null }; // Price metrics calculated separately
+    const metrics = { mae: null, rmse: null, mape: null, metricsEstimated: false }; // Price metrics calculated separately
     await this.storeForecastRun(runId, 'price', 'region', null, region, horizonHours, intervalMinutes, points, metrics);
 
     console.log(`[Forecasting] Generated price forecast ${runId.substring(0, 8)}... for ${region}`);
@@ -413,7 +416,7 @@ export class ProbabilisticForecastingService {
       points.push({ timestamp, values });
     }
 
-    const metrics = { mae: null, rmse: null, mape: null };
+    const metrics = { mae: null, rmse: null, mape: null, metricsEstimated: false };
     await this.storeForecastRun(runId, 'emissions', 'region', null, region, horizonHours, intervalMinutes, points, metrics);
 
     console.log(`[Forecasting] Generated emissions forecast ${runId.substring(0, 8)}... for ${region}`);
@@ -476,6 +479,8 @@ export class ProbabilisticForecastingService {
         mae: run.mae_value ? run.mae_value / 100 : null,
         rmse: run.rmse_value ? run.rmse_value / 100 : null,
         mape: run.mape_value ? run.mape_value / 100 : null,
+        // Persisted values only exist after a real backtest wrote them
+        metricsEstimated: run.mae_value != null || run.rmse_value != null || run.mape_value != null,
       },
       createdAt: run.created_at,
     };
@@ -664,7 +669,7 @@ export class ProbabilisticForecastingService {
       horizonHours,
       intervalMinutes,
       points,
-      metrics: { mae: null, rmse: null, mape: null },
+      metrics: { mae: null, rmse: null, mape: null, metricsEstimated: false },
       createdAt: now,
     };
   }
@@ -675,18 +680,16 @@ export class ProbabilisticForecastingService {
   private async calculateMetrics(
     scope: { assetId?: number; userId?: number; communityId?: number; region?: string },
     recentPoints: ForecastPoint[]
-  ): Promise<{ mae: number | null; rmse: number | null; mape: number | null }> {
-    // In production, this would compare against actual values
-    // For now, return estimated metrics based on model confidence
-    const avgConfidence = recentPoints.reduce((acc, p) => acc + p.values.confidence, 0) / recentPoints.length;
-    
-    // Estimate metrics from confidence (inverse relationship)
-    const estimatedError = (100 - avgConfidence) / 100;
-    
+  ): Promise<{ mae: number | null; rmse: number | null; mape: number | null; metricsEstimated: boolean }> {
+    // No real backtest against actuals exists yet. Deriving MAE/RMSE/MAPE
+    // algebraically from the model's own confidence would be circular and
+    // fabricated, so return null metrics flagged as not estimated until a
+    // genuine backtest is implemented.
     return {
-      mae: Math.round(estimatedError * 1000) / 100, // Scaled
-      rmse: Math.round(estimatedError * 1200) / 100,
-      mape: Math.round(estimatedError * 100),
+      mae: null,
+      rmse: null,
+      mape: null,
+      metricsEstimated: false,
     };
   }
 
@@ -702,7 +705,7 @@ export class ProbabilisticForecastingService {
     horizonHours: number,
     intervalMinutes: number,
     points: ForecastPoint[],
-    metrics: { mae: number | null; rmse: number | null; mape: number | null }
+    metrics: { mae: number | null; rmse: number | null; mape: number | null; metricsEstimated: boolean }
   ): Promise<void> {
     const db = await getDb();
     if (!db) return;

@@ -1,7 +1,9 @@
 import { z } from 'zod';
-import { router, protectedProcedure } from '../_core/trpc';
+import { router, protectedProcedure, publicProcedure } from '../_core/trpc';
 import { TRPCError } from '@trpc/server';
 import * as db from '../db';
+import { trades, marketPrices } from '../../drizzle/schema';
+import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import { kafkaPublisher } from '../integration/kafka-publisher';
 import { temporalClient } from '../integration/temporal-client';
 import { sendPushNotification } from '../_core/sendNotification';
@@ -287,6 +289,78 @@ export const tradingRouter = router({
         throw new TRPCError({
           code: 'INTERNAL_SERVER_ERROR',
           message: 'Failed to update trade status.',
+        });
+      }
+    }),
+
+  getEarnings: protectedProcedure
+    .query(async ({ ctx }) => {
+      try {
+        const dbInstance = await db.getDb();
+        if (!dbInstance) throw new Error('Database not available');
+
+        const executed = eq(trades.status, 'executed');
+        const mine = eq(trades.userId, ctx.user.id);
+
+        const [sellRow] = await dbInstance
+          .select({ total: sql<number>`COALESCE(SUM(${trades.totalAmount}), 0)` })
+          .from(trades)
+          .where(and(mine, executed, inArray(trades.tradeType, ['export', 'p2p_sell'])));
+
+        const [buyRow] = await dbInstance
+          .select({ total: sql<number>`COALESCE(SUM(${trades.totalAmount}), 0)` })
+          .from(trades)
+          .where(and(mine, executed, inArray(trades.tradeType, ['import', 'p2p_buy'])));
+
+        const totalSellCents = Number(sellRow?.total ?? 0);
+        const totalBuyCents = Number(buyRow?.total ?? 0);
+
+        return {
+          totalSellCents,
+          totalBuyCents,
+          netCents: totalSellCents - totalBuyCents,
+        };
+      } catch (error) {
+        console.error('Error computing trading earnings:', error);
+        throw new TRPCError({
+          code: 'INTERNAL_SERVER_ERROR',
+          message: 'Failed to compute trading earnings.',
+        });
+      }
+    }),
+
+  getMarketPrices: publicProcedure
+    .query(async () => {
+      try {
+        const dbInstance = await db.getDb();
+        if (!dbInstance) throw new Error('Database not available');
+
+        // Latest real price per price type from the marketPrices table.
+        const rows = await dbInstance
+          .select()
+          .from(marketPrices)
+          .orderBy(desc(marketPrices.timestamp))
+          .limit(200);
+
+        const latestByType = new Map<string, typeof rows[number]>();
+        for (const row of rows) {
+          if (!latestByType.has(row.priceType)) {
+            latestByType.set(row.priceType, row);
+          }
+        }
+
+        return Array.from(latestByType.values()).map((row) => ({
+          priceType: row.priceType,
+          country: row.country,
+          price: row.price,
+          timestamp: row.timestamp,
+          validUntil: row.validUntil,
+        }));
+      } catch (error) {
+        console.error('Error getting market prices:', error);
+        throw new TRPCError({
+          code: 'INTERNAL_SERVER_ERROR',
+          message: 'Failed to retrieve market prices.',
         });
       }
     }),

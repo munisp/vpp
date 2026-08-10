@@ -65,7 +65,10 @@ export interface SystemKPIs {
   totalEnergyTraded: number;
   platformRevenue: number;
   drParticipationRate: number;
-  averageUserSatisfaction: number;
+  // No satisfaction/feedback data source exists in the schema, so this is
+  // null and satisfactionAvailable is false — never a hardcoded value.
+  averageUserSatisfaction: number | null;
+  satisfactionAvailable: boolean;
 }
 
 /**
@@ -409,6 +412,10 @@ export async function getSystemKPIs(): Promise<SystemKPIs> {
     totalEnergyTraded,
     platformRevenue,
     drParticipationRate,
-    averageUserSatisfaction: 4.5, // Placeholder - implement user feedback system
+    // No satisfaction/feedback/rating source exists in drizzle/schema.ts, so
+    // there is no real value to compute — report unavailable instead of a
+    // fabricated constant.
+    averageUserSatisfaction: null,
+    satisfactionAvailable: false,
   };
 }

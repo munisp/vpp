@@ -13,8 +13,10 @@ export function useAuth(options?: UseAuthOptions) {
     options ?? {};
   const utils = trpc.useUtils();
 
-  // Demo mode for UI preview - returns mock user data
-  const isDemoMode = import.meta.env.VITE_DEMO_MODE === 'true';
+  // Demo mode for UI preview - returns mock user data.
+  // Restricted to local development builds that explicitly opt in.
+  const isDemoMode =
+    import.meta.env.DEV && import.meta.env.VITE_DEMO_MODE === 'true';
   
   const meQuery = trpc.auth.me.useQuery(undefined, {
     retry: false,
@@ -32,7 +34,7 @@ export function useAuth(options?: UseAuthOptions) {
         name: 'Demo User',
         phone: '+255700000000',
         loginMethod: 'email',
-        role: 'admin' as const,
+        role: 'user' as const,
         country: 'tanzania' as const,
         preferredCurrency: 'TZS' as const,
         notificationPreferences: {},

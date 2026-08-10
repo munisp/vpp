@@ -20,20 +20,25 @@ export default function P2PTradingScreen({ navigation }: any) {
   const [createModalVisible, setCreateModalVisible] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
 
-  // Form state
-  const [offerType, setOfferType] = useState<'sell' | 'buy'>('sell');
+  // Form state (the server only supports publishing sell offers)
   const [quantity, setQuantity] = useState('');
   const [price, setPrice] = useState('');
-  const [description, setDescription] = useState('');
 
   const utils = trpc.useUtils();
 
-  const { data: offers, refetch: refetchOffers } = trpc.p2pTrading.getOffers.useQuery({
-    status: 'active',
-    limit: 50,
-  });
+  const {
+    data: offers,
+    refetch: refetchOffers,
+    isLoading: offersLoading,
+    isError: offersError,
+  } = trpc.p2pTrading.getOffers.useQuery({ limit: 50 });
 
-  const { data: myOffers, refetch: refetchMyOffers } = trpc.p2pTrading.getMyOffers.useQuery();
+  const {
+    data: myOffers,
+    refetch: refetchMyOffers,
+    isLoading: myOffersLoading,
+    isError: myOffersError,
+  } = trpc.p2pTrading.getMyOffers.useQuery();
 
   const createOfferMutation = trpc.p2pTrading.createOffer.useMutation({
     onSuccess: async () => {
@@ -42,7 +47,6 @@ export default function P2PTradingScreen({ navigation }: any) {
       setCreateModalVisible(false);
       setQuantity('');
       setPrice('');
-      setDescription('');
       utils.p2pTrading.getOffers.invalidate();
       utils.p2pTrading.getMyOffers.invalidate();
     },
@@ -104,11 +108,11 @@ export default function P2PTradingScreen({ navigation }: any) {
       return;
     }
 
+    // Server input (server/routers/p2p-trading.ts -> createOffer):
+    //   energy: integer watt-hours, price: integer cents per kWh.
     createOfferMutation.mutate({
-      type: offerType,
-      quantity: quantityNum,
-      pricePerKwh: Math.round(priceNum * 100), // Convert to cents
-      description: description || undefined,
+      energy: Math.round(quantityNum * 1000), // kWh -> Wh
+      price: Math.round(priceNum * 100), // TZS -> cents per kWh
     });
   };
 
@@ -163,43 +167,10 @@ export default function P2PTradingScreen({ navigation }: any) {
       {/* Create Offer Form */}
       {createModalVisible && (
         <View style={styles.createForm}>
-          <Text style={styles.formTitle}>Create New Offer</Text>
-
-          {/* Offer Type */}
-          <View style={styles.typeSelector}>
-            <TouchableOpacity
-              style={[
-                styles.typeButton,
-                offerType === 'sell' && styles.typeButtonActive,
-              ]}
-              onPress={() => setOfferType('sell')}
-            >
-              <Text
-                style={[
-                  styles.typeButtonText,
-                  offerType === 'sell' && styles.typeButtonTextActive,
-                ]}
-              >
-                Sell Energy
-              </Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={[
-                styles.typeButton,
-                offerType === 'buy' && styles.typeButtonActive,
-              ]}
-              onPress={() => setOfferType('buy')}
-            >
-              <Text
-                style={[
-                  styles.typeButtonText,
-                  offerType === 'buy' && styles.typeButtonTextActive,
-                ]}
-              >
-                Buy Energy
-              </Text>
-            </TouchableOpacity>
-          </View>
+          <Text style={styles.formTitle}>Create Sell Offer</Text>
+          <Text style={styles.formSubtitle}>
+            Publish surplus energy for other users to buy.
+          </Text>
 
           {/* Quantity */}
           <View style={styles.inputGroup}>
@@ -222,19 +193,6 @@ export default function P2PTradingScreen({ navigation }: any) {
               onChangeText={setPrice}
               keyboardType="numeric"
               placeholder="e.g., 250"
-            />
-          </View>
-
-          {/* Description */}
-          <View style={styles.inputGroup}>
-            <Text style={styles.inputLabel}>Description (Optional)</Text>
-            <TextInput
-              style={[styles.input, styles.textArea]}
-              value={description}
-              onChangeText={setDescription}
-              placeholder="Add details about your offer..."
-              multiline
-              numberOfLines={3}
             />
           </View>
 
@@ -298,45 +256,53 @@ export default function P2PTradingScreen({ navigation }: any) {
       >
         {activeTab === 'browse' && (
           <View style={styles.offersContainer}>
+            {offersLoading && (
+              <View style={styles.emptyState}>
+                <Text style={styles.emptyText}>Loading offers…</Text>
+              </View>
+            )}
+
+            {offersError && (
+              <View style={styles.emptyState}>
+                <Ionicons name="alert-circle-outline" size={64} color="#d1d5db" />
+                <Text style={styles.emptyText}>Could not load offers</Text>
+                <Text style={styles.emptyDescription}>
+                  Pull down to try again.
+                </Text>
+              </View>
+            )}
+
+            {/* Server shape: energy in Wh, price in cents/kWh, all offers
+                are sell offers (p2p_sell). */}
             {offers?.map((offer) => (
               <View key={offer.id} style={styles.offerCard}>
                 <View style={styles.offerHeader}>
-                  <View
-                    style={[
-                      styles.offerTypeBadge,
-                      offer.type === 'sell'
-                        ? styles.sellBadge
-                        : styles.buyBadge,
-                    ]}
-                  >
-                    <Text style={styles.offerTypeBadgeText}>
-                      {offer.type === 'sell' ? 'SELL' : 'BUY'}
-                    </Text>
+                  <View style={[styles.offerTypeBadge, styles.sellBadge]}>
+                    <Text style={styles.offerTypeBadgeText}>SELL</Text>
                   </View>
-                  <Text style={styles.offerUser}>{offer.userName}</Text>
+                  <Text style={styles.offerUser}>
+                    {offer.sellerName || 'Unknown seller'}
+                  </Text>
                 </View>
 
                 <View style={styles.offerDetails}>
                   <View style={styles.offerDetail}>
                     <Ionicons name="flash" size={20} color="#f59e0b" />
                     <Text style={styles.offerDetailText}>
-                      {offer.quantity} kWh
+                      {(offer.energy / 1000).toFixed(2)} kWh
                     </Text>
                   </View>
                   <View style={styles.offerDetail}>
                     <Ionicons name="cash" size={20} color="#10b981" />
                     <Text style={styles.offerDetailText}>
-                      {(offer.pricePerKwh / 100).toFixed(2)} TZS/kWh
+                      {(offer.price / 100).toFixed(2)} TZS/kWh
                     </Text>
                   </View>
                 </View>
 
-                {offer.description && (
-                  <Text style={styles.offerDescription}>{offer.description}</Text>
-                )}
-
                 <View style={styles.offerFooter}>
                   <Text style={styles.offerTime}>
+                    Total {(offer.totalAmount / 100).toFixed(0)} TZS ·{' '}
                     {new Date(offer.createdAt).toLocaleDateString()}
                   </Text>
                   <View style={styles.offerActions}>
@@ -348,7 +314,13 @@ export default function P2PTradingScreen({ navigation }: any) {
                       <Text style={styles.acceptButtonText}>Accept</Text>
                     </TouchableOpacity>
                     <ShareButton
-                      onPress={() => ShareService.shareP2POffer(offer)}
+                      onPress={() =>
+                        ShareService.shareP2POffer(
+                          'sell',
+                          offer.energy / 1000,
+                          offer.price
+                        )
+                      }
                       size="small"
                     />
                   </View>
@@ -356,7 +328,7 @@ export default function P2PTradingScreen({ navigation }: any) {
               </View>
             ))}
 
-            {!offers?.length && (
+            {!offersLoading && !offersError && !offers?.length && (
               <View style={styles.emptyState}>
                 <Ionicons name="swap-horizontal-outline" size={64} color="#d1d5db" />
                 <Text style={styles.emptyText}>No active offers</Text>
@@ -370,25 +342,44 @@ export default function P2PTradingScreen({ navigation }: any) {
 
         {activeTab === 'my-offers' && (
           <View style={styles.offersContainer}>
+            {myOffersLoading && (
+              <View style={styles.emptyState}>
+                <Text style={styles.emptyText}>Loading your offers…</Text>
+              </View>
+            )}
+
+            {myOffersError && (
+              <View style={styles.emptyState}>
+                <Ionicons name="alert-circle-outline" size={64} color="#d1d5db" />
+                <Text style={styles.emptyText}>Could not load your offers</Text>
+                <Text style={styles.emptyDescription}>
+                  Pull down to try again.
+                </Text>
+              </View>
+            )}
+
+            {/* Server shape: trades rows with tradeType
+                'p2p_sell' | 'p2p_buy', energy in Wh, price in cents/kWh and
+                status 'pending' | 'executed' | 'cancelled' | 'failed'. */}
             {myOffers?.map((offer) => (
               <View key={offer.id} style={styles.offerCard}>
                 <View style={styles.offerHeader}>
                   <View
                     style={[
                       styles.offerTypeBadge,
-                      offer.type === 'sell'
+                      offer.tradeType === 'p2p_sell'
                         ? styles.sellBadge
                         : styles.buyBadge,
                     ]}
                   >
                     <Text style={styles.offerTypeBadgeText}>
-                      {offer.type === 'sell' ? 'SELL' : 'BUY'}
+                      {offer.tradeType === 'p2p_sell' ? 'SELL' : 'BUY'}
                     </Text>
                   </View>
                   <View
                     style={[
                       styles.statusBadge,
-                      offer.status === 'active'
+                      offer.status === 'pending'
                         ? styles.activeBadge
                         : styles.inactiveBadge,
                     ]}
@@ -403,26 +394,23 @@ export default function P2PTradingScreen({ navigation }: any) {
                   <View style={styles.offerDetail}>
                     <Ionicons name="flash" size={20} color="#f59e0b" />
                     <Text style={styles.offerDetailText}>
-                      {offer.quantity} kWh
+                      {(offer.energy / 1000).toFixed(2)} kWh
                     </Text>
                   </View>
                   <View style={styles.offerDetail}>
                     <Ionicons name="cash" size={20} color="#10b981" />
                     <Text style={styles.offerDetailText}>
-                      {(offer.pricePerKwh / 100).toFixed(2)} TZS/kWh
+                      {(offer.price / 100).toFixed(2)} TZS/kWh
                     </Text>
                   </View>
                 </View>
 
-                {offer.description && (
-                  <Text style={styles.offerDescription}>{offer.description}</Text>
-                )}
-
                 <View style={styles.offerFooter}>
                   <Text style={styles.offerTime}>
+                    Total {(offer.totalAmount / 100).toFixed(0)} TZS ·{' '}
                     {new Date(offer.createdAt).toLocaleDateString()}
                   </Text>
-                  {offer.status === 'active' && (
+                  {offer.status === 'pending' && offer.tradeType === 'p2p_sell' && (
                     <TouchableOpacity
                       style={styles.cancelOfferButton}
                       onPress={() => handleCancelOffer(offer.id)}
@@ -435,7 +423,7 @@ export default function P2PTradingScreen({ navigation }: any) {
               </View>
             ))}
 
-            {!myOffers?.length && (
+            {!myOffersLoading && !myOffersError && !myOffers?.length && (
               <View style={styles.emptyState}>
                 <Ionicons name="document-outline" size={64} color="#d1d5db" />
                 <Text style={styles.emptyText}>No offers yet</Text>
@@ -488,6 +476,11 @@ const styles = StyleSheet.create({
     fontSize: 18,
     fontWeight: '600',
     color: '#111827',
+    marginBottom: 4,
+  },
+  formSubtitle: {
+    fontSize: 13,
+    color: '#6b7280',
     marginBottom: 16,
   },
   typeSelector: {

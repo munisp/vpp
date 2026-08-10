@@ -10,21 +10,45 @@ import {
   ScrollView,
   Alert,
 } from 'react-native';
-import { trpc } from '../lib/trpc';
+import { trpc } from '../services/trpc';
 import { Ionicons } from '@expo/vector-icons';
 
-type WorkflowType = 'auto_trading' | 'manual_trading' | 'p2p_trading' | 'dr_participation' | 'payment_processing' | 'monitoring';
-type WorkflowStatus = 'running' | 'completed' | 'failed' | 'cancelled';
+// Temporal workflow types started by this server
+// (server/integration/temporal-client.ts).
+type WorkflowCategory = 'trading' | 'dr' | 'payment' | 'reconciliation';
+type WorkflowStatus = 'running' | 'completed' | 'failed' | 'cancelled' | 'terminated';
+
+const WORKFLOW_TYPE_BY_CATEGORY: Record<WorkflowCategory, string> = {
+  trading: 'executeTrade',
+  dr: 'orchestrateDREvent',
+  payment: 'processPayment',
+  reconciliation: 'reconcilePayments',
+};
+
+function workflowCategory(workflowType: string): WorkflowCategory | null {
+  for (const [category, type] of Object.entries(WORKFLOW_TYPE_BY_CATEGORY)) {
+    if (workflowType === type) return category as WorkflowCategory;
+  }
+  return null;
+}
 
 export default function WorkflowMonitorScreen() {
-  const [selectedType, setSelectedType] = useState<WorkflowType | 'all'>('all');
+  const [selectedType, setSelectedType] = useState<WorkflowCategory | 'all'>('all');
   const [selectedStatus, setSelectedStatus] = useState<WorkflowStatus | 'all'>('all');
   const [selectedWorkflow, setSelectedWorkflow] = useState<any>(null);
   const [showDetailModal, setShowDetailModal] = useState(false);
 
-  const { data: workflows, isLoading, refetch } = trpc.orchestrator.listWorkflows.useQuery({
-    type: selectedType === 'all' ? undefined : selectedType,
-    status: selectedStatus === 'all' ? undefined : selectedStatus,
+  // listUserWorkflows takes no input and returns the caller's workflows
+  // (WorkflowExecution: workflowId, workflowType, status, startTime,
+  // closeTime, ...); filtering happens client-side.
+  const { data: allWorkflows, isLoading, refetch } =
+    trpc.orchestrator.listUserWorkflows.useQuery();
+
+  const workflows = (allWorkflows ?? []).filter((w) => {
+    if (selectedStatus !== 'all' && w.status !== selectedStatus) return false;
+    if (selectedType !== 'all' && workflowCategory(w.workflowType) !== selectedType)
+      return false;
+    return true;
   });
 
   const cancelWorkflow = trpc.orchestrator.cancelWorkflow.useMutation({
@@ -72,13 +96,13 @@ export default function WorkflowMonitorScreen() {
       <View style={styles.workflowHeader}>
         <View style={styles.workflowIcon}>
           <Ionicons
-            name={getWorkflowIcon(item.type)}
+            name={getWorkflowIcon(item.workflowType)}
             size={24}
             color={getStatusColor(item.status)}
           />
         </View>
         <View style={styles.workflowInfo}>
-          <Text style={styles.workflowTitle}>{formatWorkflowType(item.type)}</Text>
+          <Text style={styles.workflowTitle}>{formatWorkflowType(item.workflowType)}</Text>
           <Text style={styles.workflowId}>ID: {item.workflowId.substring(0, 8)}...</Text>
         </View>
         <View style={[styles.statusBadge, { backgroundColor: getStatusColor(item.status) + '20' }]}>
@@ -89,23 +113,9 @@ export default function WorkflowMonitorScreen() {
       </View>
 
       <View style={styles.workflowDetails}>
-        <DetailRow icon="time" label="Started" value={formatDate(item.startedAt)} />
-        {item.completedAt && (
-          <DetailRow icon="checkmark-circle" label="Completed" value={formatDate(item.completedAt)} />
-        )}
-        {item.progress !== undefined && (
-          <View style={styles.progressContainer}>
-            <Text style={styles.progressLabel}>Progress</Text>
-            <View style={styles.progressBar}>
-              <View
-                style={[
-                  styles.progressFill,
-                  { width: `${item.progress}%`, backgroundColor: getStatusColor(item.status) },
-                ]}
-              />
-            </View>
-            <Text style={styles.progressText}>{item.progress}%</Text>
-          </View>
+        <DetailRow icon="time" label="Started" value={formatDate(item.startTime)} />
+        {item.closeTime && (
+          <DetailRow icon="checkmark-circle" label="Completed" value={formatDate(item.closeTime)} />
         )}
       </View>
     </TouchableOpacity>
@@ -127,29 +137,24 @@ export default function WorkflowMonitorScreen() {
           onPress={() => setSelectedType('all')}
         />
         <FilterChip
-          label="Auto Trading"
-          selected={selectedType === 'auto_trading'}
-          onPress={() => setSelectedType('auto_trading')}
-        />
-        <FilterChip
-          label="Manual Trading"
-          selected={selectedType === 'manual_trading'}
-          onPress={() => setSelectedType('manual_trading')}
-        />
-        <FilterChip
-          label="P2P Trading"
-          selected={selectedType === 'p2p_trading'}
-          onPress={() => setSelectedType('p2p_trading')}
+          label="Trading"
+          selected={selectedType === 'trading'}
+          onPress={() => setSelectedType('trading')}
         />
         <FilterChip
           label="DR Events"
-          selected={selectedType === 'dr_participation'}
-          onPress={() => setSelectedType('dr_participation')}
+          selected={selectedType === 'dr'}
+          onPress={() => setSelectedType('dr')}
         />
         <FilterChip
           label="Payments"
-          selected={selectedType === 'payment_processing'}
-          onPress={() => setSelectedType('payment_processing')}
+          selected={selectedType === 'payment'}
+          onPress={() => setSelectedType('payment')}
+        />
+        <FilterChip
+          label="Reconciliation"
+          selected={selectedType === 'reconciliation'}
+          onPress={() => setSelectedType('reconciliation')}
         />
       </ScrollView>
 
@@ -192,11 +197,17 @@ export default function WorkflowMonitorScreen() {
         }
         ListEmptyComponent={
           <View style={styles.emptyState}>
-            <Ionicons name="git-network-outline" size={64} color="#d1d5db" />
-            <Text style={styles.emptyTitle}>No Workflows Found</Text>
-            <Text style={styles.emptyDescription}>
-              Workflows will appear here when you start automated trading or participate in DR events.
-            </Text>
+            {isLoading ? (
+              <Text style={styles.emptyTitle}>Loading workflows…</Text>
+            ) : (
+              <>
+                <Ionicons name="git-network-outline" size={64} color="#d1d5db" />
+                <Text style={styles.emptyTitle}>No Workflows Found</Text>
+                <Text style={styles.emptyDescription}>
+                  Workflows will appear here when you start automated trading or participate in DR events.
+                </Text>
+              </>
+            )}
           </View>
         }
       />
@@ -221,7 +232,7 @@ export default function WorkflowMonitorScreen() {
               <>
                 <View style={styles.modalSection}>
                   <Text style={styles.modalSectionTitle}>Basic Information</Text>
-                  <DetailRow icon="layers" label="Type" value={formatWorkflowType(selectedWorkflow.type)} />
+                  <DetailRow icon="layers" label="Type" value={formatWorkflowType(selectedWorkflow.workflowType)} />
                   <DetailRow icon="key" label="Workflow ID" value={selectedWorkflow.workflowId} />
                   <DetailRow
                     icon="flag"
@@ -229,12 +240,12 @@ export default function WorkflowMonitorScreen() {
                     value={selectedWorkflow.status}
                     valueColor={getStatusColor(selectedWorkflow.status)}
                   />
-                  <DetailRow icon="time" label="Started At" value={formatDate(selectedWorkflow.startedAt)} />
-                  {selectedWorkflow.completedAt && (
+                  <DetailRow icon="time" label="Started At" value={formatDate(selectedWorkflow.startTime)} />
+                  {selectedWorkflow.closeTime && (
                     <DetailRow
                       icon="checkmark-circle"
                       label="Completed At"
-                      value={formatDate(selectedWorkflow.completedAt)}
+                      value={formatDate(selectedWorkflow.closeTime)}
                     />
                   )}
                 </View>
@@ -326,16 +337,15 @@ function DetailRow({
   );
 }
 
-function getWorkflowIcon(type: string): any {
-  const icons: Record<string, any> = {
-    auto_trading: 'flash',
-    manual_trading: 'hand-left',
-    p2p_trading: 'people',
-    dr_participation: 'trending-down',
-    payment_processing: 'card',
-    monitoring: 'pulse',
+function getWorkflowIcon(workflowType: string): any {
+  const category = workflowCategory(workflowType);
+  const icons: Record<WorkflowCategory, any> = {
+    trading: 'flash',
+    dr: 'trending-down',
+    payment: 'card',
+    reconciliation: 'sync',
   };
-  return icons[type] || 'git-network';
+  return category ? icons[category] : 'git-network';
 }
 
 function getStatusColor(status: string): string {
@@ -344,15 +354,16 @@ function getStatusColor(status: string): string {
     completed: '#10b981',
     failed: '#ef4444',
     cancelled: '#6b7280',
+    terminated: '#6b7280',
   };
   return colors[status] || '#6b7280';
 }
 
-function formatWorkflowType(type: string): string {
-  return type
-    .split('_')
-    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
-    .join(' ');
+function formatWorkflowType(workflowType: string): string {
+  // Temporal workflow types are camelCase, e.g. 'executeTrade'.
+  return workflowType
+    .replace(/([a-z])([A-Z])/g, '$1 $2')
+    .replace(/^./, (c) => c.toUpperCase());
 }
 
 function formatDate(date: string | Date): string {

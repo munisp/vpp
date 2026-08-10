@@ -16,7 +16,7 @@ import { kafkaPublisher } from '../integration/kafka-publisher';
 // Types for blockchain anchoring
 export interface BlockchainAnchor {
   id: number;
-  anchorType: 'settlement_period' | 'settlement_event' | 'carbon_credit' | 'compliance_report';
+  anchorType: 'settlement_period' | 'settlement_event' | 'carbon_credit' | 'compliance_report' | 'data_anchor';
   sourceId: number;
   sourceHash: string;
   merkleRoot: string | null;
@@ -24,7 +24,8 @@ export interface BlockchainAnchor {
   transactionHash: string | null;
   blockNumber: number | null;
   anchoredAt: Date | null;
-  status: 'pending' | 'submitted' | 'confirmed' | 'failed';
+  // 'local_committed' = committed by the local hash provider only, NOT a real chain confirmation
+  status: 'pending' | 'submitted' | 'confirmed' | 'local_committed' | 'failed';
   gasUsed: number | null;
   costWei: string | null;
   verificationUrl: string | null;
@@ -36,7 +37,7 @@ export interface AnchorBatch {
   batchId: string;
   anchors: BlockchainAnchor[];
   merkleRoot: string;
-  status: 'pending' | 'submitted' | 'confirmed' | 'failed';
+  status: 'pending' | 'submitted' | 'confirmed' | 'local_committed' | 'failed';
   transactionHash: string | null;
   submittedAt: Date | null;
   confirmedAt: Date | null;
@@ -152,13 +153,11 @@ export class BlockchainAuditService {
     
     switch (network) {
       case 'hedera':
-        this.provider = new HederaProvider();
-        this.enabled = !!process.env.HEDERA_OPERATOR_ID;
-        break;
+        // Fail fast on misconfiguration: the Hedera provider is not implemented,
+        // so selecting it must abort boot instead of throwing at first anchor.
+        throw new Error('[BlockchainAudit] BLOCKCHAIN_NETWORK=hedera selected but the Hedera provider is not implemented. Configure a supported network or omit BLOCKCHAIN_NETWORK to use local hash anchoring.');
       case 'polygon':
-        this.provider = new PolygonProvider();
-        this.enabled = !!process.env.POLYGON_PRIVATE_KEY;
-        break;
+        throw new Error('[BlockchainAudit] BLOCKCHAIN_NETWORK=polygon selected but the Polygon provider is not implemented. Configure a supported network or omit BLOCKCHAIN_NETWORK to use local hash anchoring.');
       default:
         this.provider = new LocalHashAnchorProvider();
         this.enabled = true;
@@ -321,6 +320,47 @@ export class BlockchainAuditService {
   }
 
   /**
+   * Anchor an arbitrary data hash (e.g. a settlement Merkle root) without
+   * spoofing any source record id.
+   *
+   * Creates a real anchor row of type 'data_anchor' with sourceId 0 (meaning
+   * "no source record") and submits it through the configured provider.
+   * Failures are thrown to the caller — never silently swallowed.
+   */
+  async anchorData(sourceHash: string, metadata: Record<string, any>): Promise<BlockchainAnchor> {
+    const db = await getDb();
+    if (!db) throw new Error('Database not available');
+
+    const anchor = await this.createAnchor({
+      anchorType: 'data_anchor',
+      sourceId: 0, // explicit: no source record is associated with this anchor
+      sourceHash,
+      merkleRoot: sourceHash,
+      metadata: { ...metadata, anchorKind: 'generic_data' },
+    });
+
+    // Publish to Kafka for lakehouse analytics
+    try {
+      await kafkaPublisher.publishBlockchainAnchor({
+        anchorId: anchor.id.toString(),
+        ledgerHash: sourceHash,
+        chainNetwork: this.provider.name,
+        merkleRoot: sourceHash,
+        timestamp: new Date(),
+      });
+    } catch (error) {
+      console.error('[BlockchainAudit] Error publishing to Kafka:', error);
+    }
+
+    // Submit through the configured provider; throws on failure
+    if (this.enabled) {
+      return this.submitAnchor(anchor.id);
+    }
+
+    return anchor;
+  }
+
+  /**
    * Create an anchor record
    */
   private async createAnchor(
@@ -391,15 +431,17 @@ export class BlockchainAuditService {
       // Submit to blockchain
       const result = await this.provider.submitAnchor(dataToAnchor, metadata);
 
-      // Update anchor record
+      // Update anchor record. Local hash anchors get a distinct status —
+      // 'confirmed' is reserved for real on-chain submissions.
       const verificationUrl = this.provider.getTransactionUrl(result.txHash);
+      const newStatus = this.provider instanceof LocalHashAnchorProvider ? 'local_committed' : 'confirmed';
 
       await db.execute(sql`
         UPDATE blockchain_anchors SET
           transaction_hash = ${result.txHash},
           block_number = ${result.blockNumber || null},
           anchored_at = NOW(),
-          status = 'confirmed',
+          status = ${newStatus},
           verification_url = ${verificationUrl}
         WHERE id = ${anchorId}
       `);
@@ -464,15 +506,26 @@ export class BlockchainAuditService {
       details = `Source hash present: ${anchor.sourceHash.substring(0, 16)}...`;
     }
 
-    // Blockchain verification if transaction exists
+    // Blockchain verification if a real on-chain transaction exists.
+    // Local hash anchors (0xlocal_...) are NOT on-chain: verification is limited
+    // to format check + the local recompute match above, and never claims chain
+    // confirmation.
+    const isLocalAnchor = anchor.transactionHash?.startsWith('0xlocal_') ?? false;
     let blockchainValid = false;
-    if (anchor.transactionHash && this.enabled) {
+
+    if (isLocalAnchor) {
+      const formatValid = anchor.transactionHash!.length > 8;
+      details += formatValid
+        ? ' | Local hash commitment verified (no on-chain confirmation exists)'
+        : ' | Local hash commitment malformed';
+      if (!formatValid) localValid = false;
+    } else if (anchor.transactionHash && this.enabled) {
       try {
         blockchainValid = await this.provider.verifyAnchor(
           anchor.transactionHash,
           anchor.merkleRoot || anchor.sourceHash
         );
-        details += blockchainValid 
+        details += blockchainValid
           ? ` | Blockchain verified on ${this.provider.network}`
           : ` | Blockchain verification failed`;
       } catch (error: any) {
@@ -480,15 +533,17 @@ export class BlockchainAuditService {
       }
     }
 
+    const requiresChainVerification = !!anchor.transactionHash && !isLocalAnchor;
+
     return {
-      valid: localValid && (anchor.transactionHash ? blockchainValid : true),
+      valid: localValid && (requiresChainVerification ? blockchainValid : true),
       anchorId,
       sourceHash: anchor.sourceHash,
       merkleRoot: anchor.merkleRoot,
       transactionHash: anchor.transactionHash,
       blockNumber: anchor.blockNumber,
       verifiedAt: new Date(),
-      verificationMethod: anchor.transactionHash ? 'blockchain' : 'local',
+      verificationMethod: requiresChainVerification ? 'blockchain' : 'local',
       details,
     };
   }
@@ -588,7 +643,9 @@ export class BlockchainAuditService {
       try {
         const result = await this.provider.submitAnchor(merkleRoot, JSON.stringify({ batchId, count: items.length }));
         transactionHash = result.txHash;
-        status = 'confirmed';
+        // 'confirmed' only for real chain submissions; local provider anchors
+        // are distinctly marked as locally committed.
+        status = this.provider instanceof LocalHashAnchorProvider ? 'local_committed' : 'confirmed';
 
         // Update all anchors with batch transaction
         for (const anchor of anchors) {
@@ -598,7 +655,7 @@ export class BlockchainAuditService {
               transaction_hash = ${transactionHash},
               block_number = ${result.blockNumber || null},
               anchored_at = NOW(),
-              status = 'confirmed',
+              status = ${status},
               verification_url = ${this.provider.getTransactionUrl(transactionHash)}
             WHERE id = ${anchor.id}
           `);
@@ -611,13 +668,15 @@ export class BlockchainAuditService {
       }
     }
 
+    const batchCommitted = status === 'confirmed' || status === 'local_committed';
     return {
       batchId,
       anchors,
       merkleRoot,
       status,
       transactionHash,
-      submittedAt: status === 'confirmed' ? new Date() : null,
+      submittedAt: batchCommitted ? new Date() : null,
+      // confirmedAt is only set for real on-chain confirmation
       confirmedAt: status === 'confirmed' ? new Date() : null,
     };
   }

@@ -4,11 +4,12 @@
  * Handles payments across multiple gateways: M-Pesa, Airtel Money, Tigo Pesa
  */
 
+import axios from 'axios';
 import { mpesaService } from './mpesa-service';
 import { airtelMoneyService } from './airtel-money-service';
 import { tigoPesaService } from './tigo-pesa-service';
 import { getDb } from '../db';
-import { payments } from '../../drizzle/schema';
+import { payments, paymentCredentials } from '../../drizzle/schema';
 import { eq } from 'drizzle-orm';
 
 export type PaymentGateway = 'mpesa' | 'airtel_money' | 'tigo_pesa';
@@ -377,31 +378,25 @@ class PaymentGatewayService {
         };
       }
 
-      // Process refund through the appropriate gateway
-      let refundResult: { success: boolean; refundId?: string; error?: string } = { success: false };
+      // Process refund through the appropriate gateway. A refund only succeeds
+      // when the gateway confirms it; otherwise the payment is flagged for
+      // manual review and NEVER marked as refunded.
       const refundId = `REF-${paymentId}-${Date.now()}`;
+      const existingMetadata = JSON.parse(payment.metadata || '{}');
+
+      let refundResult: { success: boolean; refundId?: string; error?: string };
 
       switch (payment.paymentMethod) {
         case 'mpesa':
-          // M-Pesa B2C API for refunds
-          // Note: M-Pesa refunds require B2C API which needs separate credentials
-          // For now, we mark as refunded and log for manual processing
-          console.log('[PaymentGateway] M-Pesa refund requires B2C API - marking for manual processing');
-          refundResult = { success: true, refundId };
+          refundResult = await this.attemptMpesaReversal(payment, existingMetadata, reason);
           break;
 
         case 'airtel_money':
-          // Airtel Money refund API
-          // Note: Airtel Money refunds require disbursement API
-          console.log('[PaymentGateway] Airtel Money refund requires disbursement API - marking for manual processing');
-          refundResult = { success: true, refundId };
-          break;
-
         case 'tigo_pesa':
-          // Tigo Pesa refund API
-          // Note: Tigo Pesa refunds require disbursement API
-          console.log('[PaymentGateway] Tigo Pesa refund requires disbursement API - marking for manual processing');
-          refundResult = { success: true, refundId };
+          // Neither provider integration exposes an automated refund/reversal
+          // endpoint in this codebase, so a refund cannot be gateway-confirmed.
+          console.warn(`[PaymentGateway] ${payment.paymentMethod} does not support automated refunds - flagging for manual review`);
+          refundResult = { success: false, error: 'refund_not_supported' };
           break;
 
         default:
@@ -409,40 +404,166 @@ class PaymentGatewayService {
       }
 
       if (!refundResult.success) {
-        return { success: false, error: refundResult.error || 'Refund failed at gateway' };
+        // Gateway could not confirm the refund: flag for manual review, keep
+        // the payment status unchanged, and report the failure honestly.
+        await db
+          .update(payments)
+          .set({
+            metadata: JSON.stringify({
+              ...existingMetadata,
+              refundReason: reason,
+              refundRequestedAt: new Date().toISOString(),
+              refundId,
+              refundStatus: 'manual_review_required',
+              refundError: refundResult.error,
+            }),
+          })
+          .where(eq(payments.id, paymentId));
+
+        return {
+          success: false,
+          error: refundResult.error || 'refund_not_supported',
+          refundId,
+        };
       }
 
-      // Update payment status to refunded
+      // Gateway confirmed the refund — safe to mark as refunded.
       await db
         .update(payments)
         .set({
           status: 'refunded',
           metadata: JSON.stringify({
-            ...JSON.parse(payment.metadata || '{}'),
+            ...existingMetadata,
             refundReason: reason,
             refundedAt: new Date().toISOString(),
-            refundId,
-            refundStatus: 'pending_manual_processing',
+            refundId: refundResult.refundId || refundId,
+            refundStatus: 'confirmed',
           }),
         })
         .where(eq(payments.id, paymentId));
 
-      console.log('[PaymentGateway] Payment marked for refund:', {
+      console.log('[PaymentGateway] Refund confirmed by gateway:', {
         paymentId,
         amount: payment.amount,
         reason,
-        refundId,
+        refundId: refundResult.refundId || refundId,
       });
 
       return {
         success: true,
-        refundId,
+        refundId: refundResult.refundId || refundId,
       };
     } catch (error: any) {
       console.error('[PaymentGateway] Refund error:', error);
       return {
         success: false,
         error: error.message || 'Refund failed',
+      };
+    }
+  }
+
+  /**
+   * Attempt a real M-Pesa TransactionReversal via the Daraja API.
+   *
+   * Uses the same credential store and OAuth flow as MPesaService, plus the
+   * initiator credentials required by the reversal endpoint. Returns success
+   * only when the gateway accepts the reversal (ResponseCode '0'); any other
+   * outcome is a failure so the caller can flag the payment for manual review.
+   */
+  private async attemptMpesaReversal(
+    payment: { id: number; amount: number; transactionId: string | null },
+    metadata: Record<string, any>,
+    reason: string
+  ): Promise<{ success: boolean; refundId?: string; error?: string }> {
+    try {
+      // The reversal API needs the original M-Pesa receipt number (e.g. QK123ABC),
+      // which is stored in payment metadata when the STK callback completes.
+      const mpesaReceiptNumber = metadata.mpesaReceiptNumber;
+      if (!mpesaReceiptNumber) {
+        return {
+          success: false,
+          error: 'refund_not_supported: original M-Pesa receipt number not recorded for this payment',
+        };
+      }
+
+      const db = await getDb();
+      if (!db) throw new Error('Database not available');
+
+      const creds = await db
+        .select()
+        .from(paymentCredentials)
+        .where(eq(paymentCredentials.gateway, 'mpesa'))
+        .limit(1);
+
+      if (!creds || creds.length === 0) {
+        return { success: false, error: 'M-Pesa credentials not configured' };
+      }
+
+      const credentials = JSON.parse(creds[0].credentials);
+      const apiUrl = credentials.apiUrl || 'https://api.safaricom.co.ke';
+      const initiator = credentials.initiator || process.env.MPESA_INITIATOR;
+      const securityCredential = credentials.securityCredential || process.env.MPESA_SECURITY_CREDENTIAL;
+      const callbackUrl = credentials.callbackUrl || process.env.MPESA_CALLBACK_URL;
+
+      if (!initiator || !securityCredential) {
+        return {
+          success: false,
+          error: 'refund_not_supported: M-Pesa reversal initiator credentials not configured',
+        };
+      }
+
+      // OAuth token (same flow as MPesaService.generateToken)
+      const auth = Buffer.from(`${credentials.consumerKey}:${credentials.consumerSecret}`).toString('base64');
+      const tokenResponse = await axios.get<{ access_token: string }>(
+        `${apiUrl}/oauth/v1/generate?grant_type=client_credentials`,
+        { headers: { Authorization: `Basic ${auth}` }, timeout: 15000 }
+      );
+      const accessToken = tokenResponse.data.access_token;
+
+      const response = await axios.post(
+        `${apiUrl}/mpesa/reversal/v1/request`,
+        {
+          Initiator: initiator,
+          SecurityCredential: securityCredential,
+          CommandID: 'TransactionReversal',
+          TransactionID: mpesaReceiptNumber,
+          Amount: Math.round(payment.amount / 100), // cents -> currency units
+          ReceiverParty: credentials.shortcode,
+          RecieverIdentifierType: '11',
+          ResultURL: callbackUrl,
+          QueueTimeOutURL: callbackUrl,
+          Remarks: reason,
+          Occasion: `Refund for payment ${payment.id}`,
+        },
+        {
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            'Content-Type': 'application/json',
+          },
+          timeout: 30000,
+        }
+      );
+
+      const data = response.data;
+      if (data.ResponseCode === '0' || data.ResponseCode === 0) {
+        // Gateway accepted the reversal; completion is confirmed asynchronously
+        // via the ResultURL callback, which reconciles against this ID.
+        return {
+          success: true,
+          refundId: data.ConversationID || data.OriginatorConversationID,
+        };
+      }
+
+      console.error('[PaymentGateway] M-Pesa reversal rejected:', data);
+      return {
+        success: false,
+        error: data.ResponseDescription || data.errorMessage || 'M-Pesa reversal rejected by gateway',
+      };
+    } catch (error: any) {
+      console.error('[PaymentGateway] M-Pesa reversal error:', error.response?.data || error.message);
+      return {
+        success: false,
+        error: error.response?.data?.errorMessage || error.message || 'M-Pesa reversal request failed',
       };
     }
   }

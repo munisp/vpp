@@ -5,6 +5,7 @@
  * Uses real database operations for trade creation and management.
  */
 
+import { proxyActivities, sleep } from '@temporalio/workflow';
 import { getDb } from '../db';
 import { 
   trades, 
@@ -14,7 +15,53 @@ import {
   tradingPreferences,
   payments 
 } from '../../drizzle/schema';
-import { eq, and, desc, gte, lte, sql } from 'drizzle-orm';
+import { eq, and, desc, gte, lte, avg } from 'drizzle-orm';
+
+/**
+ * Signatures of the trading activities registered on the 'trading-execution'
+ * task queue (implemented in trading-worker.ts). Declared here so the workflow
+ * bundle does not pull in worker-only code.
+ */
+interface TradingActivities {
+  validateTradeActivity(input: {
+    sellerId: number;
+    buyerId: number;
+    energyAmount: number;
+    pricePerUnit: number;
+  }): Promise<{ valid: boolean; error?: string }>;
+  createEscrowActivity(input: {
+    tradeId: number;
+    amount: number;
+    buyerId: number;
+  }): Promise<{ success: boolean; escrowId?: string; error?: string }>;
+  executeEnergyTransferActivity(input: {
+    tradeId: number;
+    sellerId: number;
+    buyerId: number;
+    energyAmount: number;
+  }): Promise<{ success: boolean; transferId?: string; error?: string }>;
+  releaseEscrowActivity(input: {
+    tradeId: number;
+    escrowId: string;
+    sellerId: number;
+  }): Promise<{ success: boolean; error?: string }>;
+  sendTradeNotificationActivity(input: {
+    userId: number;
+    tradeId: number;
+    type: 'trade_created' | 'trade_completed' | 'trade_failed';
+    message: string;
+  }): Promise<{ success: boolean; error?: string }>;
+}
+
+const tradingActivities = proxyActivities<TradingActivities>({
+  startToCloseTimeout: '2 minutes',
+  retry: {
+    initialInterval: '1s',
+    backoffCoefficient: 2,
+    maximumInterval: '30s',
+    maximumAttempts: 3,
+  },
+});
 
 /**
  * Automated Trading Workflow Input
@@ -137,18 +184,22 @@ export async function automatedTradingWorkflow(
         break;
         
       case 'arbitrage':
-        // For arbitrage, we need price differential - buy low, sell high
-        tradeType = currentPrice < 45 ? 'import' : 'export'; // 45 cents as baseline
+        // For arbitrage, buy below the recent market average, sell above it.
+        // The baseline is computed from real marketPrices rows, not a constant.
+        const baseline = await getRecentAverageMarketPrice();
+        tradeType = currentPrice < baseline ? 'import' : 'export';
         break;
         
       default:
         throw new Error(`Unknown strategy: ${input.strategy}`);
     }
     
-    // Step 5: Create the trade in the database
+    // Step 5: Create the trade in the database as 'pending'. It only
+    // transitions to 'executed' after delivery is verified against real
+    // telemetry — trades never execute at fabricated fills.
     const energyWh = Math.round(energyToTrade * 1000); // Convert kWh to Wh
     const totalAmount = Math.round(energyToTrade * priceToUse);
-    
+
     const tradeResult = await db.insert(trades).values({
       userId: input.userId,
       tradeType,
@@ -157,19 +208,65 @@ export async function automatedTradingWorkflow(
       price: priceToUse,
       totalAmount,
       timestamp: new Date(),
-      status: 'executed',
+      status: 'pending',
       metadata: JSON.stringify({
         strategy: input.strategy,
         assetId: input.assetId,
-        executedAt: new Date().toISOString(),
+        createdAt: new Date().toISOString(),
       }),
     });
-    
+
+    const tradeId = Number(tradeResult[0]?.insertId);
+    if (!tradeId) {
+      throw new Error('Failed to create trade record');
+    }
+
+    // Step 6: Verify the fill — the asset must be actively delivering (or able
+    // to absorb, for imports) according to recent real telemetry.
+    const verification = await verifyAssetDelivery(input.userId, input.assetId, tradeType);
+
+    if (!verification.verified) {
+      await db.update(trades)
+        .set({
+          status: 'failed',
+          metadata: JSON.stringify({
+            strategy: input.strategy,
+            assetId: input.assetId,
+            verificationStatus: 'verification_failed',
+            verificationError: verification.error,
+            failedAt: new Date().toISOString(),
+          }),
+        })
+        .where(eq(trades.id, tradeId));
+
+      console.error(`[AutomatedTradingWorkflow] Trade ${tradeId} delivery verification failed: ${verification.error}`);
+      return {
+        success: false,
+        tradesExecuted: 0,
+        totalVolume: 0,
+        totalValue: 0,
+        error: `Delivery verification failed: ${verification.error}`,
+      };
+    }
+
+    await db.update(trades)
+      .set({
+        status: 'executed',
+        metadata: JSON.stringify({
+          strategy: input.strategy,
+          assetId: input.assetId,
+          verificationStatus: 'verified',
+          observedAvgPowerW: verification.observedAvgPowerW,
+          executedAt: new Date().toISOString(),
+        }),
+      })
+      .where(eq(trades.id, tradeId));
+
     tradesExecuted = 1;
     totalVolume = energyToTrade;
     totalValue = totalAmount;
 
-    console.log(`[AutomatedTradingWorkflow] Executed trade: ${energyToTrade}kWh @ ${priceToUse}c = ${totalAmount}c`);
+    console.log(`[AutomatedTradingWorkflow] Executed verified trade ${tradeId}: ${energyToTrade}kWh @ ${priceToUse}c = ${totalAmount}c`);
     return {
       success: true,
       tradesExecuted,
@@ -237,7 +334,7 @@ export async function p2pTradingWorkflow(
     tradeId = Number(sellerTradeResult[0].insertId);
     
     // Create buyer's trade record
-    await db.insert(trades).values({
+    const buyerTradeResult = await db.insert(trades).values({
       userId: input.buyerId,
       tradeType: 'p2p_buy',
       tradingMode: 'p2p',
@@ -254,6 +351,7 @@ export async function p2pTradingWorkflow(
         escrowStatus: 'locked',
       }),
     });
+    const buyerTradeId = Number(buyerTradeResult[0]?.insertId);
 
     // Step 3: Lock buyer's funds (create pending payment)
     console.log(`[P2PTradingWorkflow] Locking ${totalAmount} cents for buyer ${input.buyerId}`);
@@ -271,38 +369,83 @@ export async function p2pTradingWorkflow(
       }),
     });
 
-    // Step 4: Schedule energy delivery
-    console.log(`[P2PTradingWorkflow] Scheduling ${input.quantity} kWh delivery at ${input.deliveryTime}`);
+    // Step 4: Wait for the delivery window using deterministic Temporal timers
+    const deliveryStart = new Date(input.deliveryTime);
+    const deliveryEnd = new Date(deliveryStart.getTime() + input.duration * 3_600_000);
+    console.log(`[P2PTradingWorkflow] Delivery window: ${deliveryStart.toISOString()} -> ${deliveryEnd.toISOString()}`);
 
-    // Step 5: Wait for delivery time (in production, this would be handled by Temporal timer)
     const now = new Date();
-    if (input.deliveryTime > now) {
-      const waitMs = input.deliveryTime.getTime() - now.getTime();
-      console.log(`[P2PTradingWorkflow] Waiting ${waitMs}ms for delivery time`);
-      await new Promise(resolve => setTimeout(resolve, Math.min(waitMs, 1000)));
+    if (deliveryStart > now) {
+      await sleep(deliveryStart.getTime() - now.getTime());
+    }
+    // Wait until the end of the delivery window before verifying
+    const afterStart = new Date();
+    if (deliveryEnd > afterStart) {
+      await sleep(deliveryEnd.getTime() - afterStart.getTime());
     }
 
-    // Step 6: Monitor delivery - verify actual energy transfer via telemetry
-    console.log(`[P2PTradingWorkflow] Monitoring delivery for ${input.duration} hours`);
-    
-    // In production, this would query telemetry to verify energy was delivered
-    // For now, we assume successful delivery after the wait period
+    // Step 5: Verify actual energy delivery via the seller's telemetry over
+    // the delivery window. No telemetry or no export => verification fails,
+    // escrow stays held, and nothing is settled.
+    const verification = await verifyP2PDelivery(input.sellerId, deliveryStart, deliveryEnd);
 
-    // Step 7: Settle transaction - update both trades to executed
-    console.log(`[P2PTradingWorkflow] Settling trade ${tradeId}`);
+    if (!verification.verified) {
+      console.error(`[P2PTradingWorkflow] Delivery verification failed for trade ${tradeId}: ${verification.error}`);
+
+      const failedMetadata = JSON.stringify({
+        deliveryTime: input.deliveryTime.toISOString(),
+        duration: input.duration,
+        escrowStatus: 'held',
+        verificationStatus: 'verification_failed',
+        verificationError: verification.error,
+        failedAt: new Date().toISOString(),
+      });
+
+      await db.update(trades)
+        .set({ status: 'failed', metadata: failedMetadata })
+        .where(eq(trades.id, tradeId));
+
+      if (buyerTradeId) {
+        await db.update(trades)
+          .set({
+            status: 'failed',
+            metadata: JSON.stringify({ ...JSON.parse(failedMetadata), linkedTradeId: tradeId }),
+          })
+          .where(eq(trades.id, buyerTradeId));
+      }
+
+      return {
+        success: false,
+        tradeId,
+        error: `Delivery verification failed: ${verification.error}`,
+      };
+    }
+
+    // Step 6: Delivery verified — settle transaction, mark both sides executed
+    console.log(`[P2PTradingWorkflow] Settling verified trade ${tradeId} (avg export ${verification.observedAvgPowerW}W)`);
+    const settledMetadata = JSON.stringify({
+      deliveryTime: input.deliveryTime.toISOString(),
+      duration: input.duration,
+      escrowStatus: 'released',
+      verificationStatus: 'verified',
+      observedAvgPowerW: verification.observedAvgPowerW,
+      settledAt: new Date().toISOString(),
+    });
+
     await db.update(trades)
-      .set({ 
-        status: 'executed',
-        metadata: JSON.stringify({
-          deliveryTime: input.deliveryTime.toISOString(),
-          duration: input.duration,
-          escrowStatus: 'released',
-          settledAt: new Date().toISOString(),
-        }),
-      })
+      .set({ status: 'executed', metadata: settledMetadata })
       .where(eq(trades.id, tradeId));
 
-    // Step 8: Release funds to seller - update payment status
+    if (buyerTradeId) {
+      await db.update(trades)
+        .set({
+          status: 'executed',
+          metadata: JSON.stringify({ ...JSON.parse(settledMetadata), linkedTradeId: tradeId }),
+        })
+        .where(eq(trades.id, buyerTradeId));
+    }
+
+    // Step 7: Release funds to seller - update payment status
     console.log(`[P2PTradingWorkflow] Releasing ${totalAmount} cents to seller ${input.sellerId}`);
 
     console.log(`[P2PTradingWorkflow] Completed trade ${tradeId}`);
@@ -332,6 +475,119 @@ export async function p2pTradingWorkflow(
       error: error instanceof Error ? error.message : 'P2P trading workflow failed',
     };
   }
+}
+
+/**
+ * Execute Trade Workflow (Temporal workflow type: "executeTrade")
+ *
+ * Executes a trade created via the trading router using the activities
+ * registered on the 'trading-execution' task queue:
+ * validate -> escrow -> dispatch/transfer -> release escrow -> notify.
+ *
+ * Exported under the exact type name the Temporal client starts
+ * (server/integration/temporal-client.ts uses 'executeTrade'). Escrow is only
+ * released after the energy-transfer activity confirms the dispatch command
+ * was published; on any failure the escrow stays held and the failure is
+ * reported.
+ */
+export async function executeTrade(input: {
+  tradeId: number;
+  userId: number;
+  tradeType: string;
+  energy: number; // watt-hours
+  price: number; // cents per kWh
+  counterpartyId?: number;
+}): Promise<{ success: boolean; escrowId?: string; transferId?: string; error?: string }> {
+  const isSell = input.tradeType === 'export' || input.tradeType === 'p2p_sell' || input.tradeType === 'sell';
+  const sellerId = isSell ? input.userId : input.counterpartyId;
+  const buyerId = isSell ? input.counterpartyId : input.userId;
+
+  if (!sellerId || !buyerId) {
+    return {
+      success: false,
+      error: `Trade ${input.tradeId} cannot be executed: counterparty is required for settlement`,
+    };
+  }
+
+  // escrow amount in cents: Wh -> kWh * cents/kWh
+  const amount = Math.round((input.energy / 1000) * input.price);
+
+  // Step 1: Validate both parties and seller capacity
+  const validation = await tradingActivities.validateTradeActivity({
+    sellerId,
+    buyerId,
+    energyAmount: input.energy,
+    pricePerUnit: input.price,
+  });
+
+  if (!validation.valid) {
+    await tradingActivities.sendTradeNotificationActivity({
+      userId: input.userId,
+      tradeId: input.tradeId,
+      type: 'trade_failed',
+      message: `Trade ${input.tradeId} validation failed: ${validation.error}`,
+    });
+    return { success: false, error: validation.error || 'Trade validation failed' };
+  }
+
+  // Step 2: Lock buyer's funds in escrow
+  const escrow = await tradingActivities.createEscrowActivity({
+    tradeId: input.tradeId,
+    amount,
+    buyerId,
+  });
+
+  if (!escrow.success || !escrow.escrowId) {
+    return { success: false, error: escrow.error || 'Failed to create escrow' };
+  }
+
+  // Step 3: Dispatch the energy transfer. The activity publishes the dispatch
+  // command via MQTT; on failure the escrow stays held and we do not settle.
+  const transfer = await tradingActivities.executeEnergyTransferActivity({
+    tradeId: input.tradeId,
+    sellerId,
+    buyerId,
+    energyAmount: input.energy,
+  });
+
+  if (!transfer.success) {
+    await tradingActivities.sendTradeNotificationActivity({
+      userId: input.userId,
+      tradeId: input.tradeId,
+      type: 'trade_failed',
+      message: `Trade ${input.tradeId} dispatch failed: ${transfer.error}. Escrow remains held.`,
+    });
+    return {
+      success: false,
+      escrowId: escrow.escrowId,
+      error: transfer.error || 'Energy transfer dispatch failed',
+    };
+  }
+
+  // Step 4: Dispatch confirmed — release escrow to the seller
+  const release = await tradingActivities.releaseEscrowActivity({
+    tradeId: input.tradeId,
+    escrowId: escrow.escrowId,
+    sellerId,
+  });
+
+  if (!release.success) {
+    return {
+      success: false,
+      escrowId: escrow.escrowId,
+      transferId: transfer.transferId,
+      error: release.error || 'Escrow release failed',
+    };
+  }
+
+  await tradingActivities.sendTradeNotificationActivity({
+    userId: input.userId,
+    tradeId: input.tradeId,
+    type: 'trade_completed',
+    message: `Trade ${input.tradeId} executed and settled (${input.energy}Wh @ ${input.price}c/kWh).`,
+  });
+
+  return { success: true, escrowId: escrow.escrowId, transferId: transfer.transferId };
 }
 
 /**
@@ -471,61 +727,218 @@ async function getAvailableEnergy(userId: number, assetId: number): Promise<numb
   }
 }
 
+/**
+ * Get the current market price from the marketPrices table (the same source
+ * used by server/ml/price-prediction.ts). Throws when no valid price exists —
+ * trades must never execute at fabricated fallback prices.
+ */
 async function getCurrentMarketPrice(): Promise<number> {
   const db = await getDb();
   if (!db) {
-    // Return default price if database not available
-    return 45;
+    throw new Error('Cannot determine market price: database not available');
   }
-  
-  try {
-    // Get current market price from database
-    const now = new Date();
-    const hour = now.getHours();
-    
-    // Determine price type based on time of day
-    let priceType: 'off_peak' | 'shoulder' | 'peak' | 'super_peak';
-    if (hour >= 18 && hour <= 22) {
-      priceType = 'super_peak';
-    } else if ((hour >= 6 && hour <= 9) || (hour >= 17 && hour < 18)) {
-      priceType = 'peak';
-    } else if ((hour >= 10 && hour <= 16) || (hour >= 23 || hour < 6)) {
-      priceType = 'off_peak';
-    } else {
-      priceType = 'shoulder';
-    }
-    
-    const priceResult = await db
-      .select()
-      .from(marketPrices)
+
+  // Get current market price from database
+  const now = new Date();
+  const hour = now.getHours();
+
+  // Determine price type based on time of day
+  let priceType: 'off_peak' | 'shoulder' | 'peak' | 'super_peak';
+  if (hour >= 18 && hour <= 22) {
+    priceType = 'super_peak';
+  } else if ((hour >= 6 && hour <= 9) || (hour >= 17 && hour < 18)) {
+    priceType = 'peak';
+  } else if ((hour >= 10 && hour <= 16) || (hour >= 23 || hour < 6)) {
+    priceType = 'off_peak';
+  } else {
+    priceType = 'shoulder';
+  }
+
+  const priceResult = await db
+    .select()
+    .from(marketPrices)
+    .where(
+      and(
+        eq(marketPrices.country, 'tanzania'),
+        eq(marketPrices.priceType, priceType),
+        lte(marketPrices.timestamp, now),
+        gte(marketPrices.validUntil, now)
+      )
+    )
+    .orderBy(desc(marketPrices.timestamp))
+    .limit(1);
+
+  if (priceResult.length > 0) {
+    return priceResult[0].price;
+  }
+
+  // Fall back to the most recent price of any type before giving up
+  const latestPrice = await db
+    .select()
+    .from(marketPrices)
+    .where(eq(marketPrices.country, 'tanzania'))
+    .orderBy(desc(marketPrices.timestamp))
+    .limit(1);
+
+  if (latestPrice.length > 0) {
+    console.warn(`[Helper] No current ${priceType} price; using latest market price from ${latestPrice[0].timestamp}`);
+    return latestPrice[0].price;
+  }
+
+  throw new Error('Cannot determine market price: no market price data available');
+}
+
+/**
+ * Average market price over the recent lookback window, used as the arbitrage
+ * baseline. Computed from real marketPrices rows; throws when unavailable.
+ */
+async function getRecentAverageMarketPrice(lookbackHours = 24): Promise<number> {
+  const db = await getDb();
+  if (!db) {
+    throw new Error('Cannot determine baseline market price: database not available');
+  }
+
+  const since = new Date(Date.now() - lookbackHours * 3_600_000);
+  const [row] = await db
+    .select({ avgPrice: avg(marketPrices.price) })
+    .from(marketPrices)
+    .where(
+      and(
+        eq(marketPrices.country, 'tanzania'),
+        gte(marketPrices.timestamp, since)
+      )
+    );
+
+  const avgPrice = row?.avgPrice ? Number(row.avgPrice) : NaN;
+  if (!Number.isFinite(avgPrice) || avgPrice <= 0) {
+    throw new Error(`Cannot determine baseline market price: no market data in the last ${lookbackHours}h`);
+  }
+  return avgPrice;
+}
+
+/**
+ * Verify an automated trade actually filled by checking the asset's recent
+ * telemetry. For exports the asset must be actively exporting power; for
+ * imports the asset must at least be reporting live telemetry. Returns
+ * verified=false with a reason when telemetry is missing or contradicts the
+ * trade — the caller must fail the trade rather than assume a fill.
+ */
+async function verifyAssetDelivery(
+  userId: number,
+  assetId: number,
+  tradeType: 'export' | 'import' | 'p2p_sell' | 'p2p_buy'
+): Promise<{ verified: boolean; observedAvgPowerW?: number; error?: string }> {
+  const db = await getDb();
+  if (!db) {
+    return { verified: false, error: 'database not available' };
+  }
+
+  const userAssets = await db
+    .select()
+    .from(assets)
+    .where(
+      assetId > 0
+        ? and(eq(assets.userId, userId), eq(assets.id, assetId))
+        : eq(assets.userId, userId)
+    );
+
+  if (userAssets.length === 0) {
+    return { verified: false, error: 'no assets found for user' };
+  }
+
+  const windowStart = new Date(Date.now() - 60 * 60 * 1000); // last 60 minutes
+  const isExport = tradeType === 'export' || tradeType === 'p2p_sell';
+
+  for (const asset of userAssets) {
+    const [telRow] = await db
+      .select({ avgPower: avg(telemetry.power) })
+      .from(telemetry)
       .where(
         and(
-          eq(marketPrices.country, 'tanzania'),
-          eq(marketPrices.priceType, priceType),
-          lte(marketPrices.timestamp, now),
-          gte(marketPrices.validUntil, now)
+          eq(telemetry.assetId, asset.id),
+          gte(telemetry.timestamp, windowStart)
         )
-      )
-      .orderBy(desc(marketPrices.timestamp))
-      .limit(1);
-    
-    if (priceResult.length > 0) {
-      return priceResult[0].price;
+      );
+
+    const avgPowerW = telRow?.avgPower ? Number(telRow.avgPower) : null;
+    if (avgPowerW === null) continue;
+
+    if (isExport && avgPowerW <= 0) {
+      return {
+        verified: false,
+        observedAvgPowerW: avgPowerW,
+        error: `asset ${asset.id} telemetry shows no power export (avg ${avgPowerW}W)`,
+      };
     }
-    
-    // Return time-based default prices if no market data
-    const defaultPrices = {
-      off_peak: 35,
-      shoulder: 45,
-      peak: 55,
-      super_peak: 70,
-    };
-    
-    return defaultPrices[priceType];
-  } catch (error) {
-    console.error('[Helper] Error getting market price:', error);
-    return 45; // Default fallback price
+
+    return { verified: true, observedAvgPowerW: avgPowerW };
   }
+
+  return { verified: false, error: 'no recent telemetry available to verify delivery' };
+}
+
+/**
+ * Verify a P2P delivery by aggregating the seller's telemetry over the
+ * delivery window. Delivery is only verified when the seller's assets show
+ * real power export during the window.
+ */
+async function verifyP2PDelivery(
+  sellerId: number,
+  windowStart: Date,
+  windowEnd: Date
+): Promise<{ verified: boolean; observedAvgPowerW?: number; error?: string }> {
+  const db = await getDb();
+  if (!db) {
+    return { verified: false, error: 'database not available' };
+  }
+
+  const sellerAssets = await db
+    .select({ id: assets.id })
+    .from(assets)
+    .where(eq(assets.userId, sellerId));
+
+  if (sellerAssets.length === 0) {
+    return { verified: false, error: 'seller has no assets' };
+  }
+
+  let totalAvgPowerW = 0;
+  let assetsWithTelemetry = 0;
+
+  for (const asset of sellerAssets) {
+    const [telRow] = await db
+      .select({ avgPower: avg(telemetry.power) })
+      .from(telemetry)
+      .where(
+        and(
+          eq(telemetry.assetId, asset.id),
+          gte(telemetry.timestamp, windowStart),
+          lte(telemetry.timestamp, windowEnd)
+        )
+      );
+
+    const avgPowerW = telRow?.avgPower ? Number(telRow.avgPower) : null;
+    if (avgPowerW !== null) {
+      assetsWithTelemetry++;
+      totalAvgPowerW += avgPowerW;
+    }
+  }
+
+  if (assetsWithTelemetry === 0) {
+    return {
+      verified: false,
+      error: 'no telemetry recorded during the delivery window — delivery cannot be verified',
+    };
+  }
+
+  if (totalAvgPowerW <= 0) {
+    return {
+      verified: false,
+      observedAvgPowerW: totalAvgPowerW,
+      error: `seller telemetry shows no power export during the delivery window (avg ${totalAvgPowerW}W)`,
+    };
+  }
+
+  return { verified: true, observedAvgPowerW: totalAvgPowerW };
 }
 
 /**

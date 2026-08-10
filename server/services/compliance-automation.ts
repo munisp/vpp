@@ -46,7 +46,7 @@ export interface ComplianceCheck {
 
 export interface ComplianceFinding {
   findingCode: string;
-  severity: 'info' | 'minor' | 'major' | 'critical';
+  severity: 'info' | 'warning' | 'minor' | 'major' | 'critical';
   description: string;
   requirement: string;
   actualValue: string | null;
@@ -268,6 +268,7 @@ export class ComplianceAutomationService {
 
     const findings: ComplianceFinding[] = [];
     const evidenceReferences: string[] = [];
+    let checkImplemented = true;
 
     // Run category-specific checks
     switch (rule.ruleCategory) {
@@ -287,9 +288,13 @@ export class ComplianceAutomationService {
         await this.checkSafetyCompliance(rule, scope, findings, evidenceReferences);
         break;
       default:
+        // Unimplemented categories (e.g. market_rules, environmental) must NOT
+        // silently pass. Flag for manual review with a warning-severity finding
+        // and persist status 'pending_review'.
+        checkImplemented = false;
         findings.push({
           findingCode: 'CHECK_NOT_IMPLEMENTED',
-          severity: 'info',
+          severity: 'warning',
           description: `Automated check not implemented for category ${rule.ruleCategory}`,
           requirement: 'Manual review required',
           actualValue: null,
@@ -300,7 +305,10 @@ export class ComplianceAutomationService {
 
     // Determine overall status
     let status: ComplianceCheck['status'] = 'compliant';
-    if (findings.some(f => f.severity === 'critical')) {
+    if (!checkImplemented) {
+      // Never report compliance for a check that does not exist yet.
+      status = 'pending_review';
+    } else if (findings.some(f => f.severity === 'critical')) {
       status = 'non_compliant';
     } else if (findings.some(f => f.severity === 'major')) {
       status = 'non_compliant';
@@ -335,7 +343,10 @@ export class ComplianceAutomationService {
         jurisdiction: rule.jurisdiction,
         subjectType: scope.type,
         subjectId: scope.id?.toString() || 'platform',
-        result: status === 'compliant' ? 'pass' : status === 'warning' ? 'warning' : 'fail',
+        result: status === 'compliant' ? 'pass'
+          : status === 'warning' ? 'warning'
+          : status === 'pending_review' ? 'pending_review'
+          : 'fail',
         evidenceRef: evidenceReferences.length > 0 ? evidenceReferences[0] : undefined,
         timestamp: new Date(),
       });
@@ -788,11 +799,12 @@ export class ComplianceAutomationService {
     scope: { type: 'user' | 'asset' | 'community' | 'platform'; id?: number },
     jurisdiction: string
   ): Promise<{
-    overallStatus: 'compliant' | 'non_compliant' | 'warning' | 'unknown';
+    overallStatus: 'compliant' | 'non_compliant' | 'warning' | 'pending_review' | 'unknown';
     totalRules: number;
     compliantRules: number;
     warningRules: number;
     nonCompliantRules: number;
+    pendingRules: number;
     lastCheckDate: Date | null;
     nextCheckDue: Date | null;
     criticalFindings: ComplianceFinding[];
@@ -824,6 +836,7 @@ export class ComplianceAutomationService {
     let compliantRules = 0;
     let warningRules = 0;
     let nonCompliantRules = 0;
+    let pendingRules = 0;
     let lastCheckDate: Date | null = null;
     let nextCheckDue: Date | null = null;
     const criticalFindings: ComplianceFinding[] = [];
@@ -832,6 +845,7 @@ export class ComplianceAutomationService {
       if (check.status === 'compliant') compliantRules++;
       else if (check.status === 'warning') warningRules++;
       else if (check.status === 'non_compliant') nonCompliantRules++;
+      else if (check.status === 'pending_review') pendingRules++;
 
       if (!lastCheckDate || new Date(check.checked_at) > lastCheckDate) {
         lastCheckDate = new Date(check.checked_at);
@@ -850,11 +864,14 @@ export class ComplianceAutomationService {
     }
 
     const totalRules = latestChecks.length;
-    let overallStatus: 'compliant' | 'non_compliant' | 'warning' | 'unknown' = 'unknown';
-    
+    let overallStatus: 'compliant' | 'non_compliant' | 'warning' | 'pending_review' | 'unknown' = 'unknown';
+
     if (totalRules > 0) {
+      // Rules with unimplemented automated checks are pending review and must
+      // never roll up into an overall 'compliant' status.
       if (nonCompliantRules > 0) overallStatus = 'non_compliant';
       else if (warningRules > 0) overallStatus = 'warning';
+      else if (pendingRules > 0) overallStatus = 'pending_review';
       else overallStatus = 'compliant';
     }
 
@@ -864,6 +881,7 @@ export class ComplianceAutomationService {
       compliantRules,
       warningRules,
       nonCompliantRules,
+      pendingRules,
       lastCheckDate,
       nextCheckDue,
       criticalFindings,

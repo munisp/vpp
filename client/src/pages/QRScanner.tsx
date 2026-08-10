@@ -15,6 +15,15 @@ import {
   DialogTitle,
   DialogFooter,
 } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 
 interface QRPaymentData {
   type: "merchant" | "p2p" | "bill" | "token";
@@ -37,7 +46,10 @@ export default function QRScanner() {
   const [scannedData, setScannedData] = useState<QRPaymentData | null>(null);
   const [confirmDialogOpen, setConfirmDialogOpen] = useState(false);
   const [processing, setProcessing] = useState(false);
+  const [paymentMethod, setPaymentMethod] = useState<"mpesa" | "airtel_money" | "tigo_pesa">("mpesa");
+  const [phoneNumber, setPhoneNumber] = useState("");
   const recordScan = trpc.qrHistory.recordScan.useMutation();
+  const initiatePayment = trpc.payments.initiate.useMutation();
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -148,35 +160,61 @@ export default function QRScanner() {
     setProcessing(true);
 
     try {
-      // Record the scan to history
-      await recordScan.mutateAsync({
-        paymentType: scannedData.type,
-        amount: (scannedData.amount / 100).toString(),
-        currency: scannedData.currency,
-        qrCodeData: JSON.stringify(scannedData),
-        merchantId: scannedData.merchantId,
-        merchantName: scannedData.merchantName,
-        recipientId: scannedData.recipientId,
-        recipientName: scannedData.recipientName,
-        billId: scannedData.billId,
-        billType: scannedData.billType,
-        reference: scannedData.reference,
-        description: scannedData.description,
+      // Record the scan to history (best-effort; history failure must not
+      // block the real payment execution below).
+      try {
+        await recordScan.mutateAsync({
+          paymentType: scannedData.type,
+          amount: (scannedData.amount / 100).toString(),
+          currency: scannedData.currency,
+          qrCodeData: JSON.stringify(scannedData),
+          merchantId: scannedData.merchantId,
+          merchantName: scannedData.merchantName,
+          recipientId: scannedData.recipientId,
+          recipientName: scannedData.recipientName,
+          billId: scannedData.billId,
+          billType: scannedData.billType,
+          reference: scannedData.reference,
+          description: scannedData.description,
+        });
+      } catch (historyErr) {
+        console.warn("Failed to record QR scan history:", historyErr);
+      }
+
+      // Initiate the real payment through the payments router (M-Pesa /
+      // Airtel / Tigo gateway STK push). No workflow simulation: success is
+      // only reported when the gateway accepted the request.
+      if (!phoneNumber.trim()) {
+        toast.error("Enter the mobile money phone number to charge.");
+        return;
+      }
+
+      const billIdNum = scannedData.billId ? Number(scannedData.billId) : NaN;
+      const result = await initiatePayment.mutateAsync({
+        paymentType:
+          scannedData.type === "token" ? "token_purchase" : "invoice",
+        amount: Math.round(scannedData.amount),
+        paymentMethod,
+        phoneNumber: phoneNumber.trim(),
+        ...(scannedData.type === "bill" && Number.isInteger(billIdNum) && billIdNum > 0
+          ? { billingId: billIdNum }
+          : {}),
       });
 
-      // In a real implementation, you would:
-      // 1. Call the payment API with scannedData
-      // 2. Process the payment
-      // 3. Show success/failure
+      if (!result.success) {
+        throw new Error(result.message || "Payment initiation failed");
+      }
 
-      // Simulate payment processing
-      await new Promise((resolve) => setTimeout(resolve, 2000));
-
-      toast.success("Payment processed successfully!");
+      toast.success("Payment request sent", {
+        description: result.message,
+      });
       setConfirmDialogOpen(false);
       setScannedData(null);
+      setPhoneNumber("");
     } catch (err) {
-      toast.error("Payment failed. Please try again.");
+      const message =
+        err instanceof Error ? err.message : "Payment failed. Please try again.";
+      toast.error(message);
     } finally {
       setProcessing(false);
     }
@@ -384,6 +422,32 @@ export default function QRScanner() {
                   <code className="text-xs">{scannedData.reference}</code>
                 </div>
               )}
+
+              <div className="space-y-2 border-t pt-4">
+                <Label htmlFor="qr-payment-method">Pay with</Label>
+                <Select
+                  value={paymentMethod}
+                  onValueChange={(v) => setPaymentMethod(v as typeof paymentMethod)}
+                >
+                  <SelectTrigger id="qr-payment-method">
+                    <SelectValue placeholder="Select payment method" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="mpesa">M-Pesa</SelectItem>
+                    <SelectItem value="airtel_money">Airtel Money</SelectItem>
+                    <SelectItem value="tigo_pesa">Tigo Pesa</SelectItem>
+                  </SelectContent>
+                </Select>
+
+                <Label htmlFor="qr-phone-number">Mobile money phone number</Label>
+                <Input
+                  id="qr-phone-number"
+                  type="tel"
+                  placeholder="e.g. 2557XXXXXXXX"
+                  value={phoneNumber}
+                  onChange={(e) => setPhoneNumber(e.target.value)}
+                />
+              </div>
             </div>
           )}
 

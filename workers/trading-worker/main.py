@@ -6,8 +6,9 @@ Executes automated trading and P2P trading workflows
 
 import asyncio
 import os
+import json
 import logging
-from datetime import timedelta
+from datetime import datetime, timezone, timedelta
 from typing import Optional
 from dataclasses import dataclass
 
@@ -86,49 +87,51 @@ async def get_available_energy(user_id: int, asset_id: int) -> float:
     cursor = connection.cursor(dictionary=True)
     
     try:
-        # Get user's assets
+        # Get user's assets (real columns per drizzle/schema.ts: userId, assetType)
         if asset_id > 0:
             cursor.execute(
-                "SELECT id, asset_type, capacity FROM assets WHERE user_id = %s AND id = %s AND status = 'active'",
+                "SELECT id, assetType, capacity FROM assets WHERE userId = %s AND id = %s AND status = 'active'",
                 (user_id, asset_id)
             )
         else:
             cursor.execute(
-                "SELECT id, asset_type, capacity FROM assets WHERE user_id = %s AND status = 'active'",
+                "SELECT id, assetType, capacity FROM assets WHERE userId = %s AND status = 'active'",
                 (user_id,)
             )
-        
+
         assets = cursor.fetchall()
         total_available_energy = 0.0
-        
+
         for asset in assets:
             # Get latest telemetry for this asset
+            # (real columns: assetId, power, stateOfCharge, timestamp)
             cursor.execute(
-                """SELECT power, state_of_charge, timestamp 
-                   FROM telemetry 
-                   WHERE asset_id = %s 
-                   ORDER BY timestamp DESC 
+                """SELECT power, stateOfCharge, timestamp
+                   FROM telemetry
+                   WHERE assetId = %s
+                   ORDER BY timestamp DESC
                    LIMIT 1""",
                 (asset['id'],)
             )
             telemetry = cursor.fetchone()
-            
+
             if telemetry:
                 # For batteries, use state of charge
-                if asset['asset_type'] == 'battery' and telemetry.get('state_of_charge'):
-                    # state_of_charge is percentage * 100, capacity is in Wh
-                    available_wh = (telemetry['state_of_charge'] / 10000) * asset['capacity']
+                if asset['assetType'] == 'battery' and telemetry.get('stateOfCharge'):
+                    # stateOfCharge is percentage * 100, capacity is in Wh
+                    available_wh = (telemetry['stateOfCharge'] / 10000) * asset['capacity']
                     total_available_energy += available_wh / 1000  # Convert to kWh
                 # For solar/wind, use current power output
-                elif asset['asset_type'] in ('solar', 'wind') and telemetry.get('power'):
+                elif asset['assetType'] in ('solar', 'wind') and telemetry.get('power'):
                     # Estimate available energy for next hour based on current power
                     total_available_energy += telemetry['power'] / 1000  # Convert W to kWh
-        
+
         logger.info(f"Available energy for user {user_id}: {total_available_energy:.2f} kWh")
         return total_available_energy
     except Error as e:
-        logger.error(f"Error getting available energy: {e}")
-        return 0.0
+        # A DB error is NOT 'no energy available' — raise so the workflow can
+        # distinguish a legitimate 0.0 from an infrastructure failure.
+        raise RuntimeError(f"Error getting available energy for user {user_id}: {e}") from e
     finally:
         cursor.close()
         connection.close()
@@ -144,22 +147,23 @@ async def find_matching_orders(strategy: str, price: Optional[int], limit: int =
     
     try:
         # Find pending trades that match the strategy
+        # (real columns per drizzle/schema.ts: userId, tradeType, totalAmount)
         if strategy == 'sell_excess':
             # Looking for buyers (import orders)
             if price:
                 cursor.execute(
-                    """SELECT id, user_id, energy/1000 as quantity, price, total_amount 
-                       FROM trades 
-                       WHERE trade_type = 'import' AND status = 'pending' AND price >= %s
+                    """SELECT id, userId, energy/1000 as quantity, price, totalAmount
+                       FROM trades
+                       WHERE tradeType = 'import' AND status = 'pending' AND price >= %s
                        ORDER BY price DESC
                        LIMIT %s""",
                     (price, limit)
                 )
             else:
                 cursor.execute(
-                    """SELECT id, user_id, energy/1000 as quantity, price, total_amount 
-                       FROM trades 
-                       WHERE trade_type = 'import' AND status = 'pending'
+                    """SELECT id, userId, energy/1000 as quantity, price, totalAmount
+                       FROM trades
+                       WHERE tradeType = 'import' AND status = 'pending'
                        ORDER BY price DESC
                        LIMIT %s""",
                     (limit,)
@@ -168,29 +172,30 @@ async def find_matching_orders(strategy: str, price: Optional[int], limit: int =
             # Looking for sellers (export orders)
             if price:
                 cursor.execute(
-                    """SELECT id, user_id, energy/1000 as quantity, price, total_amount 
-                       FROM trades 
-                       WHERE trade_type = 'export' AND status = 'pending' AND price <= %s
+                    """SELECT id, userId, energy/1000 as quantity, price, totalAmount
+                       FROM trades
+                       WHERE tradeType = 'export' AND status = 'pending' AND price <= %s
                        ORDER BY price ASC
                        LIMIT %s""",
                     (price, limit)
                 )
             else:
                 cursor.execute(
-                    """SELECT id, user_id, energy/1000 as quantity, price, total_amount 
-                       FROM trades 
-                       WHERE trade_type = 'export' AND status = 'pending'
+                    """SELECT id, userId, energy/1000 as quantity, price, totalAmount
+                       FROM trades
+                       WHERE tradeType = 'export' AND status = 'pending'
                        ORDER BY price ASC
                        LIMIT %s""",
                     (limit,)
                 )
-        
+
         orders = cursor.fetchall()
         logger.info(f"Found {len(orders)} matching orders")
+        # [] here means the query SUCCEEDED and found nothing — a legitimate
+        # result. DB errors raise instead of masquerading as an empty book.
         return orders
     except Error as e:
-        logger.error(f"Error finding matching orders: {e}")
-        return []
+        raise RuntimeError(f"Error finding matching orders for strategy {strategy}: {e}") from e
     finally:
         cursor.close()
         connection.close()
@@ -207,33 +212,34 @@ async def create_trade(buyer_id: int, seller_id: int, quantity: float, price: in
     try:
         energy_wh = int(quantity * 1000)  # Convert kWh to Wh
         total_amount = int(quantity * price)
-        
-        # Create seller's trade record (export)
+
+        # Real columns per drizzle/schema.ts: userId, tradeType, tradingMode,
+        # totalAmount, counterpartyId. tradeType enum: export/import/p2p_sell/p2p_buy.
+        # Create seller's trade record (export side)
         cursor.execute(
-            """INSERT INTO trades 
-               (user_id, trade_type, trading_mode, energy, price, total_amount, timestamp, status, counterparty_id, metadata)
+            """INSERT INTO trades
+               (userId, tradeType, tradingMode, energy, price, totalAmount, timestamp, status, counterpartyId, metadata)
                VALUES (%s, 'p2p_sell', 'p2p', %s, %s, %s, NOW(), 'pending', %s, %s)""",
-            (seller_id, energy_wh, price, total_amount, buyer_id, 
-             f'{{"buyer_id": {buyer_id}, "quantity_kwh": {quantity}}}')
+            (seller_id, energy_wh, price, total_amount, buyer_id,
+             json.dumps({"buyer_id": buyer_id, "quantity_kwh": quantity}))
         )
         trade_id = cursor.lastrowid
-        
-        # Create buyer's trade record (import)
+
+        # Create buyer's trade record (import side) — 10 columns, 10 values
         cursor.execute(
-            """INSERT INTO trades 
-               (user_id, trade_type, trading_mode, energy, price, total_amount, timestamp, status, counterparty_id, metadata)
-               VALUES (%s, 'p2p_buy', 'p2p', %s, %s, %s, %s, %s)""",
+            """INSERT INTO trades
+               (userId, tradeType, tradingMode, energy, price, totalAmount, timestamp, status, counterpartyId, metadata)
+               VALUES (%s, 'p2p_buy', 'p2p', %s, %s, %s, NOW(), 'pending', %s, %s)""",
             (buyer_id, energy_wh, price, total_amount, seller_id,
-             f'{{"seller_id": {seller_id}, "linked_trade_id": {trade_id}}}')
+             json.dumps({"seller_id": seller_id, "linked_trade_id": trade_id}))
         )
-        
+
         connection.commit()
         logger.info(f"Trade created: {trade_id}")
         return trade_id
     except Error as e:
-        logger.error(f"Failed to create trade: {e}")
         connection.rollback()
-        return None
+        raise RuntimeError(f"Failed to create trade ({seller_id} -> {buyer_id}): {e}") from e
     finally:
         cursor.close()
         connection.close()
@@ -253,9 +259,8 @@ async def update_order_status(order_id: int, quantity_filled: float) -> bool:
         order = cursor.fetchone()
         
         if not order:
-            logger.error(f"Order {order_id} not found")
-            return False
-        
+            raise ValueError(f"Order {order_id} not found")
+
         current_energy_wh = order[0]
         filled_wh = int(quantity_filled * 1000)
         remaining_wh = current_energy_wh - filled_wh
@@ -276,70 +281,123 @@ async def update_order_status(order_id: int, quantity_filled: float) -> bool:
         connection.commit()
         return True
     except Error as e:
-        logger.error(f"Failed to update order: {e}")
         connection.rollback()
-        return False
+        raise RuntimeError(f"Failed to update order {order_id}: {e}") from e
     finally:
         cursor.close()
         connection.close()
 
 
 @activity.defn
-async def lock_funds(user_id: int, amount: int) -> bool:
-    """Lock funds in escrow for P2P trading by creating a pending payment"""
-    logger.info(f"Locking {amount} cents for user {user_id}")
-    
+async def lock_funds(user_id: int, amount: int, trade_id: Optional[int] = None) -> int:
+    """
+    Create an escrow HOLD for a P2P trade and return the hold's payment row ID.
+
+    This is internal bookkeeping only — no money moves through any gateway
+    here. The hold is represented honestly: a 'pending' payments row with a
+    valid paymentMethod enum value and metadata marking it as an escrow hold.
+    ('escrow' is NOT a valid payments.paymentMethod enum value and is never
+    used as one.)
+    """
+    logger.info(f"Locking {amount} cents for user {user_id} (trade {trade_id})")
+
     connection = get_db_connection()
     cursor = connection.cursor()
-    
+
     try:
-        # Create a pending payment record to represent locked funds
+        # Real columns per drizzle/schema.ts: userId, paymentType, paymentMethod.
+        # paymentMethod enum: mpesa/airtel_money/tigo_pesa/bank_transfer/card.
+        metadata = {
+            "escrow": True,
+            "escrowStatus": "held",
+            "tradeId": trade_id,
+            "holdType": "bookkeeping",
+            "note": ("Internal P2P escrow hold; no gateway money movement. "
+                     "Disbursement to the seller is executed and confirmed "
+                     "separately by the payments subsystem."),
+        }
         cursor.execute(
-            """INSERT INTO payments 
-               (user_id, payment_type, amount, currency, payment_method, status, metadata)
-               VALUES (%s, 'invoice', %s, 'TZS', 'escrow', 'pending', %s)""",
-            (user_id, amount, f'{{"type": "p2p_escrow", "locked_at": "{asyncio.get_event_loop().time()}"}}')
+            """INSERT INTO payments
+               (userId, paymentType, amount, currency, paymentMethod, status, metadata)
+               VALUES (%s, 'invoice', %s, 'TZS', 'bank_transfer', 'pending', %s)""",
+            (user_id, amount, json.dumps(metadata))
         )
+        hold_id = cursor.lastrowid
         connection.commit()
-        logger.info(f"Funds locked for user {user_id}: {amount} cents")
-        return True
+        logger.info(f"Escrow hold {hold_id} created for user {user_id}: {amount} cents")
+        return hold_id
     except Error as e:
-        logger.error(f"Failed to lock funds: {e}")
         connection.rollback()
-        return False
+        raise RuntimeError(f"Failed to lock funds for user {user_id}: {e}") from e
+    finally:
+        cursor.close()
+        connection.close()
+
+
+def _set_escrow_status(hold_id: int, new_status: str) -> None:
+    """
+    Transition an escrow hold's metadata escrowStatus by row ID.
+    Raises if the hold does not exist or is no longer in 'held' state,
+    so a double-release or a release of the wrong row fails loudly.
+    """
+    connection = get_db_connection()
+    cursor = connection.cursor()
+    try:
+        cursor.execute(
+            """UPDATE payments
+               SET metadata = JSON_SET(
+                       COALESCE(metadata, JSON_OBJECT()),
+                       '$.escrowStatus', %s,
+                       '$.escrowStatusAt', DATE_FORMAT(NOW(), '%%Y-%%m-%%dT%%H:%%i:%%sZ')
+                   ),
+                   updatedAt = NOW()
+               WHERE id = %s AND status = 'pending'
+                 AND JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.escrowStatus')) = 'held'""",
+            (new_status, hold_id)
+        )
+        if cursor.rowcount == 0:
+            raise RuntimeError(
+                f"Escrow hold {hold_id} not found in 'held' state — refusing to "
+                f"mark it '{new_status}' (possible double-settle or wrong row)"
+            )
+        connection.commit()
+    except Error as e:
+        connection.rollback()
+        raise RuntimeError(f"Failed to update escrow hold {hold_id}: {e}") from e
     finally:
         cursor.close()
         connection.close()
 
 
 @activity.defn
-async def release_funds(user_id: int, amount: int) -> bool:
-    """Release funds from escrow by updating payment status"""
-    logger.info(f"Releasing {amount} cents to user {user_id}")
-    
-    connection = get_db_connection()
-    cursor = connection.cursor()
-    
-    try:
-        # Find and update the escrow payment
-        cursor.execute(
-            """UPDATE payments 
-               SET status = 'completed' 
-               WHERE user_id = %s AND amount = %s AND status = 'pending' 
-               AND JSON_EXTRACT(metadata, '$.type') = 'p2p_escrow'
-               LIMIT 1""",
-            (user_id, amount)
-        )
-        connection.commit()
-        logger.info(f"Funds released for user {user_id}: {amount} cents")
-        return True
-    except Error as e:
-        logger.error(f"Failed to release funds: {e}")
-        connection.rollback()
-        return False
-    finally:
-        cursor.close()
-        connection.close()
+async def release_funds(hold_id: int) -> bool:
+    """
+    Release an escrow hold by its payment row ID after verified delivery.
+
+    Bookkeeping only: sets metadata escrowStatus='released' on the hold row.
+    It deliberately does NOT mark the payment 'completed' — no money has
+    moved. Actual gateway disbursement to the seller is a separate step that
+    must be executed and confirmed by the payments subsystem.
+    """
+    logger.info(f"Releasing escrow hold {hold_id}")
+    _set_escrow_status(hold_id, 'released')
+    logger.warning(
+        f"Escrow hold {hold_id} marked 'released' (bookkeeping only). "
+        "Gateway disbursement to the seller must be executed and confirmed "
+        "by the payments subsystem as a separate step."
+    )
+    return True
+
+
+@activity.defn
+async def cancel_escrow_hold(hold_id: int) -> bool:
+    """
+    Cancel/unlock an escrow hold (e.g. unverified delivery or workflow
+    failure). Bookkeeping only: sets metadata escrowStatus='cancelled'.
+    """
+    logger.info(f"Cancelling escrow hold {hold_id}")
+    _set_escrow_status(hold_id, 'cancelled')
+    return True
 
 
 @activity.defn
@@ -351,68 +409,113 @@ async def schedule_energy_transfer(seller_id: int, buyer_id: int, quantity: floa
     cursor = connection.cursor()
     
     try:
+        # Real columns per drizzle/schema.ts: userId, alertType, isRead.
+        # alertType enum: system/trading/billing/maintenance → 'trading'.
+        # severity enum: info/warning/error/critical → 'info'.
         # Create alert for seller
         cursor.execute(
-            """INSERT INTO alerts 
-               (user_id, alert_type, title, message, is_read, metadata)
-               VALUES (%s, 'info', 'Energy Transfer Scheduled', %s, 0, %s)""",
-            (seller_id, 
+            """INSERT INTO alerts
+               (userId, alertType, severity, title, message, isRead, metadata, createdAt)
+               VALUES (%s, 'trading', 'info', 'Energy Transfer Scheduled', %s, 0, %s, NOW())""",
+            (seller_id,
              f'You have a scheduled energy transfer of {quantity}kWh to buyer at {delivery_time}',
-             f'{{"type": "energy_transfer", "buyer_id": {buyer_id}, "quantity": {quantity}, "delivery_time": "{delivery_time}"}}')
+             json.dumps({"type": "energy_transfer", "buyer_id": buyer_id,
+                         "quantity": quantity, "delivery_time": delivery_time}))
         )
-        
+
         # Create alert for buyer
         cursor.execute(
-            """INSERT INTO alerts 
-               (user_id, alert_type, title, message, is_read, metadata)
-               VALUES (%s, 'info', 'Energy Transfer Scheduled', %s, 0, %s)""",
+            """INSERT INTO alerts
+               (userId, alertType, severity, title, message, isRead, metadata, createdAt)
+               VALUES (%s, 'trading', 'info', 'Energy Transfer Scheduled', %s, 0, %s, NOW())""",
             (buyer_id,
              f'You have a scheduled energy delivery of {quantity}kWh from seller at {delivery_time}',
-             f'{{"type": "energy_transfer", "seller_id": {seller_id}, "quantity": {quantity}, "delivery_time": "{delivery_time}"}}')
+             json.dumps({"type": "energy_transfer", "seller_id": seller_id,
+                         "quantity": quantity, "delivery_time": delivery_time}))
         )
-        
+
         connection.commit()
         return True
     except Error as e:
-        logger.error(f"Failed to schedule energy transfer: {e}")
         connection.rollback()
-        return False
+        raise RuntimeError(f"Failed to schedule energy transfer: {e}") from e
     finally:
         cursor.close()
         connection.close()
 
 
 @activity.defn
-async def monitor_energy_delivery(trade_id: int, duration: int) -> bool:
-    """Monitor actual energy delivery by checking telemetry data"""
+async def monitor_energy_delivery(trade_id: int, duration: int) -> dict:
+    """
+    Verify actual energy delivery from the seller's telemetry.
+
+    The workflow calls this after the delivery window has ended, so the
+    window is [NOW() - duration hours, NOW()]. Delivered energy is estimated
+    as AVG(power in W) x duration (h) across the seller's assets — the same
+    AVG(power) telemetry pattern used by the DR worker's compliance monitor.
+
+    Returns a dict:
+      delivered: True only if delivered energy >= 90% of the traded energy
+      reason:    'ok' | 'telemetry_unavailable' | 'insufficient_delivery'
+    DB errors raise — they are not 'delivery failed', they are failures.
+    """
     logger.info(f"Monitoring delivery for trade {trade_id}, duration: {duration}h")
-    
+
     connection = get_db_connection()
     cursor = connection.cursor(dictionary=True)
-    
+
     try:
-        # Get trade details
+        # Get trade details (trade_id is the seller's p2p_sell row; userId = seller)
         cursor.execute(
-            "SELECT user_id, counterparty_id, energy FROM trades WHERE id = %s",
+            "SELECT userId, counterpartyId, energy FROM trades WHERE id = %s",
             (trade_id,)
         )
         trade = cursor.fetchone()
-        
+
         if not trade:
-            logger.error(f"Trade {trade_id} not found")
-            return False
-        
-        # In a real implementation, we would:
-        # 1. Query telemetry data for the seller's assets during the delivery window
-        # 2. Verify that the expected energy was exported
-        # 3. Query telemetry data for the buyer's assets to verify receipt
-        # For now, we assume successful delivery after the monitoring period
-        
-        logger.info(f"Energy delivery verified for trade {trade_id}")
-        return True
+            raise ValueError(f"Trade {trade_id} not found for delivery monitoring")
+
+        seller_id = trade['userId']
+        expected_wh = trade['energy'] or 0
+
+        # Average export power (W) across the seller's assets over the window
+        cursor.execute(
+            """SELECT AVG(t.power) AS avg_power, COUNT(*) AS samples
+               FROM telemetry t
+               JOIN assets a ON t.assetId = a.id
+               WHERE a.userId = %s
+                 AND t.timestamp BETWEEN DATE_SUB(NOW(), INTERVAL %s HOUR) AND NOW()""",
+            (seller_id, duration)
+        )
+        row = cursor.fetchone()
+
+        if not row or not row['samples'] or row['avg_power'] is None:
+            logger.warning(f"No telemetry for seller {seller_id} in delivery window of trade {trade_id}")
+            return {
+                'delivered': False,
+                'reason': 'telemetry_unavailable',
+                'delivered_kwh': 0.0,
+                'expected_kwh': expected_wh / 1000.0,
+            }
+
+        delivered_wh = float(row['avg_power']) * duration
+        delivered_kwh = delivered_wh / 1000.0
+        expected_kwh = expected_wh / 1000.0
+        verified = delivered_wh >= 0.9 * expected_wh
+
+        logger.info(
+            f"Trade {trade_id} delivery verification: {delivered_kwh:.2f} kWh delivered "
+            f"vs {expected_kwh:.2f} kWh expected ({row['samples']} samples) -> "
+            f"{'verified' if verified else 'insufficient'}"
+        )
+        return {
+            'delivered': verified,
+            'reason': 'ok' if verified else 'insufficient_delivery',
+            'delivered_kwh': delivered_kwh,
+            'expected_kwh': expected_kwh,
+        }
     except Error as e:
-        logger.error(f"Error monitoring delivery: {e}")
-        return False
+        raise RuntimeError(f"Error monitoring delivery for trade {trade_id}: {e}") from e
     finally:
         cursor.close()
         connection.close()
@@ -444,17 +547,16 @@ async def update_trade_status(trade_id: int, status: str) -> bool:
         
         # Also update any linked trades (buyer/seller counterpart)
         cursor.execute(
-            """UPDATE trades SET status = %s 
-               WHERE JSON_EXTRACT(metadata, '$.linked_trade_id') = %s""",
-            (db_status, trade_id)
+            """UPDATE trades SET status = %s
+               WHERE JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.linked_trade_id')) = %s""",
+            (db_status, str(trade_id))
         )
-        
+
         connection.commit()
         return True
     except Error as e:
-        logger.error(f"Failed to update trade status: {e}")
         connection.rollback()
-        return False
+        raise RuntimeError(f"Failed to update trade {trade_id} status: {e}") from e
     finally:
         cursor.close()
         connection.close()
@@ -485,6 +587,9 @@ class AutomatedTradingWorkflow:
             )
             
             if available_energy == 0:
+                # The query SUCCEEDED and found no tradable energy — a
+                # legitimate no-op. DB errors raise from the activity and are
+                # surfaced via the except branch below, not as 0.0.
                 result.success = True
                 return result
             
@@ -508,8 +613,8 @@ class AutomatedTradingWorkflow:
                     continue
                 
                 # Create trade
-                buyer_id = input.user_id if input.strategy == 'buy_deficit' else order['user_id']
-                seller_id = input.user_id if input.strategy == 'sell_excess' else order['user_id']
+                buyer_id = input.user_id if input.strategy == 'buy_deficit' else order['userId']
+                seller_id = input.user_id if input.strategy == 'sell_excess' else order['userId']
                 
                 trade_id = await workflow.execute_activity(
                     create_trade,
@@ -554,7 +659,8 @@ class P2PTradingWorkflow:
         
         result = P2PTradingResult(success=False)
         trade_id = None
-        
+        escrow_hold_id = None
+
         try:
             # Step 1: Validate seller has energy
             seller_energy = await workflow.execute_activity(
@@ -562,11 +668,11 @@ class P2PTradingWorkflow:
                 args=[input.seller_id, 0],
                 start_to_close_timeout=timedelta(seconds=30),
             )
-            
+
             if seller_energy < input.quantity:
                 result.error = "Seller does not have enough energy"
                 return result
-            
+
             # Step 2: Create trade
             total_amount = int(input.quantity * input.price_per_kwh)
             trade_id = await workflow.execute_activity(
@@ -574,19 +680,20 @@ class P2PTradingWorkflow:
                 args=[input.buyer_id, input.seller_id, input.quantity, input.price_per_kwh],
                 start_to_close_timeout=timedelta(seconds=30),
             )
-            
+
             if not trade_id:
                 result.error = "Failed to create trade"
                 return result
-            
-            # Step 3: Lock buyer funds
-            locked = await workflow.execute_activity(
+
+            # Step 3: Lock buyer funds in an escrow hold (bookkeeping).
+            # Returns the hold's payment row ID; raises on DB failure.
+            escrow_hold_id = await workflow.execute_activity(
                 lock_funds,
-                args=[input.buyer_id, total_amount],
+                args=[input.buyer_id, total_amount, trade_id],
                 start_to_close_timeout=timedelta(seconds=30),
             )
-            
-            if not locked:
+
+            if not escrow_hold_id:
                 result.error = "Failed to lock funds"
                 await workflow.execute_activity(
                     update_trade_status,
@@ -594,56 +701,94 @@ class P2PTradingWorkflow:
                     start_to_close_timeout=timedelta(seconds=30),
                 )
                 return result
-            
+
             # Step 4: Schedule delivery
             await workflow.execute_activity(
                 schedule_energy_transfer,
                 args=[input.seller_id, input.buyer_id, input.quantity, input.delivery_time],
                 start_to_close_timeout=timedelta(seconds=30),
             )
-            
-            # Step 5: Wait for delivery (simplified - in production would wait for actual time)
-            await asyncio.sleep(1)
-            
-            # Step 6: Monitor delivery
-            delivered = await workflow.execute_activity(
+
+            # Step 5: Wait (workflow-safe timer) until the end of the delivery
+            # window: delivery_time + duration hours.
+            try:
+                delivery_start = datetime.fromisoformat(input.delivery_time)
+            except ValueError as e:
+                raise ValueError(f"Invalid delivery_time '{input.delivery_time}': {e}")
+            if delivery_start.tzinfo is None:
+                delivery_start = delivery_start.replace(tzinfo=timezone.utc)
+            delivery_end = delivery_start + timedelta(hours=input.duration)
+            wait_seconds = (delivery_end - workflow.now()).total_seconds()
+            if wait_seconds > 0:
+                logger.info(f"Waiting {wait_seconds:.0f}s until end of delivery window")
+                await workflow.sleep(wait_seconds)
+
+            # Step 6: Verify delivery from seller telemetry
+            delivery = await workflow.execute_activity(
                 monitor_energy_delivery,
                 args=[trade_id, input.duration],
-                start_to_close_timeout=timedelta(minutes=input.duration),
+                start_to_close_timeout=timedelta(hours=input.duration),
             )
-            
-            # Step 7: Settle
+
+            if not delivery.get('delivered'):
+                # Unverified/insufficient delivery: fail the trade, unlock the
+                # escrow hold, and return an error result. Funds are NEVER
+                # released on unverified delivery.
+                reason = delivery.get('reason', 'delivery_not_verified')
+                logger.warning(f"P2P trade {trade_id} delivery not verified: {reason}")
+                await workflow.execute_activity(
+                    update_trade_status,
+                    args=[trade_id, 'failed'],
+                    start_to_close_timeout=timedelta(seconds=30),
+                )
+                await workflow.execute_activity(
+                    cancel_escrow_hold,
+                    args=[escrow_hold_id],
+                    start_to_close_timeout=timedelta(seconds=30),
+                )
+                result.trade_id = trade_id
+                result.error = f"Energy delivery not verified: {reason}"
+                return result
+
+            # Step 7: Settle (delivery verified)
             await workflow.execute_activity(
                 update_trade_status,
                 args=[trade_id, 'completed'],
                 start_to_close_timeout=timedelta(seconds=30),
             )
-            
-            # Step 8: Release funds
+
+            # Step 8: Release the escrow hold by ID (bookkeeping release only;
+            # gateway disbursement is confirmed separately by payments subsystem)
             await workflow.execute_activity(
                 release_funds,
-                args=[input.seller_id, total_amount],
+                args=[escrow_hold_id],
                 start_to_close_timeout=timedelta(seconds=30),
             )
-            
+
             result.success = True
             result.trade_id = trade_id
             result.settlement_amount = total_amount
             logger.info(f"P2P trade completed: {trade_id}")
             return result
-            
+
         except Exception as e:
             logger.error(f"P2P trading error: {e}")
             result.error = str(e)
-            
-            # Compensation: refund
+
+            # Compensation: fail the trade and unlock any held escrow.
             if trade_id:
                 await workflow.execute_activity(
                     update_trade_status,
                     args=[trade_id, 'failed'],
                     start_to_close_timeout=timedelta(seconds=30),
                 )
-            
+            if escrow_hold_id:
+                await workflow.execute_activity(
+                    cancel_escrow_hold,
+                    args=[escrow_hold_id],
+                    start_to_close_timeout=timedelta(seconds=30),
+                )
+
             return result
 
 
@@ -665,6 +810,7 @@ async def main():
             update_order_status,
             lock_funds,
             release_funds,
+            cancel_escrow_hold,
             schedule_energy_transfer,
             monitor_energy_delivery,
             update_trade_status,

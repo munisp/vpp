@@ -1,5 +1,6 @@
 import DashboardLayout from "@/components/DashboardLayout";
 import { useAuth } from "@/_core/hooks/useAuth";
+import { trpc } from "@/lib/trpc";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import {
@@ -13,43 +14,81 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
+import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { AlertTriangle, Bell, Globe, Shield, User, Fingerprint, ArrowRight } from "lucide-react";
-import { useState } from "react";
+import { AlertTriangle, Bell, Mail, Shield, User, Fingerprint, ArrowRight } from "lucide-react";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
+
+type NotificationPrefs = {
+  emailPaymentReceived: boolean;
+  emailTradeExecuted: boolean;
+  emailTradeFailed: boolean;
+  emailSystemAlert: boolean;
+  emailWeeklySummary: boolean;
+  emailMonthlySummary: boolean;
+  pushPaymentReceived: boolean;
+  pushTradeExecuted: boolean;
+  pushTradeFailed: boolean;
+  pushBillingAlert: boolean;
+  pushSystemAlert: boolean;
+  pushDREventReminder: boolean;
+};
 
 export default function Settings() {
   const { user } = useAuth();
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
-  
-  // Mock preferences state
-  const [preferences, setPreferences] = useState({
-    emailNotifications: true,
-    smsNotifications: false,
-    pushNotifications: true,
-    tradingAlerts: true,
-    billingAlerts: true,
-    systemAlerts: true,
-    language: "en",
-    timezone: "Africa/Dar_es_Salaam",
+
+  // Real notification preferences from the server
+  const prefsQuery = trpc.notificationPreferences.get.useQuery();
+  const updatePrefsMutation = trpc.notificationPreferences.update.useMutation({
+    onSuccess: () => {
+      toast.success("Preference updated");
+    },
+    onError: () => {
+      toast.error("Failed to update preference");
+    },
   });
 
-  const handlePreferenceChange = (key: string, value: boolean | string) => {
+  const [preferences, setPreferences] = useState<NotificationPrefs | null>(null);
+
+  useEffect(() => {
+    if (prefsQuery.data) {
+      const d = prefsQuery.data;
+      setPreferences({
+        emailPaymentReceived: d.emailPaymentReceived,
+        emailTradeExecuted: d.emailTradeExecuted,
+        emailTradeFailed: d.emailTradeFailed,
+        emailSystemAlert: d.emailSystemAlert,
+        emailWeeklySummary: d.emailWeeklySummary,
+        emailMonthlySummary: d.emailMonthlySummary,
+        pushPaymentReceived: d.pushPaymentReceived,
+        pushTradeExecuted: d.pushTradeExecuted,
+        pushTradeFailed: d.pushTradeFailed,
+        pushBillingAlert: d.pushBillingAlert,
+        pushSystemAlert: d.pushSystemAlert,
+        pushDREventReminder: d.pushDREventReminder,
+      });
+    }
+  }, [prefsQuery.data]);
+
+  const handlePreferenceChange = async (key: keyof NotificationPrefs, value: boolean) => {
+    if (!preferences) return;
     setPreferences({ ...preferences, [key]: value });
-    toast.success("Preference updated");
+    try {
+      await updatePrefsMutation.mutateAsync({ [key]: value });
+    } catch {
+      // Revert on failure
+      setPreferences({ ...preferences, [key]: !value });
+    }
   };
 
   const handleDeleteAccount = () => {
-    toast.error("Account deletion is not available in demo mode");
     setIsDeleteDialogOpen(false);
+    toast.info("Account deletion is handled by our support team", {
+      description: "Please contact support to permanently delete your account and data.",
+    });
   };
 
   return (
@@ -119,246 +158,113 @@ export default function Settings() {
               </CardContent>
             </Card>
 
-            <Card>
-              <CardHeader>
-                <CardTitle>Contract Information</CardTitle>
-                <CardDescription>
-                  Your VPP membership and contract details
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                <div className="grid gap-4">
-                  <div className="flex justify-between items-center">
-                    <div>
-                      <p className="font-medium">Contract Type</p>
-                      <p className="text-sm text-muted-foreground">Postpaid - 70/30 Revenue Share</p>
-                    </div>
-                    <span className="px-3 py-1 bg-green-100 text-green-700 rounded-full text-sm font-medium">
-                      Active
-                    </span>
-                  </div>
-
-                  <div className="flex justify-between items-center">
-                    <div>
-                      <p className="font-medium">Member Since</p>
-                      <p className="text-sm text-muted-foreground">
-                        {user?.createdAt ? new Date(user.createdAt).toLocaleDateString() : "N/A"}
-                      </p>
-                    </div>
-                  </div>
-
-                  <div className="flex justify-between items-center">
-                    <div>
-                      <p className="font-medium">Revenue Share</p>
-                      <p className="text-sm text-muted-foreground">You receive 70% of trading revenue</p>
-                    </div>
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
           </TabsContent>
 
           <TabsContent value="notifications" className="space-y-4">
-            <Card>
-              <CardHeader>
-                <CardTitle>Notification Channels</CardTitle>
-                <CardDescription>
-                  Choose how you want to receive notifications
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-6">
-                <div className="flex items-center justify-between">
-                  <div className="space-y-0.5">
-                    <Label className="flex items-center gap-2">
-                      <Bell className="h-4 w-4" />
-                      Email Notifications
-                    </Label>
-                    <p className="text-sm text-muted-foreground">
-                      Receive notifications via email
-                    </p>
-                  </div>
-                  <Switch
-                    checked={preferences.emailNotifications}
-                    onCheckedChange={(checked) => handlePreferenceChange("emailNotifications", checked)}
-                  />
-                </div>
+            {prefsQuery.isLoading ? (
+              <Card>
+                <CardContent className="space-y-4 pt-6">
+                  {[1, 2, 3, 4].map((i) => (
+                    <Skeleton key={i} className="h-10 w-full" />
+                  ))}
+                </CardContent>
+              </Card>
+            ) : prefsQuery.isError || !preferences ? (
+              <Card>
+                <CardContent className="py-12 text-center">
+                  <Bell className="h-10 w-10 text-muted-foreground mx-auto mb-3" />
+                  <p className="text-sm text-muted-foreground">
+                    Notification preferences are unavailable right now. Please try again later.
+                  </p>
+                </CardContent>
+              </Card>
+            ) : (
+              <>
+                <Card>
+                  <CardHeader>
+                    <CardTitle>Email Notifications</CardTitle>
+                    <CardDescription>
+                      Choose which emails you want to receive
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent className="space-y-6">
+                    {([
+                      ["emailPaymentReceived", "Payment Received", "Email when a payment is received or confirmed"],
+                      ["emailTradeExecuted", "Trade Executed", "Email when one of your trades is executed"],
+                      ["emailTradeFailed", "Trade Failed", "Email when one of your trades fails"],
+                      ["emailSystemAlert", "System Alerts", "Emails about system status and maintenance"],
+                      ["emailWeeklySummary", "Weekly Summary", "A weekly summary of your activity"],
+                      ["emailMonthlySummary", "Monthly Summary", "A monthly summary of your activity"],
+                    ] as const).map(([key, label, description]) => (
+                      <div key={key} className="flex items-center justify-between">
+                        <div className="space-y-0.5">
+                          <Label className="flex items-center gap-2">
+                            <Mail className="h-4 w-4" />
+                            {label}
+                          </Label>
+                          <p className="text-sm text-muted-foreground">{description}</p>
+                        </div>
+                        <Switch
+                          checked={preferences[key]}
+                          onCheckedChange={(checked) => handlePreferenceChange(key, checked)}
+                          disabled={updatePrefsMutation.isPending}
+                        />
+                      </div>
+                    ))}
+                  </CardContent>
+                </Card>
 
-                <div className="flex items-center justify-between">
-                  <div className="space-y-0.5">
-                    <Label className="flex items-center gap-2">
-                      <Bell className="h-4 w-4" />
-                      SMS Notifications
-                    </Label>
-                    <p className="text-sm text-muted-foreground">
-                      Receive notifications via SMS
-                    </p>
-                  </div>
-                  <Switch
-                    checked={preferences.smsNotifications}
-                    onCheckedChange={(checked) => handlePreferenceChange("smsNotifications", checked)}
-                  />
-                </div>
-
-                <div className="flex items-center justify-between">
-                  <div className="space-y-0.5">
-                    <Label className="flex items-center gap-2">
-                      <Bell className="h-4 w-4" />
-                      Push Notifications
-                    </Label>
-                    <p className="text-sm text-muted-foreground">
-                      Receive push notifications in browser
-                    </p>
-                  </div>
-                  <Switch
-                    checked={preferences.pushNotifications}
-                    onCheckedChange={(checked) => handlePreferenceChange("pushNotifications", checked)}
-                  />
-                </div>
-              </CardContent>
-            </Card>
-
-            <Card>
-              <CardHeader>
-                <CardTitle>Alert Preferences</CardTitle>
-                <CardDescription>
-                  Choose which types of alerts you want to receive
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-6">
-                <div className="flex items-center justify-between">
-                  <div className="space-y-0.5">
-                    <Label>Trading Alerts</Label>
-                    <p className="text-sm text-muted-foreground">
-                      Notifications about trading activities and opportunities
-                    </p>
-                  </div>
-                  <Switch
-                    checked={preferences.tradingAlerts}
-                    onCheckedChange={(checked) => handlePreferenceChange("tradingAlerts", checked)}
-                  />
-                </div>
-
-                <div className="flex items-center justify-between">
-                  <div className="space-y-0.5">
-                    <Label>Billing Alerts</Label>
-                    <p className="text-sm text-muted-foreground">
-                      Notifications about invoices and payments
-                    </p>
-                  </div>
-                  <Switch
-                    checked={preferences.billingAlerts}
-                    onCheckedChange={(checked) => handlePreferenceChange("billingAlerts", checked)}
-                  />
-                </div>
-
-                <div className="flex items-center justify-between">
-                  <div className="space-y-0.5">
-                    <Label>System Alerts</Label>
-                    <p className="text-sm text-muted-foreground">
-                      Notifications about system status and maintenance
-                    </p>
-                  </div>
-                  <Switch
-                    checked={preferences.systemAlerts}
-                    onCheckedChange={(checked) => handlePreferenceChange("systemAlerts", checked)}
-                  />
-                </div>
-              </CardContent>
-            </Card>
+                <Card>
+                  <CardHeader>
+                    <CardTitle>Push Notifications</CardTitle>
+                    <CardDescription>
+                      Choose which push notifications you want to receive
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent className="space-y-6">
+                    {([
+                      ["pushPaymentReceived", "Payment Received", "Push notification when a payment is received"],
+                      ["pushTradeExecuted", "Trade Executed", "Push notification when a trade is executed"],
+                      ["pushTradeFailed", "Trade Failed", "Push notification when a trade fails"],
+                      ["pushBillingAlert", "Billing Alerts", "Push notifications about invoices and payments"],
+                      ["pushSystemAlert", "System Alerts", "Push notifications about system status"],
+                      ["pushDREventReminder", "DR Event Reminders", "Reminders about upcoming demand-response events"],
+                    ] as const).map(([key, label, description]) => (
+                      <div key={key} className="flex items-center justify-between">
+                        <div className="space-y-0.5">
+                          <Label className="flex items-center gap-2">
+                            <Bell className="h-4 w-4" />
+                            {label}
+                          </Label>
+                          <p className="text-sm text-muted-foreground">{description}</p>
+                        </div>
+                        <Switch
+                          checked={preferences[key]}
+                          onCheckedChange={(checked) => handlePreferenceChange(key, checked)}
+                          disabled={updatePrefsMutation.isPending}
+                        />
+                      </div>
+                    ))}
+                  </CardContent>
+                </Card>
+              </>
+            )}
           </TabsContent>
 
           <TabsContent value="preferences" className="space-y-4">
             <Card>
               <CardHeader>
-                <CardTitle>Regional Settings</CardTitle>
+                <CardTitle>Regional & Display Settings</CardTitle>
                 <CardDescription>
-                  Customize your language and timezone preferences
+                  Language, timezone, currency, and unit preferences
                 </CardDescription>
               </CardHeader>
-              <CardContent className="space-y-6">
-                <div className="grid gap-2">
-                  <Label className="flex items-center gap-2">
-                    <Globe className="h-4 w-4" />
-                    Language
-                  </Label>
-                  <Select
-                    value={preferences.language}
-                    onValueChange={(value) => handlePreferenceChange("language", value)}
-                  >
-                    <SelectTrigger>
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="en">English</SelectItem>
-                      <SelectItem value="ha">Hausa</SelectItem>
-                      <SelectItem value="yo">Yoruba</SelectItem>
-                      <SelectItem value="ig">Igbo</SelectItem>
-                      <SelectItem value="sw">Swahili</SelectItem>
-                    </SelectContent>
-                  </Select>
-                  <p className="text-xs text-muted-foreground">
-                    Choose your preferred language for the interface
-                  </p>
-                </div>
-
-                <div className="grid gap-2">
-                  <Label>Timezone</Label>
-                  <Select
-                    value={preferences.timezone}
-                    onValueChange={(value) => handlePreferenceChange("timezone", value)}
-                  >
-                    <SelectTrigger>
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="Africa/Lagos">Africa/Lagos (WAT)</SelectItem>
-                      <SelectItem value="Africa/Dar_es_Salaam">Africa/Dar es Salaam (EAT)</SelectItem>
-                      <SelectItem value="Africa/Nairobi">Africa/Nairobi (EAT)</SelectItem>
-                      <SelectItem value="Africa/Johannesburg">Africa/Johannesburg (SAST)</SelectItem>
-                    </SelectContent>
-                  </Select>
-                  <p className="text-xs text-muted-foreground">
-                    All times will be displayed in this timezone
-                  </p>
-                </div>
-              </CardContent>
-            </Card>
-
-            <Card>
-              <CardHeader>
-                <CardTitle>Display Settings</CardTitle>
-                <CardDescription>
-                  Customize how information is displayed
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-6">
-                <div className="grid gap-2">
-                  <Label>Currency Display</Label>
-                  <Select defaultValue="TZS">
-                    <SelectTrigger>
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="TZS">Tanzanian Shilling (TZS)</SelectItem>
-                      <SelectItem value="NGN">Nigerian Naira (NGN)</SelectItem>
-                      <SelectItem value="USD">US Dollar (USD)</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-
-                <div className="grid gap-2">
-                  <Label>Energy Units</Label>
-                  <Select defaultValue="kwh">
-                    <SelectTrigger>
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="kwh">Kilowatt-hours (kWh)</SelectItem>
-                      <SelectItem value="wh">Watt-hours (Wh)</SelectItem>
-                      <SelectItem value="mwh">Megawatt-hours (MWh)</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
+              <CardContent className="py-8 text-center">
+                <p className="text-sm text-muted-foreground">
+                  These preferences are not yet connected to your account. Language,
+                  timezone, currency, and unit settings cannot be changed here at
+                  this time.
+                </p>
               </CardContent>
             </Card>
           </TabsContent>
@@ -445,24 +351,24 @@ export default function Settings() {
                       </DialogTrigger>
                       <DialogContent>
                         <DialogHeader>
-                          <DialogTitle>Are you absolutely sure?</DialogTitle>
+                          <DialogTitle>Delete your account?</DialogTitle>
                           <DialogDescription>
-                            This action cannot be undone. This will permanently delete your account and
-                            remove all your data from our servers.
+                            Account deletion is permanent and removes your profile, assets,
+                            and all associated data.
                           </DialogDescription>
                         </DialogHeader>
                         <div className="py-4">
                           <p className="text-sm text-muted-foreground">
-                            To confirm, type <strong>DELETE</strong> in the box below:
+                            Self-service account deletion is not available. Our support team
+                            handles verified deletion requests to protect your data.
                           </p>
-                          <Input placeholder="DELETE" className="mt-2" />
                         </div>
                         <DialogFooter>
                           <Button variant="outline" onClick={() => setIsDeleteDialogOpen(false)}>
                             Cancel
                           </Button>
                           <Button variant="destructive" onClick={handleDeleteAccount}>
-                            Delete Account
+                            Contact Support
                           </Button>
                         </DialogFooter>
                       </DialogContent>

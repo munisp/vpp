@@ -7,6 +7,8 @@ require (
 	github.com/confluentinc/confluent-kafka-go/v2 v2.3.0
 	github.com/dapr/go-sdk v1.9.1
 	github.com/go-redis/redis/v8 v8.11.5
+	github.com/go-sql-driver/mysql v1.8.1
+	github.com/prometheus/client_golang v1.18.0
 	github.com/tigerbeetle/tigerbeetle-go v0.15.3
 	google.golang.org/grpc v1.60.1
 	google.golang.org/protobuf v1.32.0

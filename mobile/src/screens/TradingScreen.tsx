@@ -21,17 +21,31 @@ export default function TradingScreen() {
   const [quantity, setQuantity] = useState('');
   const [price, setPrice] = useState('');
 
-  const { data: preferences } = trpc.trading.getPreferences.useQuery();
-  const { data: trades } = trpc.trading.getTrades.useQuery({ status: 'active' });
-  const { data: earnings } = trpc.trading.getEarnings.useQuery();
-  const { data: marketPrices } = trpc.trading.getMarketPrices.useQuery();
+  const utils = trpc.useUtils();
 
-  const createTradeMutation = trpc.trading.createTrade.useMutation({
+  const { data: preferences } = trpc.trading.getPreferences.useQuery();
+  const { data: tradesData } = trpc.trading.list.useQuery({ limit: 50 });
+  const {
+    data: earnings,
+    isLoading: earningsLoading,
+    isError: earningsError,
+  } = trpc.trading.getEarnings.useQuery();
+  const {
+    data: marketPrices,
+    isLoading: pricesLoading,
+    isError: pricesError,
+    dataUpdatedAt: pricesUpdatedAt,
+  } = trpc.trading.getMarketPrices.useQuery();
+
+  const trades = tradesData?.trades;
+
+  const createTradeMutation = trpc.trading.create.useMutation({
     onSuccess: async () => {
       await HapticService.tradeExecuted();
       Alert.alert('Success', 'Trade created successfully');
       setQuantity('');
       setPrice('');
+      utils.trading.list.invalidate();
     },
     onError: async (error) => {
       await HapticService.error();
@@ -46,15 +60,55 @@ export default function TradingScreen() {
       return;
     }
 
+    const quantityNum = parseFloat(quantity);
+    const priceNum = parseFloat(price);
+    if (isNaN(quantityNum) || quantityNum <= 0 || isNaN(priceNum) || priceNum <= 0) {
+      Alert.alert('Error', 'Please enter a valid quantity and price');
+      return;
+    }
+
     await HapticService.buttonPress();
+    // Server input (server/routers/trading.ts -> create): energy in integer
+    // watt-hours, price in integer cents per kWh. Manual user-initiated
+    // trades map to export (sell) / import (buy) in manual mode.
     createTradeMutation.mutate({
-      type: activeTab,
-      quantity: parseInt(quantity),
-      price: parseInt(price),
+      tradeType: activeTab === 'sell' ? 'export' : 'import',
+      tradingMode: 'manual',
+      energy: Math.round(quantityNum * 1000), // kWh -> Wh
+      price: Math.round(priceNum * 100), // TZS -> cents per kWh
     });
   };
 
-  const currentMarketPrice = marketPrices?.[0]?.price || 0;
+  // Server returns the latest market price per price type
+  // (server/routers/trading.ts -> getMarketPrices), price in cents per kWh.
+  const currentMarketPrice =
+    marketPrices && marketPrices.length > 0 ? marketPrices[0].price : null;
+
+  // Only compute a price change when two data points of the same price type
+  // actually exist; otherwise omit the badge instead of fabricating one.
+  const priceChangePercent = (() => {
+    if (!marketPrices) return null;
+    const byType = new Map<string, typeof marketPrices>();
+    for (const row of marketPrices) {
+      const list = byType.get(row.priceType) ?? [];
+      list.push(row);
+      byType.set(row.priceType, list);
+    }
+    for (const list of byType.values()) {
+      if (list.length >= 2) {
+        const sorted = [...list].sort(
+          (a, b) =>
+            new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+        );
+        const prev = sorted[sorted.length - 2].price;
+        const latest = sorted[sorted.length - 1].price;
+        if (prev > 0) {
+          return ((latest - prev) / prev) * 100;
+        }
+      }
+    }
+    return null;
+  })();
 
   return (
     <ScrollView style={styles.container}>
@@ -73,19 +127,30 @@ export default function TradingScreen() {
             <ShareButton
               variant="icon"
               size="small"
-              onPress={() => ShareService.shareTradingOpportunity(
-                activeTab,
-                parseInt(quantity) || 10,
-                parseInt(price) || currentMarketPrice
-              )}
+              onPress={() =>
+                ShareService.shareTradingOpportunity(
+                  activeTab,
+                  parseFloat(quantity) || 0,
+                  // ShareService expects the price in cents per kWh.
+                  price
+                    ? Math.round(parseFloat(price) * 100)
+                    : currentMarketPrice ?? 0
+                )
+              }
             />
           </View>
         </View>
         <View style={styles.earningsCard}>
-          <Text style={styles.earningsLabel}>Total Earnings</Text>
-          <Text style={styles.earningsValue}>
-            {((earnings?.totalEarnings || 0) / 100).toFixed(0)} TZS
-          </Text>
+          <Text style={styles.earningsLabel}>Net Earnings</Text>
+          {earningsLoading ? (
+            <Text style={styles.earningsValue}>…</Text>
+          ) : earningsError || !earnings ? (
+            <Text style={styles.earningsUnavailable}>Unavailable</Text>
+          ) : (
+            <Text style={styles.earningsValue}>
+              {(earnings.netCents / 100).toFixed(0)} TZS
+            </Text>
+          )}
         </View>
       </View>
 
@@ -93,14 +158,31 @@ export default function TradingScreen() {
       <View style={styles.marketCard}>
         <View style={styles.marketHeader}>
           <Text style={styles.marketTitle}>Current Market Price</Text>
-          <View style={styles.priceChange}>
-            <Text style={styles.priceChangeText}>+2.5%</Text>
-          </View>
+          {priceChangePercent !== null && (
+            <View style={styles.priceChange}>
+              <Text style={styles.priceChangeText}>
+                {priceChangePercent >= 0 ? '+' : ''}
+                {priceChangePercent.toFixed(1)}%
+              </Text>
+            </View>
+          )}
         </View>
-        <Text style={styles.marketPrice}>
-          {(currentMarketPrice / 100).toFixed(2)} TZS/kWh
-        </Text>
-        <Text style={styles.marketSubtext}>Last updated: Just now</Text>
+        {pricesLoading ? (
+          <Text style={styles.marketPrice}>Loading…</Text>
+        ) : pricesError || currentMarketPrice === null ? (
+          <Text style={styles.marketUnavailable}>
+            Market price unavailable
+          </Text>
+        ) : (
+          <Text style={styles.marketPrice}>
+            {(currentMarketPrice / 100).toFixed(2)} TZS/kWh
+          </Text>
+        )}
+        {!pricesLoading && !pricesError && (
+          <Text style={styles.marketSubtext}>
+            Last updated: {new Date(pricesUpdatedAt).toLocaleString()}
+          </Text>
+        )}
       </View>
 
       {/* Trade Form */}
@@ -155,9 +237,11 @@ export default function TradingScreen() {
               onChangeText={setPrice}
               keyboardType="numeric"
             />
-            <Text style={styles.inputHint}>
-              Market price: {(currentMarketPrice / 100).toFixed(2)} TZS/kWh
-            </Text>
+            {currentMarketPrice !== null && (
+              <Text style={styles.inputHint}>
+                Market price: {(currentMarketPrice / 100).toFixed(2)} TZS/kWh
+              </Text>
+            )}
           </View>
 
           <View style={styles.summary}>
@@ -186,31 +270,39 @@ export default function TradingScreen() {
         </View>
       </View>
 
-      {/* Active Trades */}
+      {/* Trades */}
       {trades && trades.length > 0 && (
         <View style={styles.tradesCard}>
-          <Text style={styles.sectionTitle}>Active Trades</Text>
+          <Text style={styles.sectionTitle}>Your Trades</Text>
           {trades.map((trade) => (
             <TradeItem key={trade.id} trade={trade} />
           ))}
         </View>
       )}
 
-      {/* Trading Preferences */}
+      {/* Trading Preferences (real fields from trading.getPreferences) */}
       {preferences && (
         <View style={styles.preferencesCard}>
           <Text style={styles.sectionTitle}>Your Preferences</Text>
           <PreferenceItem
-            label="Auto-sell enabled"
-            value={preferences.autoSellEnabled ? 'Yes' : 'No'}
+            label="Trading mode"
+            value={preferences.tradingMode}
           />
+          {'minExportPrice' in preferences && preferences.minExportPrice != null && (
+            <PreferenceItem
+              label="Min export price"
+              value={`${(preferences.minExportPrice / 100).toFixed(2)} TZS/kWh`}
+            />
+          )}
+          {'maxImportPrice' in preferences && preferences.maxImportPrice != null && (
+            <PreferenceItem
+              label="Max import price"
+              value={`${(preferences.maxImportPrice / 100).toFixed(2)} TZS/kWh`}
+            />
+          )}
           <PreferenceItem
-            label="Min sell price"
-            value={`${(preferences.minSellPrice / 100).toFixed(2)} TZS/kWh`}
-          />
-          <PreferenceItem
-            label="Max buy price"
-            value={`${(preferences.maxBuyPrice / 100).toFixed(2)} TZS/kWh`}
+            label="P2P trading"
+            value={preferences.enableP2P ? 'Enabled' : 'Disabled'}
           />
         </View>
       )}
@@ -219,6 +311,9 @@ export default function TradingScreen() {
 }
 
 function TradeItem({ trade }: { trade: any }) {
+  // trades rows: tradeType 'export' | 'import' | 'p2p_sell' | 'p2p_buy',
+  // energy in Wh, price in cents/kWh, totalAmount in cents.
+  const isSell = trade.tradeType === 'export' || trade.tradeType === 'p2p_sell';
   return (
     <View style={styles.tradeItem}>
       <View style={styles.tradeHeader}>
@@ -226,18 +321,17 @@ function TradeItem({ trade }: { trade: any }) {
           style={[
             styles.tradeType,
             {
-              backgroundColor:
-                trade.type === 'sell' ? '#d1fae5' : '#dbeafe',
+              backgroundColor: isSell ? '#d1fae5' : '#dbeafe',
             },
           ]}
         >
           <Text
             style={[
               styles.tradeTypeText,
-              { color: trade.type === 'sell' ? '#065f46' : '#1e40af' },
+              { color: isSell ? '#065f46' : '#1e40af' },
             ]}
           >
-            {trade.type.toUpperCase()}
+            {isSell ? 'SELL' : 'BUY'}
           </Text>
         </View>
         <View
@@ -245,7 +339,7 @@ function TradeItem({ trade }: { trade: any }) {
             styles.tradeStatus,
             {
               backgroundColor:
-                trade.status === 'active' ? '#fef3c7' : '#d1fae5',
+                trade.status === 'pending' ? '#fef3c7' : '#d1fae5',
             },
           ]}
         >
@@ -254,7 +348,7 @@ function TradeItem({ trade }: { trade: any }) {
               styles.tradeStatusText,
               {
                 color:
-                  trade.status === 'active' ? '#92400e' : '#065f46',
+                  trade.status === 'pending' ? '#92400e' : '#065f46',
               },
             ]}
           >
@@ -263,13 +357,15 @@ function TradeItem({ trade }: { trade: any }) {
         </View>
       </View>
       <View style={styles.tradeDetails}>
-        <Text style={styles.tradeQuantity}>{trade.quantity} kWh</Text>
+        <Text style={styles.tradeQuantity}>
+          {(trade.energy / 1000).toFixed(2)} kWh
+        </Text>
         <Text style={styles.tradePrice}>
           @ {(trade.price / 100).toFixed(2)} TZS/kWh
         </Text>
       </View>
       <Text style={styles.tradeTotal}>
-        Total: {((trade.quantity * trade.price) / 100).toFixed(0)} TZS
+        Total: {(trade.totalAmount / 100).toFixed(0)} TZS
       </Text>
     </View>
   );
@@ -339,6 +435,11 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
     color: '#fff',
   },
+  earningsUnavailable: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#d1fae5',
+  },
   marketCard: {
     backgroundColor: '#fff',
     margin: 16,
@@ -375,6 +476,12 @@ const styles = StyleSheet.create({
     fontSize: 32,
     fontWeight: 'bold',
     color: '#111827',
+    marginBottom: 4,
+  },
+  marketUnavailable: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#6b7280',
     marginBottom: 4,
   },
   marketSubtext: {

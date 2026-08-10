@@ -55,10 +55,19 @@ for i := 0; i < int(eventDuration.Minutes()/5); i++ {
 ticker.Get(ctx, nil)
 
 var consumption float64
-workflow.ExecuteActivity(ctx, "GetCurrentConsumptionActivity", userID).Get(ctx, &consumption)
+err = workflow.ExecuteActivity(ctx, "GetCurrentConsumptionActivity", userID).Get(ctx, &consumption)
+if err != nil {
+// Do not publish a zero/fabricated consumption value.
+logger.Warn("Consumption unavailable; skipping telemetry publish for this interval", "error", err)
+ticker = workflow.NewTimer(ctx, 5*time.Minute)
+continue
+}
 
 // Publish telemetry to Fluvio
-workflow.ExecuteActivity(ctx, "PublishFluvioTelemetryActivity", userID, consumption).Get(ctx, nil)
+err = workflow.ExecuteActivity(ctx, "PublishFluvioTelemetryActivity", userID, consumption).Get(ctx, nil)
+if err != nil {
+logger.Warn("Failed to publish telemetry", "error", err)
+}
 
 ticker = workflow.NewTimer(ctx, 5*time.Minute)
 }

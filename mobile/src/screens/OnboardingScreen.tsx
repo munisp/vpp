@@ -37,7 +37,7 @@ const STEPS = [
   {
     id: 4,
     title: 'Complete Your Profile',
-    description: 'You're all set! Start earning from your energy today.',
+    description: "You're all set! Start earning from your energy today.",
     icon: 'checkmark-circle',
   },
 ];
@@ -46,7 +46,7 @@ export default function OnboardingScreen({ navigation }: any) {
   const [currentStep, setCurrentStep] = useState(0);
   const flatListRef = useRef<FlatList>(null);
 
-  const createAsset = trpc.assets.create.useMutation();
+  const registerAsset = trpc.assets.register.useMutation();
   const updateOnboarding = trpc.onboarding.updateStep.useMutation();
   const completeOnboarding = trpc.onboarding.complete.useMutation();
 
@@ -75,10 +75,12 @@ export default function OnboardingScreen({ navigation }: any) {
       }
 
       try {
-        await createAsset.mutateAsync({
+        await registerAsset.mutateAsync({
           name: assetForm.name,
-          type: assetForm.type,
-          capacity: parseFloat(assetForm.capacity),
+          // assets.register accepts 'solar' | 'battery' | ... (not 'solar_panel')
+          assetType: assetForm.type === 'solar_panel' ? 'solar' : 'battery',
+          // capacity is a positive integer in Wh
+          capacity: Math.round(parseFloat(assetForm.capacity)),
           make: assetForm.make || undefined,
           model: assetForm.model || undefined,
         });
@@ -198,7 +200,7 @@ export default function OnboardingScreen({ navigation }: any) {
         <TouchableOpacity
           style={[styles.button, styles.buttonPrimary]}
           onPress={handleNext}
-          disabled={createAsset.isLoading || updateOnboarding.isLoading || completeOnboarding.isLoading}
+          disabled={registerAsset.isLoading || updateOnboarding.isLoading || completeOnboarding.isLoading}
         >
           <Text style={styles.buttonText}>
             {currentStep === 3 ? 'Complete' : 'Continue'}

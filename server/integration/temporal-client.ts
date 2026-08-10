@@ -7,6 +7,8 @@ export interface PaymentWorkflowInput {
   amount: number;
   currency: string;
   gateway: string;
+  phoneNumber?: string;
+  billingId?: number;
   metadata?: Record<string, any>;
 }
 

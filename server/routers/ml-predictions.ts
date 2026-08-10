@@ -2,8 +2,8 @@ import { z } from 'zod';
 import { protectedProcedure, router } from '../_core/trpc';
 import { pricePredictionService } from '../ml/price-prediction';
 import { getDb } from '../db';
-import { assets } from '../../drizzle/schema';
-import { eq } from 'drizzle-orm';
+import { assets, marketPrices } from '../../drizzle/schema';
+import { desc, eq } from 'drizzle-orm';
 
 export const mlPredictionsRouter = router({
   /**
@@ -14,6 +14,8 @@ export const mlPredictionsRouter = router({
       hoursAhead: z.number().min(1).max(168).default(24),
     }).optional())
     .query(async ({ input }) => {
+      // Empty array = model untrained (insufficient data); never fabricated
+      // intercept-based predictions. Callers can check getModelMetrics.trained.
       const predictions = await pricePredictionService.predictPrices(input?.hoursAhead || 24);
       return predictions;
     }),
@@ -172,36 +174,58 @@ export const mlPredictionsRouter = router({
       // Calculate total capacity
       const totalCapacity = userAssets.reduce((sum, asset) => sum + asset.capacity, 0);
 
-      // Find peak price
-      const peakPrice = Math.max(...predictions.map(p => p.predictedPrice));
-      const currentPrice = 45; // Mock current price
+      // Find peak price — null when the model returned no predictions
+      // (untrained / insufficient data), never -Infinity from Math.max(...[]).
+      const peakPrice = predictions.length > 0
+        ? Math.max(...predictions.map(p => p.predictedPrice))
+        : null;
 
-      // Calculate potential revenue
-      const totalPotentialRevenue = totalCapacity * (peakPrice - currentPrice) / 100;
+      // Latest real market price from the marketPrices table. If no market
+      // price has been recorded yet, omit the revenue opportunity insight
+      // rather than fabricating a price.
+      const latestPriceRows = await db
+        .select()
+        .from(marketPrices)
+        .orderBy(desc(marketPrices.timestamp))
+        .limit(1);
+      const currentPrice = latestPriceRows.length > 0 ? latestPriceRows[0].price : null;
+
+      // Calculate potential revenue (only when a real current price AND a
+      // real model peak price exist)
+      const totalPotentialRevenue = currentPrice !== null && peakPrice !== null
+        ? totalCapacity * (peakPrice - currentPrice) / 100
+        : 0;
 
       const insights = [
-        {
-          type: 'opportunity',
-          message: `Peak price expected at ${peakPrice}¢/kWh today. Potential revenue: ${totalPotentialRevenue.toFixed(2)} TZS`,
-          priority: 'high',
-        },
+        ...(currentPrice !== null && peakPrice !== null
+          ? [{
+              type: 'opportunity',
+              message: `Peak price expected at ${peakPrice}¢/kWh today. Potential revenue: ${totalPotentialRevenue.toFixed(2)} TZS`,
+              priority: 'high',
+            }]
+          : []),
         {
           type: 'pattern',
           message: `Best trading days: ${analysis.bestTradingDays.join(', ')}`,
           priority: 'medium',
         },
-        {
-          type: 'optimization',
-          message: `Average price volatility: ${analysis.priceVolatility}%. Consider automated trading.`,
-          priority: 'low',
-        },
+        // Only report volatility when it was computed from real history.
+        ...(analysis.priceVolatility !== null
+          ? [{
+              type: 'optimization',
+              message: `Average price volatility: ${analysis.priceVolatility}%. Consider automated trading.`,
+              priority: 'low',
+            }]
+          : []),
       ];
 
       const recommendedActions = [
-        {
-          action: 'Enable automated trading during peak hours',
-          expectedBenefit: `+${(totalPotentialRevenue * 0.8).toFixed(2)} TZS/day`,
-        },
+        ...(currentPrice !== null && peakPrice !== null
+          ? [{
+              action: 'Enable automated trading during peak hours',
+              expectedBenefit: `+${(totalPotentialRevenue * 0.8).toFixed(2)} TZS/day`,
+            }]
+          : []),
         {
           action: 'Charge batteries during off-peak hours (midnight-5 AM)',
           expectedBenefit: `Save ${(totalCapacity * 0.15).toFixed(2)} TZS/day`,

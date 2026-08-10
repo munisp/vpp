@@ -46,6 +46,7 @@ import { workflowsRouter } from './routers/workflows';
 import { gridOperatorRouter } from './routers/grid-operator';
 import { iotDevicesRouter } from './routers/iot-devices';
 import { mlPredictionsRouter } from './routers/ml-predictions';
+import { p2pTradingRouter } from './routers/p2p-trading';
 
 // Next-gen VPP routers
 import {
@@ -106,6 +107,7 @@ export const appRouter = router({
   assets: assetsRouter,
   telemetry: telemetryRouter,
   trading: tradingRouter,
+  p2pTrading: p2pTradingRouter,
   billing: billingRouter,
   payments: paymentsRouter,
   alerts: alertsRouter,

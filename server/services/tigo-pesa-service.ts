@@ -5,6 +5,8 @@
  * API Documentation: https://developer.tigo.com/
  */
 
+import { randomBytes } from 'crypto';
+
 export interface TigoPesaConfig {
   username: string;
   password: string;
@@ -69,7 +71,7 @@ class TigoPesaService {
         phoneNumber = phoneNumber.substring(3);
       }
 
-      const referenceId = `TXN-${Date.now()}-${Math.random().toString(36).substring(7)}`;
+      const referenceId = `TXN-${Date.now()}-${randomBytes(8).toString('hex')}`;
 
       const payload = {
         MasterMerchant: {

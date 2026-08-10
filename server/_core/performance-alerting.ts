@@ -6,6 +6,9 @@
 
 import { performanceMonitor } from './performance-monitoring';
 import { notifyOwner } from './notification';
+import { getDb } from '../db';
+import { alerts as alertsTable, users } from '../../drizzle/schema';
+import { desc, eq } from 'drizzle-orm';
 
 export interface AlertThreshold {
   metric: 'api' | 'database' | 'external_api' | 'workflow';
@@ -262,11 +265,16 @@ class PerformanceAlertingSystem {
       acknowledged: false,
     };
 
-    // Store alert
+    // Store alert in memory
     this.state.activeAlerts.set(alertKey, alert);
     this.state.lastAlertTime.set(alertKey, new Date());
 
     console.warn('[Alerting] Alert triggered:', alert.message);
+
+    // Persist alert lifecycle (fire-and-forget; failures are logged loudly)
+    this.persistAlertEvent(alert, 'triggered').catch((error) =>
+      console.error('[Alerting] Failed to persist triggered alert:', error)
+    );
 
     // Send notifications
     await this.sendAlertNotifications(alert);
@@ -280,7 +288,64 @@ class PerformanceAlertingSystem {
     if (alert) {
       console.log('[Alerting] Alert cleared:', alert.message);
       this.state.activeAlerts.delete(alertKey);
+
+      // Persist the clear event so history reflects the full lifecycle
+      this.persistAlertEvent(alert, 'cleared').catch((error) =>
+        console.error('[Alerting] Failed to persist cleared alert:', error)
+      );
     }
+  }
+
+  /**
+   * Persist an alert lifecycle event into the alerts table.
+   *
+   * Performance alerts are system-wide, so one history row is written per
+   * admin user. The alert rule and event details are stored in the metadata
+   * column as JSON. Throws on DB failure — callers decide how to handle it.
+   */
+  private async persistAlertEvent(alert: Alert, event: 'triggered' | 'acknowledged' | 'cleared'): Promise<void> {
+    const db = await getDb();
+    if (!db) {
+      throw new Error('[Alerting] Database not available — alert event not persisted');
+    }
+
+    const admins = await db
+      .select({ id: users.id })
+      .from(users)
+      .where(eq(users.role, 'admin'));
+
+    if (admins.length === 0) {
+      console.warn('[Alerting] No admin users found — alert event has no recipient rows and was not persisted');
+      return;
+    }
+
+    const metadata = JSON.stringify({
+      alertId: alert.id,
+      alertKey: this.getAlertKey(alert.threshold),
+      event,
+      metric: alert.threshold.metric,
+      condition: alert.threshold.condition,
+      operator: alert.threshold.operator,
+      thresholdValue: alert.threshold.value,
+      observedValue: alert.value,
+      severity: alert.threshold.severity,
+    });
+
+    await db.insert(alertsTable).values(
+      admins.map((admin) => ({
+        userId: admin.id,
+        alertType: 'system' as const,
+        severity: (alert.threshold.severity === 'critical' ? 'critical' : alert.threshold.severity) as
+          | 'info'
+          | 'warning'
+          | 'critical',
+        title: `Performance Alert: ${alert.threshold.severity.toUpperCase()}`,
+        message: alert.message,
+        isRead: event === 'acknowledged',
+        readAt: event === 'acknowledged' ? new Date() : null,
+        metadata,
+      }))
+    );
   }
 
   /**
@@ -351,6 +416,11 @@ class PerformanceAlertingSystem {
       if (alert.id === alertId) {
         alert.acknowledged = true;
         console.log('[Alerting] Alert acknowledged:', alertId);
+
+        // Persist the acknowledgement into alert history
+        this.persistAlertEvent(alert, 'acknowledged').catch((error) =>
+          console.error('[Alerting] Failed to persist acknowledged alert:', error)
+        );
         return true;
       }
     }
@@ -358,12 +428,59 @@ class PerformanceAlertingSystem {
   }
 
   /**
-   * Get alert history
+   * Get alert history from the persisted alerts table.
+   * Returns real lifecycle rows (triggered/acknowledged/cleared events).
+   * On database failure it logs loudly and returns an empty list — never
+   * fabricated entries.
    */
-  getAlertHistory(limit: number = 100): Alert[] {
-    // TODO: Implement alert history persistence
-    // For now, return active alerts
-    return this.getActiveAlerts().slice(0, limit);
+  async getAlertHistory(limit: number = 100): Promise<Alert[]> {
+    const db = await getDb();
+    if (!db) {
+      console.error('[Alerting] Database not available — cannot load alert history');
+      return [];
+    }
+
+    try {
+      const rows = await db
+        .select()
+        .from(alertsTable)
+        .where(eq(alertsTable.alertType, 'system'))
+        .orderBy(desc(alertsTable.createdAt))
+        .limit(limit);
+
+      const history: Alert[] = [];
+      for (const row of rows) {
+        let meta: any = null;
+        try {
+          meta = row.metadata ? JSON.parse(row.metadata) : null;
+        } catch {
+          console.warn(`[Alerting] Skipping alert row ${row.id} with unparseable metadata`);
+          continue;
+        }
+        if (!meta || typeof meta.alertId !== 'string') continue;
+
+        history.push({
+          id: meta.alertId,
+          threshold: {
+            metric: meta.metric ?? 'api',
+            condition: meta.condition ?? 'error_count',
+            operator: meta.operator ?? 'gt',
+            value: typeof meta.thresholdValue === 'number' ? meta.thresholdValue : 0,
+            severity: meta.severity ?? row.severity,
+            timeWindow: 5,
+          },
+          value: typeof meta.observedValue === 'number' ? meta.observedValue : 0,
+          message: row.message,
+          timestamp: row.createdAt,
+          acknowledged: row.isRead,
+        });
+      }
+
+      return history;
+    } catch (error) {
+      console.error('[Alerting] Failed to load alert history:', error);
+      return [];
+    }
   }
 }
 

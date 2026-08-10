@@ -49,18 +49,21 @@ export default function Payments() {
   });
 
   const utils = trpc.useUtils();
-  // Mock data for now - in production these would come from tRPC
-  const paymentsLoading = false;
-  const payments: any[] = [];
-  
-  const tokensLoading = false;
-  const tokens: any[] = [];
+
+  const { data: payments = [], isLoading: paymentsLoading } =
+    trpc.payments.list.useQuery({ limit: 50 });
+  const { data: tokens = [], isLoading: tokensLoading } =
+    trpc.payments.listTokens.useQuery();
+  const { data: balance, isLoading: balanceLoading } =
+    trpc.payments.getBalance.useQuery();
 
   const createPaymentMutation = trpc.payments.initiate.useMutation({
     onSuccess: () => {
       toast.success("Payment initiated successfully!");
       setIsPaymentDialogOpen(false);
       setPaymentData({ amount: "", method: "mpesa", phoneNumber: "" });
+      utils.payments.list.invalidate();
+      utils.payments.getBalance.invalidate();
     },
     onError: (error: any) => {
       toast.error(error.message || "Failed to create payment");
@@ -75,6 +78,9 @@ export default function Payments() {
       }
       setIsTokenDialogOpen(false);
       setTokenData({ amount: "", energyKwh: "" });
+      utils.payments.list.invalidate();
+      utils.payments.listTokens.invalidate();
+      utils.payments.getBalance.invalidate();
     },
     onError: (error: any) => {
       toast.error(error.message || "Failed to purchase token");
@@ -125,13 +131,17 @@ export default function Payments() {
   };
 
   const getStatusBadge = (status: string) => {
-    const variants: Record<string, { variant: "default" | "secondary" | "destructive", label: string }> = {
+    const variants: Record<string, { variant: "default" | "secondary" | "destructive" | "outline", label: string }> = {
       completed: { variant: "default", label: "Completed" },
       pending: { variant: "secondary", label: "Pending" },
       failed: { variant: "destructive", label: "Failed" },
       refunded: { variant: "secondary", label: "Refunded" },
+      active: { variant: "default", label: "Active" },
+      used: { variant: "secondary", label: "Used" },
+      expired: { variant: "secondary", label: "Expired" },
+      pending_issuance: { variant: "outline", label: "Pending issuance" },
     };
-    const config = variants[status] || variants.pending;
+    const config = variants[status] || { variant: "secondary" as const, label: status };
     return <Badge variant={config.variant}>{config.label}</Badge>;
   };
 
@@ -311,6 +321,31 @@ export default function Payments() {
           </div>
         </div>
 
+        {/* Account Balance */}
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+            <CardTitle className="text-sm font-medium">Account Balance</CardTitle>
+            <CreditCard className="h-4 w-4 text-muted-foreground" />
+          </CardHeader>
+          <CardContent>
+            {balanceLoading ? (
+              <Skeleton className="h-8 w-40" />
+            ) : balance ? (
+              <div className="space-y-1">
+                <p className="text-2xl font-bold">
+                  {(balance.balanceCents / 100).toFixed(2)} TZS
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  Total paid: {(balance.totalPaidCents / 100).toFixed(2)} TZS · Total billed:{" "}
+                  {(balance.totalBilledCents / 100).toFixed(2)} TZS
+                </p>
+              </div>
+            ) : (
+              <p className="text-sm text-muted-foreground">Balance unavailable</p>
+            )}
+          </CardContent>
+        </Card>
+
         {/* Payment Methods */}
         <div className="grid gap-4 md:grid-cols-3">
           <Card className="border-2 border-green-200 bg-green-50/50">
@@ -394,7 +429,7 @@ export default function Payments() {
                     <TableHeader>
                       <TableRow>
                         <TableHead>Date</TableHead>
-                        <TableHead>Type</TableHead>
+                        <TableHead>Description</TableHead>
                         <TableHead>Method</TableHead>
                         <TableHead>Amount</TableHead>
                         <TableHead>Status</TableHead>
@@ -405,7 +440,7 @@ export default function Payments() {
                       {payments.map((payment: any) => (
                         <TableRow key={payment.id}>
                           <TableCell>{new Date(payment.createdAt).toLocaleString()}</TableCell>
-                          <TableCell className="capitalize">{payment.paymentType.replace("_", " ")}</TableCell>
+                          <TableCell className="capitalize">{payment.description}</TableCell>
                           <TableCell>
                             <div className="flex items-center gap-2">
                               {getPaymentMethodIcon(payment.paymentMethod)}
@@ -462,22 +497,24 @@ export default function Payments() {
                         <TableHead>Token Code</TableHead>
                         <TableHead>Energy</TableHead>
                         <TableHead>Amount</TableHead>
-                        <TableHead>Valid Until</TableHead>
+                        <TableHead>Created</TableHead>
                         <TableHead>Status</TableHead>
-                        <TableHead>Used At</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
                       {tokens.map((token: any) => (
                         <TableRow key={token.id}>
-                          <TableCell className="font-mono font-semibold">{token.tokenCode}</TableCell>
+                          <TableCell className="font-mono font-semibold">
+                            {token.token ?? (
+                              <span className="font-sans font-normal text-muted-foreground">
+                                Not yet vended
+                              </span>
+                            )}
+                          </TableCell>
                           <TableCell>{token.energyKwh} kWh</TableCell>
                           <TableCell>{(token.amount / 100).toFixed(2)} TZS</TableCell>
-                          <TableCell>{new Date(token.validUntil).toLocaleDateString()}</TableCell>
+                          <TableCell>{new Date(token.createdAt).toLocaleDateString()}</TableCell>
                           <TableCell>{getStatusBadge(token.status)}</TableCell>
-                          <TableCell>
-                            {token.usedAt ? new Date(token.usedAt).toLocaleString() : "—"}
-                          </TableCell>
                         </TableRow>
                       ))}
                     </TableBody>

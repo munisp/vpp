@@ -7,6 +7,7 @@
 
 import { getDb } from '../db';
 import { sql } from 'drizzle-orm';
+import { randomBytes } from 'crypto';
 import { probabilisticForecasting } from './probabilistic-forecasting';
 import { kafkaPublisher } from '../integration/kafka-publisher';
 
@@ -23,6 +24,8 @@ export interface EmissionsFactor {
   gasPercent: number | null;
   nuclearPercent: number | null;
   dataSource: string | null;
+  // 'live' = from recorded emissions_factors data; 'default' = hardcoded regional fallback
+  emissionFactorSource: 'default' | 'live';
 }
 
 export interface CarbonCredit {
@@ -134,6 +137,7 @@ export class CarbonAwareDispatchService {
       gasPercent: data.gasPercent || null,
       nuclearPercent: data.nuclearPercent || null,
       dataSource: data.dataSource || null,
+      emissionFactorSource: 'live',
     };
   }
 
@@ -190,6 +194,7 @@ export class CarbonAwareDispatchService {
       gasPercent: null,
       nuclearPercent: null,
       dataSource: 'default',
+      emissionFactorSource: 'default',
     };
   }
 
@@ -471,7 +476,7 @@ export class CarbonAwareDispatchService {
     const db = await getDb();
     if (!db) throw new Error('Database not available');
 
-    const certificateId = `${credit.creditType.toUpperCase()}_${Date.now().toString(36)}_${Math.random().toString(36).substring(2, 8)}`;
+    const certificateId = `${credit.creditType.toUpperCase()}_${Date.now().toString(36)}_${randomBytes(6).toString('hex')}`;
 
     const result = await db.execute(sql`
       INSERT INTO carbon_credits (
@@ -596,6 +601,7 @@ export class CarbonAwareDispatchService {
       gasPercent: row.gas_percent,
       nuclearPercent: row.nuclear_percent,
       dataSource: row.data_source,
+      emissionFactorSource: 'live',
     };
   }
 

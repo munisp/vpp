@@ -16,21 +16,35 @@ import { HapticService } from '../services/hapticService';
 
 export default function PaymentsScreen() {
   const [modalVisible, setModalVisible] = useState(false);
-  const [selectedGateway, setSelectedGateway] = useState<'mpesa' | 'airtel' | 'tigo'>('mpesa');
+  const [selectedGateway, setSelectedGateway] = useState<
+    'mpesa' | 'airtel_money' | 'tigo_pesa'
+  >('mpesa');
   const [phoneNumber, setPhoneNumber] = useState('');
   const [amount, setAmount] = useState('');
 
-  const { data: payments } = trpc.payments.list.useQuery({ limit: 20 });
-  const { data: balance } = trpc.payments.getBalance.useQuery();
+  const utils = trpc.useUtils();
 
-  const initiatePaymentMutation = trpc.paymentProcessing.initiatePayment.useMutation({
+  const {
+    data: payments,
+    isLoading: paymentsLoading,
+    isError: paymentsError,
+  } = trpc.payments.list.useQuery({ limit: 20 });
+  const {
+    data: balance,
+    isLoading: balanceLoading,
+    isError: balanceError,
+  } = trpc.payments.getBalance.useQuery();
+
+  const initiatePaymentMutation = trpc.payments.initiate.useMutation({
     onSuccess: async (data) => {
       await HapticService.paymentCompleted();
       Alert.alert(
         'Payment Initiated',
-        'Please check your phone to complete the payment',
+        data.message || 'Please check your phone to complete the payment',
         [{ text: 'OK', onPress: () => setModalVisible(false) }]
       );
+      utils.payments.list.invalidate();
+      utils.payments.getBalance.invalidate();
     },
     onError: async (error) => {
       await HapticService.paymentFailed();
@@ -45,12 +59,20 @@ export default function PaymentsScreen() {
       return;
     }
 
+    const amountTzs = parseInt(amount, 10);
+    if (isNaN(amountTzs) || amountTzs <= 0) {
+      Alert.alert('Error', 'Please enter a valid amount');
+      return;
+    }
+
     await HapticService.buttonPress();
+    // Server input (server/routers/payments.ts -> initiate): amount is an
+    // integer in cents; paymentMethod uses the server enum.
     initiatePaymentMutation.mutate({
-      gateway: selectedGateway,
-      amount: parseInt(amount) * 100, // Convert to cents
+      paymentType: 'invoice',
+      amount: amountTzs * 100, // TZS -> cents
+      paymentMethod: selectedGateway,
       phoneNumber,
-      description: 'VPP Platform Payment',
     });
   };
 
@@ -64,9 +86,17 @@ export default function PaymentsScreen() {
       {/* Balance Card */}
       <View style={styles.balanceCard}>
         <Text style={styles.balanceLabel}>Available Balance</Text>
-        <Text style={styles.balanceAmount}>
-          {((balance?.balance || 0) / 100).toFixed(0)} TZS
-        </Text>
+        {balanceLoading ? (
+          <Text style={styles.balanceAmount}>Loading…</Text>
+        ) : balanceError || !balance?.computed ? (
+          // Never show a fabricated zero balance; the server reports
+          // computed=false (or errors) when the balance cannot be derived.
+          <Text style={styles.balanceUnavailable}>Balance unavailable</Text>
+        ) : (
+          <Text style={styles.balanceAmount}>
+            {(balance.balanceCents / 100).toFixed(0)} TZS
+          </Text>
+        )}
         <View style={styles.balanceActions}>
           <TouchableOpacity
             style={styles.balanceButton}
@@ -74,24 +104,25 @@ export default function PaymentsScreen() {
           >
             <Text style={styles.balanceButtonText}>💳 Top Up</Text>
           </TouchableOpacity>
-          <TouchableOpacity style={styles.balanceButton}>
-            <Text style={styles.balanceButtonText}>💸 Withdraw</Text>
-          </TouchableOpacity>
         </View>
       </View>
 
-      {/* Quick Stats */}
+      {/* Quick Stats (real fields from payments.getBalance) */}
       <View style={styles.statsRow}>
         <View style={styles.statCard}>
-          <Text style={styles.statLabel}>This Month</Text>
+          <Text style={styles.statLabel}>Total Paid</Text>
           <Text style={styles.statValue}>
-            {((balance?.earned || 0) / 100).toFixed(0)} TZS
+            {balance?.computed
+              ? `${(balance.totalPaidCents / 100).toFixed(0)} TZS`
+              : '—'}
           </Text>
         </View>
         <View style={styles.statCard}>
-          <Text style={styles.statLabel}>Pending</Text>
+          <Text style={styles.statLabel}>Total Billed</Text>
           <Text style={styles.statValue}>
-            {((balance?.pending || 0) / 100).toFixed(0)} TZS
+            {balance?.computed
+              ? `${(balance.totalBilledCents / 100).toFixed(0)} TZS`
+              : '—'}
           </Text>
         </View>
       </View>
@@ -99,7 +130,15 @@ export default function PaymentsScreen() {
       {/* Payment History */}
       <View style={styles.historyCard}>
         <Text style={styles.sectionTitle}>Payment History</Text>
-        {payments && payments.length > 0 ? (
+        {paymentsLoading ? (
+          <View style={styles.empty}>
+            <Text style={styles.emptyText}>Loading payments…</Text>
+          </View>
+        ) : paymentsError ? (
+          <View style={styles.empty}>
+            <Text style={styles.emptyText}>Could not load payments</Text>
+          </View>
+        ) : payments && payments.length > 0 ? (
           payments.map((payment) => (
             <PaymentItem key={payment.id} payment={payment} />
           ))
@@ -144,15 +183,15 @@ export default function PaymentsScreen() {
               <TouchableOpacity
                 style={[
                   styles.gatewayButton,
-                  selectedGateway === 'airtel' && styles.gatewayButtonActive,
+                  selectedGateway === 'airtel_money' && styles.gatewayButtonActive,
                 ]}
-                onPress={() => setSelectedGateway('airtel')}
+                onPress={() => setSelectedGateway('airtel_money')}
               >
                 <Text style={styles.gatewayIcon}>📱</Text>
                 <Text
                   style={[
                     styles.gatewayText,
-                    selectedGateway === 'airtel' && styles.gatewayTextActive,
+                    selectedGateway === 'airtel_money' && styles.gatewayTextActive,
                   ]}
                 >
                   Airtel
@@ -161,15 +200,15 @@ export default function PaymentsScreen() {
               <TouchableOpacity
                 style={[
                   styles.gatewayButton,
-                  selectedGateway === 'tigo' && styles.gatewayButtonActive,
+                  selectedGateway === 'tigo_pesa' && styles.gatewayButtonActive,
                 ]}
-                onPress={() => setSelectedGateway('tigo')}
+                onPress={() => setSelectedGateway('tigo_pesa')}
               >
                 <Text style={styles.gatewayIcon}>💰</Text>
                 <Text
                   style={[
                     styles.gatewayText,
-                    selectedGateway === 'tigo' && styles.gatewayTextActive,
+                    selectedGateway === 'tigo_pesa' && styles.gatewayTextActive,
                   ]}
                 >
                   Tigo Pesa
@@ -235,12 +274,16 @@ function PaymentItem({ payment }: { payment: any }) {
     }
   };
 
-  const getTypeIcon = (type: string) => {
-    switch (type) {
-      case 'credit':
-        return '💰';
-      case 'debit':
-        return '💸';
+  const getMethodIcon = (method: string) => {
+    switch (method) {
+      case 'mpesa':
+      case 'airtel_money':
+      case 'tigo_pesa':
+        return '📱';
+      case 'bank_transfer':
+        return '🏦';
+      case 'card':
+        return '💳';
       default:
         return '💳';
     }
@@ -249,7 +292,9 @@ function PaymentItem({ payment }: { payment: any }) {
   return (
     <View style={styles.paymentItem}>
       <View style={styles.paymentIcon}>
-        <Text style={styles.paymentIconText}>{getTypeIcon(payment.type)}</Text>
+        <Text style={styles.paymentIconText}>
+          {getMethodIcon(payment.paymentMethod)}
+        </Text>
       </View>
       <View style={styles.paymentContent}>
         <Text style={styles.paymentDescription}>{payment.description}</Text>
@@ -258,14 +303,8 @@ function PaymentItem({ payment }: { payment: any }) {
         </Text>
       </View>
       <View style={styles.paymentRight}>
-        <Text
-          style={[
-            styles.paymentAmount,
-            { color: payment.type === 'credit' ? '#10b981' : '#111827' },
-          ]}
-        >
-          {payment.type === 'credit' ? '+' : '-'}
-          {(payment.amount / 100).toFixed(0)} TZS
+        <Text style={styles.paymentAmount}>
+          {(payment.amount / 100).toFixed(0)} {payment.currency || 'TZS'}
         </Text>
         <View
           style={[
@@ -317,6 +356,12 @@ const styles = StyleSheet.create({
     fontSize: 36,
     fontWeight: 'bold',
     color: '#fff',
+    marginBottom: 24,
+  },
+  balanceUnavailable: {
+    fontSize: 18,
+    fontWeight: '600',
+    color: '#d1fae5',
     marginBottom: 24,
   },
   balanceActions: {

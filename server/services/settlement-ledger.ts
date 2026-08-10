@@ -395,34 +395,35 @@ export class SettlementLedgerService {
   }
 
   /**
-   * Anchor a settlement period to the configured blockchain provider.
+   * Anchor a settlement period hash to the configured blockchain provider.
    *
-   * Delegates to BlockchainAuditService which selects the real provider
-   * (Hedera, Polygon, or local-hash-only) based on BLOCKCHAIN_NETWORK env var.
-   * Returns null if anchoring is disabled or the service is unavailable.
+   * Anchors the period Merkle root as generic data via
+   * BlockchainAuditService.anchorData — no synthetic/spoofed settlement period
+   * id is ever used. Throws on failure: anchoring errors must be surfaced to
+   * the caller, never silently swallowed into a null return.
    */
   async anchorToBlockchain(
     periodHash: string,
     periodStart: Date,
     periodEnd: Date
-  ): Promise<{ txHash: string; anchoredAt: Date } | null> {
-    try {
-      const { blockchainAudit } = await import('./blockchain-audit');
-      const proofData = `${periodHash}|${periodStart.toISOString()}|${periodEnd.toISOString()}`;
-      const merkleRoot = createHash('sha256').update(proofData).digest('hex');
-      // submitAnchor(anchorId) expects a DB-persisted anchor; use the provider directly
-      // by calling anchorSettlementPeriod which handles the full DB lifecycle.
-      // We pass a synthetic period ID derived from the hash for traceability.
-      const periodIdHash = parseInt(merkleRoot.substring(0, 8), 16);
-      const anchor = await blockchainAudit.anchorSettlementPeriod(periodIdHash);
-      const result = anchor ? { txHash: anchor.transactionHash ?? '' } : null;
-      if (!result) return null;
-      console.log(`[SettlementLedger] Anchored to blockchain: ${result.txHash.substring(0, 20)}...`);
-      return { txHash: result.txHash, anchoredAt: new Date() };
-    } catch (error) {
-      console.error('[SettlementLedger] Blockchain anchoring failed:', error);
-      return null;
+  ): Promise<{ txHash: string; anchoredAt: Date }> {
+    const { blockchainAudit } = await import('./blockchain-audit');
+    const proofData = `${periodHash}|${periodStart.toISOString()}|${periodEnd.toISOString()}`;
+    const merkleRoot = createHash('sha256').update(proofData).digest('hex');
+
+    const anchor = await blockchainAudit.anchorData(merkleRoot, {
+      periodHash,
+      periodStart: periodStart.toISOString(),
+      periodEnd: periodEnd.toISOString(),
+    });
+
+    const txHash = anchor.transactionHash;
+    if (!txHash) {
+      throw new Error('[SettlementLedger] Blockchain anchoring did not produce a transaction hash');
     }
+
+    console.log(`[SettlementLedger] Anchored to blockchain: ${txHash.substring(0, 20)}...`);
+    return { txHash, anchoredAt: anchor.anchoredAt ?? new Date() };
   }
 
   /**
@@ -440,7 +441,30 @@ export class SettlementLedgerService {
   ): Promise<SettlementEvent> {
     const energyWh = Math.round((actualPowerWatts * durationMinutes) / 60);
     const platformFee = Math.round(compensation * 0.30); // 30% platform fee
-    
+
+    // Fetch the real setpoint for this dispatch so performance fields reflect
+    // the actual target, not an echo of the actual power. If the setpoint is
+    // not queryable, both fields stay null — never echoed or hardcoded.
+    let targetPowerWatts: number | null = null;
+    let deviationPercent: number | null = null;
+    try {
+      const db = await getDb();
+      if (db) {
+        const setpointResult = await db.execute(sql`
+          SELECT target_power_watts FROM dispatch_setpoints WHERE id = ${dispatchId} LIMIT 1
+        `);
+        const setpoint = (setpointResult as any)[0]?.[0];
+        if (setpoint && setpoint.target_power_watts !== null && setpoint.target_power_watts !== undefined) {
+          targetPowerWatts = setpoint.target_power_watts;
+          deviationPercent = targetPowerWatts !== 0
+            ? Math.round(((actualPowerWatts - targetPowerWatts) / Math.abs(targetPowerWatts)) * 10000) / 100
+            : null;
+        }
+      }
+    } catch (error) {
+      console.error(`[SettlementLedger] Could not fetch setpoint ${dispatchId} for performance fields:`, error);
+    }
+
     return this.createEvent({
       eventType: 'dispatch_completed',
       userId,
@@ -457,9 +481,9 @@ export class SettlementLedgerService {
       eventData: {
         serviceProductId,
         performanceScore,
-        targetPowerWatts: actualPowerWatts, // Would come from setpoint
+        targetPowerWatts,
         actualPowerWatts,
-        deviationPercent: 0, // Would be calculated
+        deviationPercent,
       },
     });
   }

@@ -9,8 +9,17 @@ export type TrpcContext = {
   user: User | null;
 };
 
-// Demo mode for UI testing - bypasses OAuth authentication
-const isDemoMode = process.env.VITE_DEMO_MODE === 'true';
+// Demo mode for UI testing - bypasses OAuth authentication.
+// This bypass is strictly forbidden in production: enabling it would make
+// every request run as user id 1. Hard-fail at module load if both are set.
+if (process.env.NODE_ENV === "production" && process.env.VITE_DEMO_MODE === "true") {
+  throw new Error(
+    "FATAL: VITE_DEMO_MODE=true is not allowed when NODE_ENV=production. " +
+      "The demo-mode auth bypass would grant every request user id 1. " +
+      "Unset VITE_DEMO_MODE to start the server."
+  );
+}
+const isDemoMode = process.env.VITE_DEMO_MODE === "true" && process.env.NODE_ENV !== "production";
 
 export async function createContext(
   opts: CreateExpressContextOptions

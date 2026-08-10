@@ -1,5 +1,11 @@
 # VPP Codebase Mockware Remediation Report
 
+> **⚠️ SUPERSEDED — 2026-08-11.** An independent re-audit found this report's "all mockware
+> eliminated" conclusion to be **false**: the 17 fixes below landed, but ~60 further instances
+> (including fake payment confirmations, fabricated compliance records, and settlement without
+> delivery verification) remained. See **`MOCKWARE_SWEEP_2026-08-11.md`** for the full audit,
+> the second remediation wave, and the current honest state.
+
 A comprehensive audit and remediation pass has been completed across the VPP Consumer Platform codebase. The goal was to identify and eliminate "silent mockware" — hardcoded fake data, stub functions returning plausible-looking results, TODO placeholders masquerading as implementations, and simulated logic that would mislead users or corrupt data in a production environment.
 
 In total, **17 distinct mockware patterns** were found and fixed across 19 files. The changes have been pushed to the `main` branch.

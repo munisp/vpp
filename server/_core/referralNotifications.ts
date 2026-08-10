@@ -1,11 +1,37 @@
 import { notifyOwner } from "./notification";
 import { sendEmail } from "./emailService";
+import { getDb } from "../db";
+import { users } from "../../drizzle/schema";
+import { eq } from "drizzle-orm";
 
 /**
  * Referral Notification Service
  * 
  * Handles push notifications for referral program events
  */
+
+/**
+ * Look up a user's real email address. Returns null when the user does not
+ * exist or has no email on file — callers must skip the email send.
+ */
+async function getUserEmail(userId: number): Promise<string | null> {
+  try {
+    const db = await getDb();
+    if (!db) {
+      console.warn("[ReferralNotifications] Database not available; cannot resolve user email");
+      return null;
+    }
+    const [user] = await db
+      .select({ email: users.email })
+      .from(users)
+      .where(eq(users.id, userId))
+      .limit(1);
+    return user?.email ?? null;
+  } catch (error) {
+    console.error(`[ReferralNotifications] Failed to look up email for user ${userId}:`, error);
+    return null;
+  }
+}
 
 export interface ReferralNotificationData {
   userId: number;
@@ -35,9 +61,14 @@ export async function notifyReferralReward(data: {
     // Send push notification to owner
     await notifyOwner({ title, content });
     
-    // Send email notification to user
+    // Send email notification to user's real address
+    const email = await getUserEmail(data.userId);
+    if (!email) {
+      console.warn(`[ReferralNotifications] Skipping reward email: no email on file for user ${data.userId}`);
+      return true;
+    }
     await sendEmail({
-      to: `user_${data.userId}@vpp.platform`, // In production, fetch actual user email
+      to: email,
       subject: title,
       html: `
         <h2>${title}</h2>
@@ -71,9 +102,14 @@ export async function notifyReferralCompleted(data: {
     // Send push notification
     await notifyOwner({ title, content });
     
-    // Send email notification
+    // Send email notification to user's real address
+    const email = await getUserEmail(data.userId);
+    if (!email) {
+      console.warn(`[ReferralNotifications] Skipping completion email: no email on file for user ${data.userId}`);
+      return true;
+    }
     await sendEmail({
-      to: `user_${data.userId}@vpp.platform`,
+      to: email,
       subject: title,
       html: `
         <h2>${title}</h2>
@@ -129,9 +165,14 @@ export async function notifyMilestoneReached(data: {
     // Send push notification
     await notifyOwner({ title, content });
     
-    // Send email notification
+    // Send email notification to user's real address
+    const email = await getUserEmail(data.userId);
+    if (!email) {
+      console.warn(`[ReferralNotifications] Skipping milestone email: no email on file for user ${data.userId}`);
+      return true;
+    }
     await sendEmail({
-      to: `user_${data.userId}@vpp.platform`,
+      to: email,
       subject: title,
       html: `
         <h2>${title}</h2>

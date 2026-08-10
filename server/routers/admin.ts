@@ -193,12 +193,14 @@ export const adminRouter = router({
       if (!db_instance) throw new Error('Database not available');
 
       const { assets } = await import('../../drizzle/schema');
-      const allAssets = await db_instance.select().from(assets);
-      
-      // In production, you would have an approval status field
-      // For now, return all assets with user info
+      const { eq } = await import('drizzle-orm');
+      const pendingAssets = await db_instance
+        .select()
+        .from(assets)
+        .where(eq(assets.approvalStatus, 'pending'));
+
       const assetsWithUsers = await Promise.all(
-        allAssets.map(async (asset: any) => {
+        pendingAssets.map(async (asset: any) => {
           const user = await db.getUserByOpenId(String(asset.userId));
           return {
             ...asset,
@@ -239,8 +241,12 @@ export const adminRouter = router({
           });
         }
 
-        // In production, update asset approval status
-        // For now, just create audit log
+        // Persist the approval decision
+        await db_instance
+          .update(assets)
+          .set({ approvalStatus: input.approved ? 'approved' : 'rejected' })
+          .where(eq(assets.id, input.assetId));
+
         await createAuditLog({
           userId: ctx.user.id,
           userName: ctx.user.name || undefined,

@@ -6,11 +6,13 @@
  */
 
 import { getDb } from '../db';
-import { sql } from 'drizzle-orm';
+import { sql, and, gte, lte, asc } from 'drizzle-orm';
 import { createHash } from 'crypto';
 import { optimizationEngine } from './optimization-engine';
 import { settlementLedger } from './settlement-ledger';
 import { kafkaPublisher } from '../integration/kafka-publisher';
+import { marketPrices } from '../../drizzle/schema';
+import { pricePredictionService } from '../ml/price-prediction';
 
 // Types for EV charging
 export interface ElectricVehicle {
@@ -496,8 +498,8 @@ export class EVChargingService {
     const intervalMinutes = 15;
     const intervalsCount = Math.ceil((deadline.getTime() - now.getTime()) / (intervalMinutes * 60000));
 
-    // Get price forecast for scheduling
-    const pricePattern = this.getPricePattern(now, intervalsCount);
+    // Get real price forecast for scheduling (throws if no price source available)
+    const pricePattern = await this.getPricePattern(now, intervalsCount, intervalMinutes);
 
     if (options.objective === 'fastest') {
       // Charge at max power until complete
@@ -505,7 +507,7 @@ export class EVChargingService {
       while (remainingEnergy > 0 && currentTime < deadline) {
         const intervalEnd = new Date(currentTime.getTime() + intervalMinutes * 60000);
         const energyThisInterval = Math.min(remainingEnergy, (maxPower * intervalMinutes) / 60);
-        const price = pricePattern[intervals.length] || 45;
+        const price = pricePattern[intervals.length] ?? pricePattern[pricePattern.length - 1];
         const cost = Math.round(energyThisInterval * price);
 
         intervals.push({
@@ -560,7 +562,10 @@ export class EVChargingService {
 
     // Add V2G intervals if capable and objective is maximize_revenue
     if (options.objective === 'maximize_revenue' && ev.v2gCapable && station.v2gCapable) {
-      const highPriceThreshold = 60; // cents/kWh
+      // Discharge only in genuinely high-price intervals (top quartile of the
+      // real price pattern for this scheduling window)
+      const sortedPrices = [...pricePattern].sort((a, b) => a - b);
+      const highPriceThreshold = sortedPrices[Math.floor((sortedPrices.length - 1) * 0.75)];
       const maxDischarge = (ev.maxDischargingPowerKw || 0) / 10;
       const minSoc = options.constraints?.minSocPercent || ev.minSocPercent;
 
@@ -614,32 +619,74 @@ export class EVChargingService {
   }
 
   /**
-   * Get price pattern for scheduling
+   * Get price pattern for scheduling.
+   *
+   * Sources real market prices from the market_prices table (same access path
+   * as server/ml/price-prediction.ts). Falls back to the ML price forecast.
+   * Throws when neither source is available — no invented rates are ever used
+   * in user-facing cost/revenue economics.
    */
-  private getPricePattern(startTime: Date, intervalsCount: number): number[] {
-    const pattern: number[] = [];
-    
-    for (let i = 0; i < intervalsCount; i++) {
-      const time = new Date(startTime.getTime() + i * 15 * 60000);
-      const hour = time.getHours();
-      
-      // Simplified price pattern (cents/kWh)
-      let price = 45; // Base price
-      
-      if (hour >= 18 && hour <= 22) {
-        price = 75; // Peak evening
-      } else if (hour >= 6 && hour <= 9) {
-        price = 60; // Morning peak
-      } else if (hour >= 0 && hour <= 5) {
-        price = 30; // Night off-peak
-      } else if (hour >= 11 && hour <= 15) {
-        price = 35; // Solar peak (lower prices)
+  private async getPricePattern(startTime: Date, intervalsCount: number, intervalMinutes: number = 15): Promise<number[]> {
+    const intervalMs = intervalMinutes * 60000;
+
+    // 1) Real market prices from the database
+    try {
+      const db = await getDb();
+      if (db) {
+        const endTime = new Date(startTime.getTime() + intervalsCount * intervalMs);
+        const rows = await db
+          .select()
+          .from(marketPrices)
+          .where(and(gte(marketPrices.timestamp, startTime), lte(marketPrices.timestamp, endTime)))
+          .orderBy(asc(marketPrices.timestamp));
+
+        if (rows.length > 0) {
+          // Bucket real prices into scheduling intervals
+          const pattern: (number | null)[] = new Array(intervalsCount).fill(null);
+          for (const row of rows) {
+            const idx = Math.floor((new Date(row.timestamp).getTime() - startTime.getTime()) / intervalMs);
+            if (idx >= 0 && idx < intervalsCount) pattern[idx] = row.price;
+          }
+          // Fill gaps by carrying the nearest real price (forward, then backward)
+          let last: number | null = null;
+          for (let i = 0; i < intervalsCount; i++) {
+            if (pattern[i] !== null) last = pattern[i];
+            else if (last !== null) pattern[i] = last;
+          }
+          let next: number | null = null;
+          for (let i = intervalsCount - 1; i >= 0; i--) {
+            if (pattern[i] !== null) next = pattern[i];
+            else if (next !== null) pattern[i] = next;
+          }
+          if (pattern.every(p => p !== null)) {
+            console.log(`[EVCharging] Using ${rows.length} real market prices for scheduling`);
+            return pattern as number[];
+          }
+        }
       }
-      
-      pattern.push(price);
+    } catch (error) {
+      console.warn('[EVCharging] Failed to load market prices, trying ML forecast:', error);
     }
-    
-    return pattern;
+
+    // 2) Fallback: ML price prediction service forecast
+    try {
+      const hoursNeeded = Math.max(1, Math.ceil((intervalsCount * intervalMinutes) / 60));
+      const predictions = await pricePredictionService.predictPrices(hoursNeeded);
+      if (predictions.length > 0) {
+        console.log(`[EVCharging] Using ML price forecast (${predictions.length}h) for scheduling`);
+        const pattern: number[] = [];
+        for (let i = 0; i < intervalsCount; i++) {
+          const hourIdx = Math.min(Math.floor((i * intervalMinutes) / 60), predictions.length - 1);
+          pattern.push(predictions[hourIdx].predictedPrice);
+        }
+        return pattern;
+      }
+    } catch (error) {
+      console.warn('[EVCharging] ML price forecast unavailable:', error);
+    }
+
+    // 3) Fail loudly — never invent rates for user-facing economics
+    throw new Error('[EVCharging] No market price data or ML price forecast available; cannot compute smart-charging economics');
   }
 
   /**

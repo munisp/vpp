@@ -673,3 +673,8 @@ export type InsertMqttBrokerCredential = typeof mqttBrokerCredentials.$inferInse
 
 // Re-export all next-gen VPP schema tables for migrations
 export * from './nextgen-vpp-schema';
+
+// Re-export innovation schema tables for migrations (2026-08-11 wave)
+export * from './innovations-schema';
+export * from './grid-intel-schema';
+export * from './trust-access-schema';

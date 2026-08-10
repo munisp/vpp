@@ -223,8 +223,13 @@ NODE_ENV=production pnpm build
 # Install PM2 for process management
 npm install -g pm2
 
-# Start application
-pm2 start server/_core/index.ts --name vpp-app --interpreter=node
+# Start the built application.
+# NOTE: `pm2 start server/_core/index.ts --interpreter=node` does NOT work —
+# the node interpreter cannot execute TypeScript. Run the compiled bundle
+# (produced by `pnpm build` above) or use tsx as the interpreter.
+pm2 start dist/index.js --name vpp-app
+# Alternative (runs TypeScript directly):
+#   pm2 start server/_core/index.ts --name vpp-app --interpreter=node --node-args="--import tsx"
 pm2 save
 pm2 startup
 
@@ -500,10 +505,10 @@ SET GLOBAL query_cache_size = 268435456;
 
 ```bash
 # Increase memory limit
-pm2 start server/_core/index.ts --max-memory-restart 2G
+pm2 start dist/index.js --max-memory-restart 2G
 
 # Use cluster mode
-pm2 start server/_core/index.ts -i max
+pm2 start dist/index.js -i max
 ```
 
 ### MQTT

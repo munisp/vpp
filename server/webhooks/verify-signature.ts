@@ -15,12 +15,13 @@
 import { createHmac, timingSafeEqual } from 'crypto';
 import { NextFunction, Request, Response } from 'express';
 
-type WebhookProvider = 'mpesa' | 'airtel' | 'tigo';
+type WebhookProvider = 'mpesa' | 'airtel' | 'tigo' | 'africas_talking';
 
 const SECRET_ENV: Record<WebhookProvider, string> = {
   mpesa: 'MPESA_WEBHOOK_SECRET',
   airtel: 'AIRTEL_WEBHOOK_SECRET',
   tigo: 'TIGO_WEBHOOK_SECRET',
+  africas_talking: 'AFRICAS_TALKING_WEBHOOK_SECRET',
 };
 
 function requestBodyBytes(req: Request): Buffer {

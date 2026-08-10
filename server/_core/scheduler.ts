@@ -6,9 +6,13 @@
 import cron from 'node-cron';
 import { getDb } from '../db';
 import { users } from '../../drizzle/schema';
+import { walletTopUpAttempts } from '../../drizzle/grid-intel-schema';
+import { eq } from 'drizzle-orm';
 import { generateRevenueReport, generateEnergyReport } from './export';
 import { sendEmail } from './notifications';
 import * as analyticsDb from '../analytics';
+import { checkPriceAlerts } from '../services/price-alert-engine';
+import { energyWallet } from '../services/energy-wallet';
 
 /**
  * Initialize scheduled report jobs
@@ -32,6 +36,38 @@ export function initScheduledReports() {
   cron.schedule('0 8 * * 1', async () => {
     console.log('[Scheduler] Running weekly summary report generation');
     await generateWeeklySummaryReports();
+  });
+
+  // Price alert evaluation - every 5 minutes against latest marketPrices.
+  // Dispatches real web-push/SMS for triggered subscriptions (deduped by cooldown).
+  cron.schedule('*/5 * * * *', async () => {
+    try {
+      const result = await checkPriceAlerts();
+      if (result.dispatched.length > 0) {
+        console.log(`[Scheduler] Price alerts: ${result.dispatched.length} dispatched, ${result.activeAlerts} active subscriptions evaluated`);
+      }
+    } catch (err) {
+      console.error('[Scheduler] Price alert evaluation failed:', err);
+    }
+  });
+
+  // Wallet top-up reconciliation - every 15 minutes. Polls the real gateway
+  // status for attempts in 'initiated' state and settles them honestly.
+  cron.schedule('*/15 * * * *', async () => {
+    try {
+      const db = await getDb();
+      if (!db) return;
+      const pending = await db
+        .select({ userId: walletTopUpAttempts.userId })
+        .from(walletTopUpAttempts)
+        .where(eq(walletTopUpAttempts.status, 'initiated'))
+        .groupBy(walletTopUpAttempts.userId);
+      for (const row of pending) {
+        await energyWallet.reconcileTopUps(row.userId);
+      }
+    } catch (err) {
+      console.error('[Scheduler] Wallet top-up reconciliation failed:', err);
+    }
   });
 
   console.log('[Scheduler] Scheduled report jobs initialized');

@@ -130,9 +130,16 @@ deploy_application() {
 setup_database() {
     log_info "Setting up database..."
     
-    # Run migrations
+    # Apply committed migrations — never use `drizzle-kit push` in production:
+    # push diffs the schema against the live database and can apply destructive
+    # changes without a migration history or review.
     cd "$DEPLOY_DIR/app"
-    npx drizzle-kit push
+    if [ ! -d "drizzle" ] || ! ls drizzle/*.sql >/dev/null 2>&1; then
+        log_error "Migrations directory 'drizzle/' is missing or contains no .sql migrations."
+        log_error "Generate migrations with 'pnpm drizzle-kit generate' and commit them before deploying."
+        exit 1
+    fi
+    npx drizzle-kit migrate
     
     log_info "Database setup complete"
 }

@@ -16,12 +16,12 @@ This checklist ensures all critical components are properly configured before pr
 - [x] Configuration files complete
 - [x] Deployment scripts ready and executable
 - [x] Documentation comprehensive
-- [x] TypeScript compilation successful (0 errors)
-- [x] All dependencies installed
+- [~] TypeScript compilation successful (0 errors) — **UNVERIFIED, pending CI**: this claim predates the CI pipeline; confirm via the `pnpm check` (tsc --noEmit) step in `.github/workflows/ci.yml` before relying on it
+- [~] All dependencies installed — **UNVERIFIED, pending CI**: confirm via `pnpm install --frozen-lockfile` in CI
 - [x] Package.json scripts configured
-- [x] PM2 ecosystem configuration ready
+- [~] PM2 ecosystem configuration ready — **UNVERIFIED**: `ecosystem.config.js` exists and runs TS via `--import tsx`, but it has not been validated in CI; a plain `pm2 start server/_core/index.ts --interpreter=node` (without tsx) cannot run TypeScript — see DEPLOYMENT.md
 
-**Status:** ✅ COMPLETE
+**Status:** ⚠️ PARTIALLY VERIFIED — items marked [~] are pending confirmation by the CI pipeline
 
 ---
 
@@ -353,13 +353,13 @@ sudo ./scripts/security-hardening.sh
 ### 12. Monitoring & Alerting
 
 #### Metrics Collection
-- [x] Prometheus collecting metrics
-- [x] Grafana dashboards configured
-- [x] Custom metrics instrumented
+- [~] Prometheus collecting metrics — **UNVERIFIED**: configuration exists, but "collecting" has not been confirmed against a running stack; verify during deployment
+- [~] Grafana dashboards configured — **UNVERIFIED**: provisioning files exist; rendering not confirmed against a running Grafana
+- [~] Custom metrics instrumented — **UNVERIFIED, pending CI**: instrumentation code exists; endpoint output not exercised by CI yet
 - [ ] Metrics retention configured (30 days)
 
 #### Alerting
-- [x] Alert rules configured (20+ alerts)
+- [~] Alert rules configured (20+ alerts) — **UNVERIFIED**: rule files exist; rules not loaded/tested against a running Alertmanager
 - [ ] Alert thresholds tuned
 - [ ] Notification channels tested
 - [ ] On-call schedule configured

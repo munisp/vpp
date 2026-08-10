@@ -47,6 +47,21 @@ import { gridOperatorRouter } from './routers/grid-operator';
 import { iotDevicesRouter } from './routers/iot-devices';
 import { mlPredictionsRouter } from './routers/ml-predictions';
 import { p2pTradingRouter } from './routers/p2p-trading';
+import { energyAdvisorRouter } from './routers/energyAdvisor';
+import { dynamicTariffsRouter } from './routers/dynamicTariffs';
+import { batteryHealthRouter } from './routers/batteryHealth';
+import { p2pMatchingRouter } from './routers/p2pMatching';
+import { carbonCreditsRouter } from './routers/carbonCredits';
+import { gridAnomalyRouter } from './routers/gridAnomaly';
+import { v2gOptimizerRouter } from './routers/v2gOptimizer';
+import { energyWalletRouter } from './routers/energyWallet';
+import { communityPoolsRouter } from './routers/communityPools';
+import { drForecastRouter } from './routers/drForecast';
+import { smsCommandsRouter } from './routers/smsCommands';
+import { solarYieldRouter } from './routers/solarYield';
+import { ntlDetectionRouter } from './routers/ntlDetection';
+import { priceAlertEngineRouter } from './routers/priceAlertEngine';
+import { complianceReportsRouter } from './routers/complianceReports';
 
 // Next-gen VPP routers
 import {
@@ -128,6 +143,23 @@ export const appRouter = router({
   reconciliation: reconciliationRouter,
   gamification: gamificationRouter,
   participantInsights: participantInsightsRouter,
+
+  // Innovation routers (2026-08-11 wave)
+  energyAdvisor: energyAdvisorRouter,
+  dynamicTariffs: dynamicTariffsRouter,
+  batteryHealth: batteryHealthRouter,
+  p2pMatching: p2pMatchingRouter,
+  carbonCredits: carbonCreditsRouter,
+  gridAnomaly: gridAnomalyRouter,
+  v2gOptimizer: v2gOptimizerRouter,
+  energyWallet: energyWalletRouter,
+  communityPools: communityPoolsRouter,
+  drForecast: drForecastRouter,
+  smsCommands: smsCommandsRouter,
+  solarYield: solarYieldRouter,
+  ntlDetection: ntlDetectionRouter,
+  priceAlertEngine: priceAlertEngineRouter,
+  complianceReports: complianceReportsRouter,
 
   // Next-gen VPP routers
   anomaly: anomalyRouter,

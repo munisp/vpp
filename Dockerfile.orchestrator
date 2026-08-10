@@ -1,0 +1,39 @@
+# syntax=docker/dockerfile:1
+
+# ---------- Build stage ----------
+FROM golang:1.22-alpine AS builder
+
+WORKDIR /app
+
+# build-base + librdkafka-dev: confluent-kafka-go is a CGO binding to the
+# system librdkafka.
+RUN apk add --no-cache build-base librdkafka-dev git
+
+# go.sum is intentionally not committed: resolve and pin modules in the
+# build stage so the build remains reproducible.
+COPY go.mod ./
+RUN go mod download \
+  && go mod tidy
+
+# Copy sources and build
+COPY . .
+RUN CGO_ENABLED=1 GOOS=linux go build -o orchestrator .
+
+# ---------- Runtime stage ----------
+FROM alpine:3.20 AS runtime
+
+RUN apk add --no-cache ca-certificates librdkafka dumb-init \
+  && addgroup -S app && adduser -S app -G app
+
+WORKDIR /app
+COPY --from=builder --chown=app:app /app/orchestrator ./orchestrator
+
+USER app
+
+# Temporal worker: no HTTP port is exposed; the healthcheck verifies the
+# worker process is alive.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+  CMD pgrep orchestrator >/dev/null 2>&1 || exit 1
+
+ENTRYPOINT ["dumb-init", "--"]
+CMD ["./orchestrator"]

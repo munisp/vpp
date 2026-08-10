@@ -1,0 +1,158 @@
+# Production override for the VPP platform.
+#
+# Usage (layered on top of the dev-oriented compose files):
+#   docker compose \
+#     -f docker-compose.middleware.yml \
+#     -f docker-compose.monitoring.yml \
+#     -f docker-compose.prod.yml \
+#     --env-file .env up -d
+#
+# Every credential below uses `${VAR:?...}` interpolation: compose refuses to
+# start if the variable is unset or empty. Copy .env.example to .env and fill
+# in real values. NO default credentials are allowed in this file.
+
+name: vpp-prod
+
+services:
+  # ==========================================================================
+  # Application services (built from this repository)
+  # ==========================================================================
+  vpp-server:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    image: vpp/server:latest
+    restart: unless-stopped
+    ports:
+      - "${VPP_SERVER_PORT:-3000}:3000"
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required (mysql://user:pass@host:3306/db)}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required (min 32 random chars)}
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
+      KEYCLOAK_SERVER_URL: ${KEYCLOAK_SERVER_URL:-http://keycloak:8080}
+      KEYCLOAK_REALM: ${KEYCLOAK_REALM:-vpp}
+      KEYCLOAK_CLIENT_ID: ${KEYCLOAK_CLIENT_ID:-vpp-app}
+      KEYCLOAK_CLIENT_SECRET: ${KEYCLOAK_CLIENT_SECRET:?KEYCLOAK_CLIENT_SECRET is required}
+      TEMPORAL_ADDRESS: ${TEMPORAL_ADDRESS:-temporal:7233}
+      TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:-default}
+      KAFKA_BROKERS: ${KAFKA_BROKERS:-kafka:9092}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-}
+      MPESA_WEBHOOK_SECRET: ${MPESA_WEBHOOK_SECRET:?MPESA_WEBHOOK_SECRET is required}
+      AIRTEL_WEBHOOK_SECRET: ${AIRTEL_WEBHOOK_SECRET:?AIRTEL_WEBHOOK_SECRET is required}
+      TIGO_WEBHOOK_SECRET: ${TIGO_WEBHOOK_SECRET:?TIGO_WEBHOOK_SECRET is required}
+    depends_on:
+      - mysql
+      - redis
+      - temporal
+    networks:
+      - vpp-network
+
+  vpp-client:
+    build:
+      context: .
+      dockerfile: Dockerfile.client
+    image: vpp/client:latest
+    restart: unless-stopped
+    ports:
+      - "${VPP_CLIENT_PORT:-8080}:8080"
+    depends_on:
+      - vpp-server
+    networks:
+      - vpp-network
+
+  orchestrator:
+    build:
+      context: ./orchestrator
+      dockerfile: ../Dockerfile.orchestrator
+    image: vpp/orchestrator:latest
+    restart: unless-stopped
+    environment:
+      TEMPORAL_HOST_PORT: ${TEMPORAL_ADDRESS:-temporal:7233}
+      TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:-default}
+      DB_HOST: mysql
+      DB_PORT: "3306"
+      DB_USER: ${MYSQL_USER:-vpp}
+      DB_PASSWORD: ${MYSQL_PASSWORD:?MYSQL_PASSWORD is required}
+      DB_NAME: ${MYSQL_DATABASE:-vpp}
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
+      KAFKA_BROKERS: ${KAFKA_BROKERS:-kafka:9092}
+    depends_on:
+      - temporal
+      - mysql
+      - redis
+    networks:
+      - vpp-network
+
+  # ==========================================================================
+  # MySQL (no MySQL service exists in the dev compose files; prod needs one)
+  # ==========================================================================
+  mysql:
+    image: mysql:8.4
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?MYSQL_ROOT_PASSWORD is required}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-vpp}
+      MYSQL_USER: ${MYSQL_USER:-vpp}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?MYSQL_PASSWORD is required}
+    volumes:
+      - mysql-data:/var/lib/mysql
+    networks:
+      - vpp-network
+
+  # ==========================================================================
+  # Credential overrides for services defined in the dev compose files
+  # ==========================================================================
+  redis:
+    restart: unless-stopped
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
+
+  keycloak:
+    restart: unless-stopped
+    environment:
+      KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN:?KEYCLOAK_ADMIN is required}
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?KEYCLOAK_ADMIN_PASSWORD is required}
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://keycloak-postgresql:5432/keycloak
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD:?KEYCLOAK_DB_PASSWORD is required}
+      KC_HOSTNAME_STRICT: "false"
+      KC_HTTP_ENABLED: "true"
+
+  keycloak-postgresql:
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: keycloak
+      POSTGRES_PASSWORD: ${KEYCLOAK_DB_PASSWORD:?KEYCLOAK_DB_PASSWORD is required}
+      POSTGRES_DB: keycloak
+
+  minio:
+    restart: unless-stopped
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?MINIO_ROOT_USER is required}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD is required}
+
+  grafana:
+    restart: unless-stopped
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD is required}
+      - GF_USERS_ALLOW_SIGN_UP=false
+
+  temporal:
+    restart: unless-stopped
+
+  kafka:
+    restart: unless-stopped
+
+volumes:
+  mysql-data:
+
+networks:
+  vpp-network:
+    driver: bridge

@@ -142,6 +142,12 @@ None of those can be honestly scored from code inspection alone.
 | 8 | No integration tests against a real MySQL/Redis/Kafka/Temporal stack; money paths are only unit-tested | Medium | Needs CI service containers |
 | 9 | Blockchain anchoring, optimization, edge orchestration and analytics services still contain simulation-grade logic (honest about it, but not production evidence) | Medium | Product decision on what must be real |
 | 10 | Operational gaps: secret management/rotation, alert routing (`performance-alerting` TODO), migration rollback story | Medium | Deployment work |
+| 11 | `services/mqtt-fluvio-bridge` has never compiled: it imports `github.com/infinyon/fluvio-client-go v0.14.0`, which does not exist (proxy.golang.org 404; GitHub prompts for credentials), and `internal/fluvio/producer.go` is written against an API of that phantom module | High | Needs a real streaming client (or removal); the telemetry→Fluvio path in this repo is source code that cannot run |
+
+The Go orchestrator also did not compile before this PR (unused `context`/`fmt` imports, `dapr` `SaveState` arity,
+`workflow.RetryPolicy` / `workflow.NewApplicationError` which live in `go.temporal.io/sdk/temporal`), so its Temporal
+workflows had never been built or run. Those are fixed here; `go build ./... && go vet ./...` now pass for
+`orchestrator/`, and `orchestrator/go.sum` is committed.
 
 ---
 

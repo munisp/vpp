@@ -159,7 +159,7 @@ func (d *DaprService) SaveState(ctx context.Context, storeName string, key strin
 	if err != nil {
 		return fmt.Errorf("failed to encode state %s/%s: %w", storeName, key, err)
 	}
-	return d.client.SaveState(ctx, storeName, key, payload)
+	return d.client.SaveState(ctx, storeName, key, payload, nil)
 }
 
 // GetState loads and JSON-decodes the state stored under key.

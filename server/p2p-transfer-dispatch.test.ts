@@ -83,6 +83,8 @@ const activeAsset: AssetRow = {
   metadata: null,
 };
 
+const originalMaxValidity = process.env.GRID_CONTROL_MAX_VALIDITY_SECONDS;
+
 beforeEach(() => {
   tradeUpdates.length = 0;
   dispatches.length = 0;
@@ -95,6 +97,11 @@ afterEach(() => {
   vi.doUnmock('./services/control-delivery');
   vi.doUnmock('./integration/mqtt-broker');
   delete process.env.P2P_TRANSFER_WINDOW_SECONDS;
+  if (originalMaxValidity === undefined) {
+    delete process.env.GRID_CONTROL_MAX_VALIDITY_SECONDS;
+  } else {
+    process.env.GRID_CONTROL_MAX_VALIDITY_SECONDS = originalMaxValidity;
+  }
 });
 
 describe('executeEnergyTransfer', () => {
@@ -209,5 +216,27 @@ describe('executeEnergyTransfer', () => {
       executeEnergyTransfer({ tradeId: 11, sellerId: 7, buyerId: 8, energyAmount: 2000 })
     ).rejects.toThrow(/exceeds GRID_CONTROL_MAX_VALIDITY_SECONDS/);
     expect(dispatches).toEqual([]);
+  });
+
+  it('defaults the window to the deployment control bound, not the built-in maximum', async () => {
+    delete process.env.P2P_TRANSFER_WINDOW_SECONDS;
+    process.env.GRID_CONTROL_MAX_VALIDITY_SECONDS = '1800';
+    mockDb([activeAsset]);
+    mockDelivery(true);
+    mockBroker(true);
+    const { executeEnergyTransfer } = await import('./workflows/p2p-transfer-dispatch');
+
+    const result = await executeEnergyTransfer({
+      tradeId: 11,
+      sellerId: 7,
+      buyerId: 8,
+      energyAmount: 2000,
+    });
+
+    expect(result.success).toBe(true);
+    expect(dispatches[0]).toMatchObject({
+      validForSeconds: 1800,
+      setpointWatts: 4000, // 2000 Wh compressed into half an hour
+    });
   });
 });

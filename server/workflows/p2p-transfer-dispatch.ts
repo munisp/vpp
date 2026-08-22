@@ -16,11 +16,7 @@ import { trades, assets } from '../../drizzle/schema';
 import { and, eq } from 'drizzle-orm';
 import { dispatchDeviceSetpoint } from '../services/control-delivery';
 import { mqttBrokerService } from '../integration/mqtt-broker';
-import {
-  DEFAULT_MAX_VALIDITY_SECONDS,
-  MIN_VALIDITY_SECONDS,
-  maxValiditySeconds,
-} from '../services/control-validity';
+import { MIN_VALIDITY_SECONDS, maxValiditySeconds } from '../services/control-validity';
 
 export interface EnergyTransferInput {
   tradeId: number;
@@ -39,17 +35,18 @@ export interface EnergyTransferResult {
 /**
  * Window a P2P transfer is dispatched over. It must stay inside the platform's
  * control bounds: a transfer window longer than the maximum validity would be a
- * setpoint nothing expires.
+ * setpoint nothing expires, so the cap is also the default — the longest window
+ * the deployment allows is the gentlest export rate for a given trade.
  */
 export function p2pTransferWindowSeconds(): number {
   const raw = process.env.P2P_TRANSFER_WINDOW_SECONDS;
-  const configured = raw === undefined || raw === '' ? DEFAULT_MAX_VALIDITY_SECONDS : Number(raw);
+  const max = maxValiditySeconds();
+  const configured = raw === undefined || raw === '' ? max : Number(raw);
   if (!Number.isFinite(configured) || configured < MIN_VALIDITY_SECONDS) {
     throw new Error(
       `P2P_TRANSFER_WINDOW_SECONDS must be a number >= ${MIN_VALIDITY_SECONDS}; got ${raw}`
     );
   }
-  const max = maxValiditySeconds();
   if (configured > max) {
     throw new Error(
       `P2P_TRANSFER_WINDOW_SECONDS (${configured}) exceeds ` +

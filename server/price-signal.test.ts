@@ -470,7 +470,7 @@ describe('scoreFleetSignalResponse', () => {
     state.rows.set(tbl.priceSignals, [publishedSignal]);
     state.rows.set(tbl.priceSignalSites, [siteRow(1800)]);
     state.rows.set(tbl.priceSignalIntervals, []);
-    state.execute = async () => ({ rows: [{ samples: 0, power_sum: 0 }] });
+    state.execute = async () => ({ rows: [{ samples: 0, site_mean_power: 0 }] });
 
     const { scoreFleetSignalResponse } = await import('./services/price-signal');
     await scoreFleetSignalResponse('psig-1');
@@ -488,8 +488,8 @@ describe('scoreFleetSignalResponse', () => {
     state.rows.set(tbl.priceSignals, [publishedSignal]);
     state.rows.set(tbl.priceSignalSites, [siteRow(1800)]);
     state.rows.set(tbl.priceSignalIntervals, []);
-    // Four samples averaging -900 W of generation, i.e. 900 W of import.
-    state.execute = async () => ({ rows: [{ samples: 4, power_sum: -3600 }] });
+    // Site mean of -900 W of generation, i.e. 900 W of import, over two hours.
+    state.execute = async () => ({ rows: [{ samples: 4, site_mean_power: -900 }] });
 
     const { scoreFleetSignalResponse } = await import('./services/price-signal');
     await scoreFleetSignalResponse('psig-1');
@@ -507,12 +507,38 @@ describe('scoreFleetSignalResponse', () => {
     state.rows.set(tbl.priceSignals, [publishedSignal]);
     state.rows.set(tbl.priceSignalSites, [siteRow(1800)]);
     state.rows.set(tbl.priceSignalIntervals, []);
-    state.execute = async () => ({ rows: [{ samples: 4, power_sum: -14400 }] });
+    state.execute = async () => ({ rows: [{ samples: 4, site_mean_power: -3600 }] });
 
     const { scoreFleetSignalResponse } = await import('./services/price-signal');
     await scoreFleetSignalResponse('psig-1');
 
     const siteUpdate = state.updated.find(row => row.table === tbl.priceSignalSites);
     expect(siteUpdate?.values).toMatchObject({ response: 'deviated', actualNetWh: 7200 });
+  });
+
+  it('sums the site power across its assets rather than averaging the rows', async () => {
+    mockDb();
+    state.rows.set(tbl.priceSignals, [publishedSignal]);
+    state.rows.set(tbl.priceSignalSites, [siteRow(1800)]);
+    state.rows.set(tbl.priceSignalIntervals, []);
+    // Two assets, three samples each: the SQL groups by asset and sums the
+    // per-asset means, so a site importing 900 W through two meters is scored
+    // on 900 W and not on the 450 W a row-wise average would report.
+    const queries: string[] = [];
+    state.execute = async (query: unknown) => {
+      queries.push(JSON.stringify(query));
+      return { rows: [{ samples: 6, site_mean_power: -900 }] };
+    };
+
+    const { scoreFleetSignalResponse } = await import('./services/price-signal');
+    await scoreFleetSignalResponse('psig-1');
+
+    expect(queries.join(' ')).toContain('GROUP BY');
+    const siteUpdate = state.updated.find(row => row.table === tbl.priceSignalSites);
+    expect(siteUpdate?.values).toMatchObject({
+      response: 'followed',
+      actualNetWh: 1800,
+      telemetrySamples: 6,
+    });
   });
 });

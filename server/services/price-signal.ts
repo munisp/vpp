@@ -500,8 +500,9 @@ export async function publishFleetSignal(
  * Compare each site's metered energy over the window with the plan it returned.
  *
  * Telemetry is generation-positive (see community-energy.ts), so net import is
- * the negated sum. A window with no telemetry scores `no_telemetry`: that is an
- * absence of evidence, not compliance and not a breach.
+ * the negated site power, and the site's power is the sum of its assets' mean
+ * power over the window. A window with no telemetry scores `no_telemetry`: that
+ * is an absence of evidence, not compliance and not a breach.
  */
 export async function scoreFleetSignalResponse(signalId: string): Promise<FleetSignalSiteView[]> {
   const db = await requireDb();
@@ -534,13 +535,25 @@ export async function scoreFleetSignalResponse(signalId: string): Promise<FleetS
         `Site ${site.siteRef} has no user id, so its meter cannot be identified`
       );
     }
+    // Telemetry is keyed per asset, so a site with four assets emits four rows
+    // per timestamp. Each asset's mean power over the window is taken first and
+    // those means are summed: averaging the rows themselves would divide the
+    // site's power by its asset count and record a compliant site as deviated.
     const measured = await db.execute<SqlRow>(sql`
-      SELECT COUNT(*)::int AS samples, COALESCE(SUM(t.power), 0)::float AS power_sum
-      FROM telemetry t
-      JOIN assets a ON a.id = t."assetId"
-      WHERE a."userId" = ${site.userId}
-        AND t.timestamp >= ${signal.startsAt}
-        AND t.timestamp < ${signal.endsAt}
+      WITH per_asset AS (
+        SELECT t."assetId" AS asset_id,
+               COUNT(*)::int AS samples,
+               AVG(t.power)::float AS mean_power
+        FROM telemetry t
+        JOIN assets a ON a.id = t."assetId"
+        WHERE a."userId" = ${site.userId}
+          AND t.timestamp >= ${signal.startsAt}
+          AND t.timestamp < ${signal.endsAt}
+        GROUP BY t."assetId"
+      )
+      SELECT COALESCE(SUM(samples), 0)::int AS samples,
+             COALESCE(SUM(mean_power), 0)::float AS site_mean_power
+      FROM per_asset
     `);
     const row = measured.rows?.[0];
     const samples = row ? Number(row.samples) : 0;
@@ -553,7 +566,7 @@ export async function scoreFleetSignalResponse(signalId: string): Promise<FleetS
       continue;
     }
 
-    const meanNetW = -(Number(row?.power_sum ?? 0) / samples);
+    const meanNetW = -Number(row?.site_mean_power ?? 0);
     const actualNetWh = Math.round(meanNetW * windowHours);
     const tolerance = Math.max(
       RESPONSE_TOLERANCE_FLOOR_WH,

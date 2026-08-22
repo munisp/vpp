@@ -94,12 +94,12 @@ export const paymentProcessingRouter = router({
             checkoutRequestId: response.checkoutRequestId,
             billingId: inv.id,
           }),
-        });
+        }).returning({ id: payments.id });
 
         // Start Temporal workflow for payment processing
         try {
           const workflowHandle = await temporalClient.startPaymentWorkflow({
-            paymentId: payment.insertId.toString(),
+            paymentId: payment.id.toString(),
             userId: ctx.user.id.toString(),
             amount,
             currency: 'TZS',
@@ -118,7 +118,7 @@ export const paymentProcessingRouter = router({
 
         // Publish Kafka event for payment initiation
         await kafkaPublisher.publishPaymentInitiated({
-          paymentId: payment.insertId.toString(),
+          paymentId: payment.id.toString(),
           userId: ctx.user.id.toString(),
           amount,
           currency: 'TZS',
@@ -215,7 +215,7 @@ export const paymentProcessingRouter = router({
             .where(and(eq(payments.id, pmt.id), eq(payments.status, "pending")));
 
           // Only the transition that actually happened settles the invoice.
-          if (Number(settled[0].affectedRows) > 0 && pmt.billingId) {
+          if ((settled.rowCount ?? 0) > 0 && pmt.billingId) {
             await db
               .update(billings)
               .set({ status: "paid", paidAt: new Date(), transactionId: pmt.transactionId })

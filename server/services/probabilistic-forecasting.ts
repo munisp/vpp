@@ -9,6 +9,7 @@ import { getDb } from '../db';
 import { sql } from 'drizzle-orm';
 import { createHash } from 'crypto';
 import { kafkaPublisher } from '../integration/kafka-publisher';
+import type { SqlRow } from '../sql-row';
 
 // Types for forecasting
 export interface ForecastQuantiles {
@@ -443,16 +444,16 @@ export class ProbabilisticForecastingService {
     const db = await getDb();
     if (!db) throw new Error('Database not available');
 
-    const runResult = await db.execute(sql`
+    const runResult = await db.execute<SqlRow>(sql`
       SELECT * FROM forecast_runs WHERE run_id = ${runId}
     `);
-    const run = (runResult as any)[0]?.[0];
+    const run = runResult.rows[0];
     if (!run) return null;
 
-    const valuesResult = await db.execute(sql`
+    const valuesResult = await db.execute<SqlRow>(sql`
       SELECT * FROM forecast_values WHERE run_id = ${run.id} ORDER BY forecast_time ASC
     `);
-    const values = (valuesResult as any)[0] || [];
+    const values = valuesResult.rows || [];
 
     const points: ForecastPoint[] = values.map((v: any) => ({
       timestamp: v.forecast_time,
@@ -502,20 +503,20 @@ export class ProbabilisticForecastingService {
     if (scope.assetId) {
       query = sql`
         SELECT timestamp, power as value FROM telemetry
-        WHERE assetId = ${scope.assetId} AND timestamp >= ${startDate}
+        WHERE "assetId" = ${scope.assetId} AND timestamp >= ${startDate}
         ORDER BY timestamp ASC
       `;
     } else if (scope.userId) {
       query = sql`
         SELECT t.timestamp, SUM(t.power) as value FROM telemetry t
-        JOIN assets a ON a.id = t.assetId
-        WHERE a.userId = ${scope.userId} AND t.timestamp >= ${startDate}
+        JOIN assets a ON a.id = t."assetId"
+        WHERE a."userId" = ${scope.userId} AND t.timestamp >= ${startDate}
         GROUP BY t.timestamp
         ORDER BY t.timestamp ASC
       `;
     } else if (scope.region) {
       query = sql`
-        SELECT timestamp, totalLoad as value FROM grid_monitoring
+        SELECT timestamp, total_load as value FROM grid_monitoring
         WHERE timestamp >= ${startDate}
         ORDER BY timestamp ASC
       `;
@@ -523,8 +524,8 @@ export class ProbabilisticForecastingService {
       return [];
     }
 
-    const result = await db.execute(query);
-    return ((result as any)[0] || []).map((row: any) => ({
+    const result = await db.execute<SqlRow>(query);
+    return (result.rows || []).map((row: any) => ({
       timestamp: new Date(row.timestamp),
       value: row.value || 0,
     }));
@@ -547,14 +548,14 @@ export class ProbabilisticForecastingService {
     if (scope.assetId) {
       query = sql`
         SELECT timestamp, power as value FROM telemetry
-        WHERE assetId = ${scope.assetId} AND timestamp >= ${startDate}
+        WHERE "assetId" = ${scope.assetId} AND timestamp >= ${startDate}
         ORDER BY timestamp ASC
       `;
     } else if (scope.userId) {
       query = sql`
         SELECT t.timestamp, SUM(t.power) as value FROM telemetry t
-        JOIN assets a ON a.id = t.assetId
-        WHERE a.userId = ${scope.userId} AND a.assetType = ${assetType} AND t.timestamp >= ${startDate}
+        JOIN assets a ON a.id = t."assetId"
+        WHERE a."userId" = ${scope.userId} AND a."assetType" = ${assetType} AND t.timestamp >= ${startDate}
         GROUP BY t.timestamp
         ORDER BY t.timestamp ASC
       `;
@@ -562,8 +563,8 @@ export class ProbabilisticForecastingService {
       return [];
     }
 
-    const result = await db.execute(query);
-    return ((result as any)[0] || []).map((row: any) => ({
+    const result = await db.execute<SqlRow>(query);
+    return (result.rows || []).map((row: any) => ({
       timestamp: new Date(row.timestamp),
       value: Math.max(0, row.value || 0), // Generation is always positive
     }));
@@ -579,13 +580,13 @@ export class ProbabilisticForecastingService {
     const startDate = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
     const country = region.startsWith('NG') ? 'nigeria' : 'tanzania';
 
-    const result = await db.execute(sql`
-      SELECT timestamp, price as value FROM marketPrices
+    const result = await db.execute<SqlRow>(sql`
+      SELECT timestamp, price as value FROM "marketPrices"
       WHERE country = ${country} AND timestamp >= ${startDate}
       ORDER BY timestamp ASC
     `);
 
-    return ((result as any)[0] || []).map((row: any) => ({
+    return (result.rows || []).map((row: any) => ({
       timestamp: new Date(row.timestamp),
       value: row.value || 0,
     }));
@@ -600,13 +601,13 @@ export class ProbabilisticForecastingService {
 
     const startDate = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
 
-    const result = await db.execute(sql`
+    const result = await db.execute<SqlRow>(sql`
       SELECT timestamp, marginal_emissions as value FROM emissions_factors
       WHERE region = ${region} AND timestamp >= ${startDate}
       ORDER BY timestamp ASC
     `);
 
-    return ((result as any)[0] || []).map((row: any) => ({
+    return (result.rows || []).map((row: any) => ({
       timestamp: new Date(row.timestamp),
       value: row.value || 0,
     }));
@@ -712,7 +713,7 @@ export class ProbabilisticForecastingService {
 
     try {
       // Insert forecast run
-      const runResult = await db.execute(sql`
+      const runResult = await db.execute<SqlRow>(sql`
         INSERT INTO forecast_runs (
           run_id, forecast_type, scope_type, scope_id, region,
           model_version, model_type, forecast_horizon_hours, interval_minutes,
@@ -725,13 +726,14 @@ export class ProbabilisticForecastingService {
           ${metrics.mape ? Math.round(metrics.mape * 100) : null},
           'completed', NOW()
         )
+        RETURNING id
       `);
 
-      const forecastRunId = (runResult as any).insertId;
+      const forecastRunId = Number(runResult.rows[0].id);
 
       // Insert forecast values (batch insert for efficiency)
       for (const point of points) {
-        await db.execute(sql`
+        await db.execute<SqlRow>(sql`
           INSERT INTO forecast_values (
             run_id, forecast_time, p10_value, p50_value, p90_value, mean_value, confidence_score, created_at
           ) VALUES (

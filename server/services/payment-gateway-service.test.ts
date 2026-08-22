@@ -10,7 +10,11 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 vi.mock('../db', () => ({
   getDb: vi.fn(() => Promise.resolve({
     insert: vi.fn(() => ({
-      values: vi.fn(() => Promise.resolve([{ insertId: 1 }])),
+      // node-postgres has no insertId: the generated key comes back from
+      // `.returning()`.
+      values: vi.fn(() => ({
+        returning: vi.fn(() => Promise.resolve([{ id: 1 }])),
+      })),
     })),
     select: vi.fn(() => ({
       from: vi.fn(() => ({

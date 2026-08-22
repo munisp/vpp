@@ -139,7 +139,7 @@ async function calculateDRPotential(): Promise<number> {
       totalPower: sql<number>`SUM(${telemetry.power})`,
     })
     .from(telemetry)
-    .where(gte(telemetry.timestamp, sql`DATE_SUB(NOW(), INTERVAL 1 HOUR)`));
+    .where(gte(telemetry.timestamp, sql`(NOW() - INTERVAL '1 hour')`));
 
   const totalPower = result[0]?.totalPower || 0;
 

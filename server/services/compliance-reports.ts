@@ -24,6 +24,7 @@ import { regulatorReports, type RegulatorReport } from "../../drizzle/trust-acce
 import { settlementLedger } from "./settlement-ledger";
 import { getNtlSummaryForPeriod } from "./ntl-detection";
 import { generatePDFReport } from "../_core/export";
+import type { SqlRow } from '../sql-row';
 
 /** Recursively sort object keys so identical data always serializes identically. */
 function canonicalize(value: any): any {
@@ -87,7 +88,7 @@ async function collectSourceData(periodStart: Date, periodEnd: Date): Promise<Re
   if (!db) throw new Error("Database not available");
 
   // 1. Compliance checks in range (raw SQL per the compliance-automation data model)
-  const checksResult = await db.execute(sql`
+  const checksResult = await db.execute<SqlRow>(sql`
     SELECT cc.id, cc.status, cc.checked_at, cc.findings,
            cr.rule_code, cr.rule_name, cr.rule_category
     FROM compliance_checks cc
@@ -95,7 +96,7 @@ async function collectSourceData(periodStart: Date, periodEnd: Date): Promise<Re
     WHERE cc.checked_at >= ${periodStart} AND cc.checked_at <= ${periodEnd}
     ORDER BY cc.checked_at ASC
   `);
-  const checkRows = ((checksResult as any)[0] || []) as Array<any>;
+  const checkRows = (checksResult.rows || []) as Array<any>;
 
   const byStatus: Record<string, number> = {};
   const byCategory: Record<string, number> = {};
@@ -146,13 +147,13 @@ async function collectSourceData(periodStart: Date, periodEnd: Date): Promise<Re
   const chain = await settlementLedger.verifyChain();
 
   // 4. Blockchain anchor statuses (raw SQL per the blockchain-audit data model)
-  const anchorsResult = await db.execute(sql`
+  const anchorsResult = await db.execute<SqlRow>(sql`
     SELECT status, COUNT(*) AS count
     FROM blockchain_anchors
     WHERE created_at >= ${periodStart} AND created_at <= ${periodEnd}
     GROUP BY status
   `);
-  const anchorRows = ((anchorsResult as any)[0] || []) as Array<{ status: string; count: number }>;
+  const anchorRows = (anchorsResult.rows || []) as Array<{ status: string; count: number }>;
   const anchorsByStatus: Record<string, number> = {};
   for (const row of anchorRows) {
     anchorsByStatus[row.status] = Number(row.count);
@@ -300,10 +301,10 @@ export async function generateReport(params: {
     periodEnd: params.periodEnd,
     checksum,
     sourceJson,
-  });
+  }).returning({ id: regulatorReports.id });
 
   return {
-    reportId: Number(insert[0].insertId),
+    reportId: Number(insert[0].id),
     checksum,
     pdfBase64: pdfBuffer.toString("base64"),
   };

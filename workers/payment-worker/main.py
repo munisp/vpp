@@ -15,8 +15,9 @@ from typing import Optional
 from dataclasses import dataclass
 
 import httpx
-import mysql.connector
-from mysql.connector import Error
+import psycopg2
+import psycopg2.extras
+from psycopg2 import Error
 from temporalio import activity, workflow
 from temporalio.client import Client
 from temporalio.worker import Worker
@@ -74,13 +75,18 @@ class PaymentProcessingResult:
 # Database helpers
 # ---------------------------------------------------------------------------
 def get_db_connection():
-    """Create a MySQL database connection from environment variables."""
+    """Create a PostgreSQL database connection from environment variables."""
     try:
-        connection = mysql.connector.connect(
+        connection = psycopg2.connect(
             host=os.getenv('DB_HOST', 'localhost'),
-            database=os.getenv('DB_NAME', 'vpp_platform'),
-            user=os.getenv('DB_USER', 'root'),
+            port=os.getenv('DB_PORT', '5432'),
+            dbname=os.getenv('DB_NAME', 'vpp_platform'),
+            user=os.getenv('DB_USER', 'postgres'),
             password=os.getenv('DB_PASSWORD', ''),
+            sslmode=os.getenv('DB_SSLMODE', 'require'),
+            # timestamp columns hold UTC and NOW() is converted with the
+            # session time zone, so the session must be UTC.
+            options='-c timezone=UTC',
         )
         return connection
     except Error as e:
@@ -285,10 +291,10 @@ async def query_payment_status(gateway: str, transaction_id: str) -> dict:
         # The real inquiry is therefore a DB read of the callback-recorded
         # status for the payment carrying this transaction ID.
         connection = get_db_connection()
-        cursor = connection.cursor(dictionary=True)
+        cursor = connection.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         try:
             cursor.execute(
-                "SELECT id, status FROM payments WHERE transactionId = %s ORDER BY id DESC LIMIT 1",
+                'SELECT id, status FROM payments WHERE "transactionId" = %s ORDER BY id DESC LIMIT 1',
                 (transaction_id,),
             )
             row = cursor.fetchone()
@@ -326,12 +332,12 @@ async def update_payment_status(
     try:
         if transaction_id:
             cursor.execute(
-                "UPDATE payments SET status = %s, transactionId = %s, metadata = %s, updatedAt = NOW() WHERE id = %s",
+                'UPDATE payments SET status = %s, "transactionId" = %s, metadata = %s, "updatedAt" = NOW() WHERE id = %s',
                 (status, transaction_id, json.dumps(metadata) if metadata else None, payment_id),
             )
         else:
             cursor.execute(
-                "UPDATE payments SET status = %s, updatedAt = NOW() WHERE id = %s",
+                'UPDATE payments SET status = %s, "updatedAt" = NOW() WHERE id = %s',
                 (status, payment_id),
             )
         connection.commit()
@@ -366,8 +372,8 @@ async def send_payment_notification(user_id: int, payment_id: int, status: str, 
         # alerts.alertType enum: system/trading/billing/maintenance
         severity = 'info' if status == 'completed' else 'error'
         cursor.execute(
-            """INSERT INTO alerts (userId, alertType, severity, title, message, isRead, metadata, createdAt)
-               VALUES (%s, 'billing', %s, %s, %s, 0, %s, NOW())""",
+            """INSERT INTO alerts ("userId", "alertType", severity, title, message, "isRead", metadata, "createdAt")
+               VALUES (%s, 'billing', %s, %s, %s, false, %s, NOW())""",
             (user_id, severity, title, body, json.dumps({'paymentId': payment_id, 'status': status})),
         )
         connection.commit()
@@ -392,9 +398,9 @@ async def record_payment_audit(payment_id: int, action: str, details: dict) -> b
     """
     logger.info(f"Recording audit log for payment {payment_id}: {action}")
     connection = get_db_connection()
-    cursor = connection.cursor(dictionary=True)
+    cursor = connection.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     try:
-        cursor.execute("SELECT paymentMethod FROM payments WHERE id = %s", (payment_id,))
+        cursor.execute('SELECT "paymentMethod" FROM payments WHERE id = %s', (payment_id,))
         row = cursor.fetchone()
         if not row:
             raise ValueError(f"Cannot record audit: payment {payment_id} not found")
@@ -449,12 +455,12 @@ async def process_refund(payment_id: int, reason: str) -> bool:
     """
     logger.info(f"Processing refund for payment {payment_id}: {reason}")
     connection = get_db_connection()
-    cursor = connection.cursor(dictionary=True)
+    cursor = connection.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     try:
         # payments has no `gateway` column; the gateway is payments.paymentMethod
         # (enum: mpesa/airtel_money/tigo_pesa/bank_transfer/card).
         cursor.execute(
-            "SELECT paymentMethod, transactionId, amount, phoneNumber, status FROM payments WHERE id = %s",
+            'SELECT "paymentMethod", "transactionId", amount, "phoneNumber", status FROM payments WHERE id = %s',
             (payment_id,),
         )
         payment = cursor.fetchone()
@@ -514,11 +520,13 @@ async def process_refund(payment_id: int, reason: str) -> bool:
             )
             cursor.execute(
                 """UPDATE payments
-                   SET metadata = JSON_SET(
-                       COALESCE(metadata, JSON_OBJECT()),
-                       '$.refundStatus', 'manual_review_required',
-                       '$.refundReason', %s
-                   ), updatedAt = NOW()
+                   SET metadata = jsonb_set(
+                       jsonb_set(
+                           COALESCE(metadata::jsonb, '{}'::jsonb),
+                           '{refundStatus}', '"manual_review_required"'::jsonb, true
+                       ),
+                       '{refundReason}', to_jsonb(%s::text), true
+                   )::text, "updatedAt" = NOW()
                    WHERE id = %s""",
                 (reason, payment_id),
             )
@@ -527,7 +535,7 @@ async def process_refund(payment_id: int, reason: str) -> bool:
 
         # M-Pesa reversal accepted by the gateway.
         cursor.execute(
-            "UPDATE payments SET status = 'refunded', updatedAt = NOW() WHERE id = %s",
+            'UPDATE payments SET status = \'refunded\', "updatedAt" = NOW() WHERE id = %s',
             (payment_id,),
         )
         connection.commit()

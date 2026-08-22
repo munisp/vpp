@@ -153,8 +153,8 @@ export class PaymentReconciliationEngine {
       metadata: JSON.stringify({ gatewayData }),
     };
 
-    const result = await db.insert(paymentReconciliations).values(reconciliationData);
-    const reconciliationId = result[0] ? result[0].insertId : 0;
+    const result = await db.insert(paymentReconciliations).values(reconciliationData).returning({ id: paymentReconciliations.id });
+    const reconciliationId = result[0] ? result[0].id : 0;
 
     // Create audit log
     await this.createAuditLog({

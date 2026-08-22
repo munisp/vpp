@@ -12,6 +12,8 @@ import { derCapabilities } from './der-capabilities';
 import { kafkaPublisher } from '../integration/kafka-publisher';
 import { marketPrices } from '../../drizzle/schema';
 import { pricePredictionService } from '../ml/price-prediction';
+import type { SqlRow } from '../sql-row';
+import { jsonSetText } from '../sql-json';
 
 // Types for community energy
 export interface EnergyCommunity {
@@ -112,7 +114,7 @@ export class CommunityEnergyService {
 
     const communityCode = `EC_${Date.now().toString(36)}_${Math.random().toString(36).substring(2, 6)}`;
 
-    const result = await db.execute(sql`
+    const result = await db.execute<SqlRow>(sql`
       INSERT INTO energy_communities (
         community_code, name, description, community_type,
         region, grid_connection_point, governance_model,
@@ -129,11 +131,12 @@ export class CommunityEnergyService {
         ${community.allocationMethod || 'proportional_capacity'},
         'forming', NOW(), NOW()
       )
+      RETURNING id
     `);
 
     console.log(`[CommunityEnergy] Created community ${communityCode}: ${community.name}`);
 
-    return this.getCommunity((result as any).insertId) as Promise<EnergyCommunity>;
+    return this.getCommunity(Number(result.rows[0].id)) as Promise<EnergyCommunity>;
   }
 
   /**
@@ -150,8 +153,8 @@ export class CommunityEnergyService {
       query = sql`SELECT * FROM energy_communities WHERE community_code = ${communityId}`;
     }
 
-    const result = await db.execute(query);
-    const row = (result as any)[0]?.[0];
+    const result = await db.execute<SqlRow>(query);
+    const row = result.rows[0];
     return row ? this.mapRowToCommunity(row) : null;
   }
 
@@ -173,25 +176,25 @@ export class CommunityEnergyService {
     if (!db) throw new Error('Database not available');
 
     // Check if already a member
-    const existingResult = await db.execute(sql`
+    const existingResult = await db.execute<SqlRow>(sql`
       SELECT id FROM community_members
       WHERE community_id = ${communityId} AND user_id = ${userId}
     `);
-    if ((existingResult as any)[0]?.length > 0) {
+    if (existingResult.rows?.length > 0) {
       throw new Error('User is already a member of this community');
     }
 
     // Calculate contributed capacity from user's assets if not provided
     let contributedCapacity = options.contributedCapacityKw || 0;
     if (!options.contributedCapacityKw) {
-      const assetsResult = await db.execute(sql`
+      const assetsResult = await db.execute<SqlRow>(sql`
         SELECT SUM(capacity) as total FROM assets
-        WHERE userId = ${userId} AND status = 'active'
+        WHERE "userId" = ${userId} AND status = 'active'
       `);
-      contributedCapacity = ((assetsResult as any)[0]?.[0]?.total || 0) / 1000; // Convert W to kW
+      contributedCapacity = (assetsResult.rows[0]?.total || 0) / 1000; // Convert W to kW
     }
 
-    const result = await db.execute(sql`
+    const result = await db.execute<SqlRow>(sql`
       INSERT INTO community_members (
         community_id, user_id, role, joined_at,
         contributed_capacity_kw, share_percentage,
@@ -210,7 +213,7 @@ export class CommunityEnergyService {
 
     console.log(`[CommunityEnergy] Added user ${userId} to community ${communityId}`);
 
-    return this.getMember((result as any).insertId) as Promise<CommunityMember>;
+    return this.getMember(Number(result.rows[0].id)) as Promise<CommunityMember>;
   }
 
   /**
@@ -220,11 +223,11 @@ export class CommunityEnergyService {
     const db = await getDb();
     if (!db) throw new Error('Database not available');
 
-    const result = await db.execute(sql`
+    const result = await db.execute<SqlRow>(sql`
       SELECT * FROM community_members WHERE id = ${memberId}
     `);
 
-    const row = (result as any)[0]?.[0];
+    const row = result.rows[0];
     return row ? this.mapRowToMember(row) : null;
   }
 
@@ -235,13 +238,13 @@ export class CommunityEnergyService {
     const db = await getDb();
     if (!db) throw new Error('Database not available');
 
-    const result = await db.execute(sql`
+    const result = await db.execute<SqlRow>(sql`
       SELECT * FROM community_members
       WHERE community_id = ${communityId} AND status IN ('pending', 'active')
       ORDER BY joined_at
     `);
 
-    return ((result as any)[0] || []).map(this.mapRowToMember);
+    return (result.rows || []).map(this.mapRowToMember);
   }
 
   /**
@@ -251,7 +254,7 @@ export class CommunityEnergyService {
     const db = await getDb();
     if (!db) throw new Error('Database not available');
 
-    await db.execute(sql`
+    await db.execute<SqlRow>(sql`
       UPDATE community_members SET status = 'active', updated_at = NOW()
       WHERE id = ${memberId}
     `);
@@ -302,7 +305,7 @@ export class CommunityEnergyService {
             : 10000 / activeMembers.length;
       }
 
-      await db.execute(sql`
+      await db.execute<SqlRow>(sql`
         UPDATE community_members SET share_percentage = ${Math.round(sharePercentage)}, updated_at = NOW()
         WHERE id = ${member.id}
       `);
@@ -342,21 +345,21 @@ export class CommunityEnergyService {
 
     for (const member of activeMembers) {
       // Get user name
-      const userResult = await db.execute(sql`SELECT name FROM users WHERE id = ${member.userId}`);
-      const userName = (userResult as any)[0]?.[0]?.name || `User ${member.userId}`;
+      const userResult = await db.execute<SqlRow>(sql`SELECT name FROM users WHERE id = ${member.userId}`);
+      const userName = userResult.rows[0]?.name || `User ${member.userId}`;
 
       // Get telemetry data
-      const telemetryResult = await db.execute(sql`
+      const telemetryResult = await db.execute<SqlRow>(sql`
         SELECT 
           SUM(CASE WHEN t.power > 0 THEN t.power * 5 / 60 ELSE 0 END) as generation_wh,
           SUM(CASE WHEN t.power < 0 THEN ABS(t.power) * 5 / 60 ELSE 0 END) as consumption_wh
         FROM telemetry t
-        JOIN assets a ON a.id = t.assetId
-        WHERE a.userId = ${member.userId}
+        JOIN assets a ON a.id = t."assetId"
+        WHERE a."userId" = ${member.userId}
           AND t.timestamp >= ${periodStart}
           AND t.timestamp <= ${periodEnd}
       `);
-      const telemetry = (telemetryResult as any)[0]?.[0] || {};
+      const telemetry = telemetryResult.rows[0] || {};
 
       const generationWh = telemetry.generation_wh || 0;
       const consumptionWh = telemetry.consumption_wh || 0;
@@ -424,7 +427,7 @@ export class CommunityEnergyService {
     }
 
     // Store allocation
-    const result = await db.execute(sql`
+    const result = await db.execute<SqlRow>(sql`
       INSERT INTO community_allocations (
         community_id, period_start, period_end,
         total_generation_wh, total_consumption_wh,
@@ -456,7 +459,7 @@ export class CommunityEnergyService {
     }
 
     return {
-      id: (result as any).insertId,
+      id: Number(result.rows[0].id),
       communityId,
       periodStart,
       periodEnd,
@@ -479,10 +482,10 @@ export class CommunityEnergyService {
     const db = await getDb();
     if (!db) throw new Error('Database not available');
 
-    const allocationResult = await db.execute(sql`
+    const allocationResult = await db.execute<SqlRow>(sql`
       SELECT * FROM community_allocations WHERE id = ${allocationId}
     `);
-    const allocation = (allocationResult as any)[0]?.[0];
+    const allocation = allocationResult.rows[0];
     if (!allocation) throw new Error('Allocation not found');
 
     const memberAllocations: MemberAllocation[] = JSON.parse(allocation.member_allocations);
@@ -511,7 +514,7 @@ export class CommunityEnergyService {
     }
 
     // Update allocation status
-    await db.execute(sql`
+    await db.execute<SqlRow>(sql`
       UPDATE community_allocations SET status = 'distributed' WHERE id = ${allocationId}
     `);
 
@@ -546,16 +549,16 @@ export class CommunityEnergyService {
     let telemetryRowsSeen = 0;
 
     for (const member of members.filter(m => m.status === 'active')) {
-      const telemetryResult = await db.execute(sql`
-        SELECT a.assetType, t.power, t.stateOfCharge, t.frequency, t.voltage
+      const telemetryResult = await db.execute<SqlRow>(sql`
+        SELECT a."assetType", t.power, t."stateOfCharge", t.frequency, t.voltage
         FROM telemetry t
-        JOIN assets a ON a.id = t.assetId
-        WHERE a.userId = ${member.userId}
-          AND t.timestamp > DATE_SUB(NOW(), INTERVAL 5 MINUTE)
+        JOIN assets a ON a.id = t."assetId"
+        WHERE a."userId" = ${member.userId}
+          AND t.timestamp > (NOW() - INTERVAL '5 minute')
         ORDER BY t.timestamp DESC
       `);
 
-      for (const t of (telemetryResult as any)[0] || []) {
+      for (const t of telemetryResult.rows || []) {
         telemetryRowsSeen++;
         // Rows arrive newest-first, so the first non-null reading is the latest.
         if (latestFrequencyHz === null && t.frequency != null) {
@@ -714,9 +717,9 @@ export class CommunityEnergyService {
       reason,
       requestedAt: new Date().toISOString(),
     });
-    await db.execute(sql`
+    await db.execute<SqlRow>(sql`
       UPDATE energy_communities SET
-        metadata = JSON_SET(COALESCE(metadata, '{}'), '$.pendingTransition', CAST(${pendingTransition} AS JSON)),
+        metadata = ${jsonSetText(sql`metadata`, { pendingTransition: { json: pendingTransition } })},
         updated_at = NOW()
       WHERE id = ${communityId}
     `);
@@ -748,10 +751,10 @@ export class CommunityEnergyService {
     const db = await getDb();
     if (!db) throw new Error('Database not available');
 
-    const result = await db.execute(sql`
+    const result = await db.execute<SqlRow>(sql`
       SELECT islanding_mode, metadata FROM energy_communities WHERE id = ${communityId} LIMIT 1
     `);
-    const row = (result as any)[0]?.[0] ?? (result as any)[0];
+    const row = result.rows[0] ?? result.rows;
     if (!row) return { success: false, message: 'Community not found', newMode: 'unknown' };
 
     let pending: { targetMode?: string; status?: string; reason?: string } | null = null;
@@ -772,14 +775,13 @@ export class CommunityEnergyService {
 
     const confirmedAt = new Date().toISOString();
     if (!approve) {
-      await db.execute(sql`
+      await db.execute<SqlRow>(sql`
         UPDATE energy_communities SET
-          metadata = JSON_SET(
-            COALESCE(metadata, '{}'),
-            '$.pendingTransition.status', 'rejected',
-            '$.pendingTransition.rejectedBy', ${operatorId},
-            '$.pendingTransition.rejectedAt', ${confirmedAt}
-          ),
+          metadata = ${jsonSetText(sql`metadata`, {
+            'pendingTransition.status': 'rejected',
+            'pendingTransition.rejectedBy': operatorId,
+            'pendingTransition.rejectedAt': confirmedAt,
+          })},
           updated_at = NOW()
         WHERE id = ${communityId}
       `);
@@ -791,15 +793,14 @@ export class CommunityEnergyService {
       };
     }
 
-    await db.execute(sql`
+    await db.execute<SqlRow>(sql`
       UPDATE energy_communities SET
         islanding_mode = ${pending.targetMode},
-        metadata = JSON_SET(
-          COALESCE(metadata, '{}'),
-          '$.pendingTransition.status', 'confirmed',
-          '$.pendingTransition.confirmedBy', ${operatorId},
-          '$.pendingTransition.confirmedAt', ${confirmedAt}
-        ),
+        metadata = ${jsonSetText(sql`metadata`, {
+          'pendingTransition.status': 'confirmed',
+          'pendingTransition.confirmedBy': operatorId,
+          'pendingTransition.confirmedAt': confirmedAt,
+        })},
         updated_at = NOW()
       WHERE id = ${communityId}
     `);
@@ -844,9 +845,9 @@ export class CommunityEnergyService {
       reason: 'grid_reconnection_requested',
       requestedAt: new Date().toISOString(),
     });
-    await db.execute(sql`
+    await db.execute<SqlRow>(sql`
       UPDATE energy_communities SET
-        metadata = JSON_SET(COALESCE(metadata, '{}'), '$.pendingTransition', CAST(${pendingTransition} AS JSON)),
+        metadata = ${jsonSetText(sql`metadata`, { pendingTransition: { json: pendingTransition } })},
         updated_at = NOW()
       WHERE id = ${communityId}
     `);
@@ -869,7 +870,7 @@ export class CommunityEnergyService {
     const db = await getDb();
     if (!db) throw new Error('Database not available');
 
-    const result = await db.execute(sql`
+    const result = await db.execute<SqlRow>(sql`
       SELECT ec.*, cm.id as member_id, cm.role, cm.joined_at, cm.contributed_capacity_kw,
              cm.share_percentage, cm.auto_participate, cm.priority_level, cm.status as member_status
       FROM energy_communities ec
@@ -877,7 +878,7 @@ export class CommunityEnergyService {
       WHERE cm.user_id = ${userId} AND cm.status IN ('pending', 'active')
     `);
 
-    return ((result as any)[0] || []).map((row: any) => ({
+    return (result.rows || []).map((row: any) => ({
       ...this.mapRowToCommunity(row),
       membership: {
         id: row.member_id,

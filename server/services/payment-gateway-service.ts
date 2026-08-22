@@ -58,9 +58,9 @@ class PaymentGatewayService {
           accountReference: request.accountReference,
           transactionDesc: request.transactionDesc,
         }),
-      });
+      }).returning({ id: payments.id });
 
-      const paymentId = paymentRecord[0]?.insertId;
+      const paymentId = paymentRecord[0]?.id;
       if (!paymentId) throw new Error('Failed to create payment record');
 
       // Route to appropriate gateway

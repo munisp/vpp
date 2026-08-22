@@ -48,15 +48,15 @@ spec:
             - name: SERVICES
               value: frontend
             - name: DB
-              value: mysql
-            - name: MYSQL_SEEDS
-              value: mysql-ha-primary.vpp-platform.svc.cluster.local
-            - name: MYSQL_USER
+              value: postgres12
+            - name: POSTGRES_SEEDS
+              value: postgres-ha-primary.vpp-platform.svc.cluster.local
+            - name: POSTGRES_USER
               valueFrom:
                 secretKeyRef:
                   name: temporal-db-credentials
                   key: username
-            - name: MYSQL_PWD
+            - name: POSTGRES_PWD
               valueFrom:
                 secretKeyRef:
                   name: temporal-db-credentials
@@ -134,15 +134,15 @@ spec:
             - name: SERVICES
               value: history
             - name: DB
-              value: mysql
-            - name: MYSQL_SEEDS
-              value: mysql-ha-primary.vpp-platform.svc.cluster.local
-            - name: MYSQL_USER
+              value: postgres12
+            - name: POSTGRES_SEEDS
+              value: postgres-ha-primary.vpp-platform.svc.cluster.local
+            - name: POSTGRES_USER
               valueFrom:
                 secretKeyRef:
                   name: temporal-db-credentials
                   key: username
-            - name: MYSQL_PWD
+            - name: POSTGRES_PWD
               valueFrom:
                 secretKeyRef:
                   name: temporal-db-credentials
@@ -220,15 +220,15 @@ spec:
             - name: SERVICES
               value: matching
             - name: DB
-              value: mysql
-            - name: MYSQL_SEEDS
-              value: mysql-ha-primary.vpp-platform.svc.cluster.local
-            - name: MYSQL_USER
+              value: postgres12
+            - name: POSTGRES_SEEDS
+              value: postgres-ha-primary.vpp-platform.svc.cluster.local
+            - name: POSTGRES_USER
               valueFrom:
                 secretKeyRef:
                   name: temporal-db-credentials
                   key: username
-            - name: MYSQL_PWD
+            - name: POSTGRES_PWD
               valueFrom:
                 secretKeyRef:
                   name: temporal-db-credentials
@@ -306,15 +306,15 @@ spec:
             - name: SERVICES
               value: worker
             - name: DB
-              value: mysql
-            - name: MYSQL_SEEDS
-              value: mysql-ha-primary.vpp-platform.svc.cluster.local
-            - name: MYSQL_USER
+              value: postgres12
+            - name: POSTGRES_SEEDS
+              value: postgres-ha-primary.vpp-platform.svc.cluster.local
+            - name: POSTGRES_USER
               valueFrom:
                 secretKeyRef:
                   name: temporal-db-credentials
                   key: username
-            - name: MYSQL_PWD
+            - name: POSTGRES_PWD
               valueFrom:
                 secretKeyRef:
                   name: temporal-db-credentials

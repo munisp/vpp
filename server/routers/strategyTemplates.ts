@@ -68,11 +68,11 @@ export const strategyTemplatesRouter = router({
           totalProfit: 0,
           averagePrice: 0,
         },
-      });
+      }).returning({ id: tradingStrategies.id });
 
       // Increment clone counter
       await incrementTemplateCloneCount(input.templateId);
 
-      return { success: true, strategyId: newStrategy.insertId };
+      return { success: true, strategyId: newStrategy.id };
     }),
 });

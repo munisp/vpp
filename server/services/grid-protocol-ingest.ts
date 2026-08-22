@@ -583,7 +583,12 @@ export async function handleOpenADREvent(event: OpenADREvent): Promise<OpenADRDe
       decisionReason: decision.reason,
       payload: JSON.stringify(event),
     })
-    .onDuplicateKeyUpdate({
+    .onConflictDoUpdate({
+      target: [
+        gridProtocolInstructions.source,
+        gridProtocolInstructions.externalId,
+        gridProtocolInstructions.modificationNumber,
+      ],
       set: {
         eventStatus: event.status,
         decision: decision.optType === 'optIn' ? 'opt_in' : 'opt_out',
@@ -679,7 +684,12 @@ export async function handleSep2Controls(controls: Sep2Control[]): Promise<{ sto
         decisionReason: 'DER control recorded for dispatch evaluation',
         payload: JSON.stringify(control),
       })
-      .onDuplicateKeyUpdate({
+      .onConflictDoUpdate({
+        target: [
+          gridProtocolInstructions.source,
+          gridProtocolInstructions.externalId,
+          gridProtocolInstructions.modificationNumber,
+        ],
         set: {
           eventStatus: String(control.status),
           startTime: start,

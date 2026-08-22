@@ -12,6 +12,8 @@ import { getDb } from '../db';
 import { sql } from 'drizzle-orm';
 import { createHash, randomBytes } from 'crypto';
 import { kafkaPublisher } from '../integration/kafka-publisher';
+import type { SqlRow } from '../sql-row';
+import { jsonSetText } from '../sql-json';
 
 // Types for blockchain anchoring
 export interface BlockchainAnchor {
@@ -174,21 +176,21 @@ export class BlockchainAuditService {
     if (!db) throw new Error('Database not available');
 
     // Get settlement period
-    const periodResult = await db.execute(sql`
+    const periodResult = await db.execute<SqlRow>(sql`
       SELECT * FROM settlement_periods WHERE id = ${periodId}
     `);
-    const period = (periodResult as any)[0]?.[0];
+    const period = periodResult.rows[0];
     if (!period) throw new Error('Settlement period not found');
 
     // Get all events in the period
-    const eventsResult = await db.execute(sql`
+    const eventsResult = await db.execute<SqlRow>(sql`
       SELECT event_hash FROM settlement_events
       WHERE user_id = ${period.user_id}
         AND created_at >= ${period.period_start}
         AND created_at <= ${period.period_end}
       ORDER BY sequence_number ASC
     `);
-    const events = (eventsResult as any)[0] || [];
+    const events = eventsResult.rows || [];
 
     // Calculate Merkle root of event hashes
     const eventHashes = events.map((e: any) => e.event_hash);
@@ -243,10 +245,10 @@ export class BlockchainAuditService {
     if (!db) throw new Error('Database not available');
 
     // Get carbon credit
-    const creditResult = await db.execute(sql`
+    const creditResult = await db.execute<SqlRow>(sql`
       SELECT * FROM carbon_credits WHERE id = ${creditId}
     `);
-    const credit = (creditResult as any)[0]?.[0];
+    const credit = creditResult.rows[0];
     if (!credit) throw new Error('Carbon credit not found');
 
     // Create source hash from credit data
@@ -285,10 +287,10 @@ export class BlockchainAuditService {
     if (!db) throw new Error('Database not available');
 
     // Get compliance report
-    const reportResult = await db.execute(sql`
+    const reportResult = await db.execute<SqlRow>(sql`
       SELECT * FROM compliance_reports WHERE report_id = ${reportId}
     `);
-    const report = (reportResult as any)[0]?.[0];
+    const report = reportResult.rows[0];
     if (!report) throw new Error('Compliance report not found');
 
     // Create source hash from report data
@@ -375,7 +377,7 @@ export class BlockchainAuditService {
     const db = await getDb();
     if (!db) throw new Error('Database not available');
 
-    const result = await db.execute(sql`
+    const result = await db.execute<SqlRow>(sql`
       INSERT INTO blockchain_anchors (
         anchor_type, source_id, source_hash, merkle_root,
         blockchain_network, status, metadata, created_at
@@ -384,10 +386,11 @@ export class BlockchainAuditService {
         ${anchor.merkleRoot}, ${this.provider.network}, 'pending',
         ${JSON.stringify(anchor.metadata)}, NOW()
       )
+      RETURNING id
     `);
 
     return {
-      id: (result as any).insertId,
+      id: Number(result.rows[0].id),
       anchorType: anchor.anchorType,
       sourceId: anchor.sourceId,
       sourceHash: anchor.sourceHash,
@@ -436,7 +439,7 @@ export class BlockchainAuditService {
       const verificationUrl = this.provider.getTransactionUrl(result.txHash);
       const newStatus = this.provider instanceof LocalHashAnchorProvider ? 'local_committed' : 'confirmed';
 
-      await db.execute(sql`
+      await db.execute<SqlRow>(sql`
         UPDATE blockchain_anchors SET
           transaction_hash = ${result.txHash},
           block_number = ${result.blockNumber || null},
@@ -451,10 +454,10 @@ export class BlockchainAuditService {
       return this.getAnchor(anchorId) as Promise<BlockchainAnchor>;
     } catch (error: any) {
       // Update anchor with failure
-      await db.execute(sql`
+      await db.execute<SqlRow>(sql`
         UPDATE blockchain_anchors SET
           status = 'failed',
-          metadata = JSON_SET(COALESCE(metadata, '{}'), '$.error', ${error.message})
+          metadata = ${jsonSetText(sql`metadata`, { error: error.message })}
         WHERE id = ${anchorId}
       `);
 
@@ -478,20 +481,20 @@ export class BlockchainAuditService {
     let details = '';
 
     if (anchor.anchorType === 'settlement_period') {
-      const periodResult = await db.execute(sql`
+      const periodResult = await db.execute<SqlRow>(sql`
         SELECT * FROM settlement_periods WHERE id = ${anchor.sourceId}
       `);
-      const period = (periodResult as any)[0]?.[0];
+      const period = periodResult.rows[0];
 
       if (period) {
-        const eventsResult = await db.execute(sql`
+        const eventsResult = await db.execute<SqlRow>(sql`
           SELECT event_hash FROM settlement_events
           WHERE user_id = ${period.user_id}
             AND created_at >= ${period.period_start}
             AND created_at <= ${period.period_end}
           ORDER BY sequence_number ASC
         `);
-        const events = (eventsResult as any)[0] || [];
+        const events = eventsResult.rows || [];
         const eventHashes = events.map((e: any) => e.event_hash);
         const recalculatedMerkleRoot = this.calculateMerkleRoot(eventHashes);
 
@@ -555,11 +558,11 @@ export class BlockchainAuditService {
     const db = await getDb();
     if (!db) throw new Error('Database not available');
 
-    const result = await db.execute(sql`
+    const result = await db.execute<SqlRow>(sql`
       SELECT * FROM blockchain_anchors WHERE id = ${anchorId}
     `);
 
-    const row = (result as any)[0]?.[0];
+    const row = result.rows[0];
     return row ? this.mapRowToAnchor(row) : null;
   }
 
@@ -573,13 +576,13 @@ export class BlockchainAuditService {
     const db = await getDb();
     if (!db) throw new Error('Database not available');
 
-    const result = await db.execute(sql`
+    const result = await db.execute<SqlRow>(sql`
       SELECT * FROM blockchain_anchors
       WHERE anchor_type = ${anchorType} AND source_id = ${sourceId}
       ORDER BY created_at DESC
     `);
 
-    return ((result as any)[0] || []).map(this.mapRowToAnchor);
+    return (result.rows || []).map(this.mapRowToAnchor);
   }
 
   /**
@@ -649,7 +652,7 @@ export class BlockchainAuditService {
 
         // Update all anchors with batch transaction
         for (const anchor of anchors) {
-          await db.execute(sql`
+          await db.execute<SqlRow>(sql`
             UPDATE blockchain_anchors SET
               merkle_root = ${merkleRoot},
               transaction_hash = ${transactionHash},
@@ -688,14 +691,14 @@ export class BlockchainAuditService {
     const db = await getDb();
     if (!db) throw new Error('Database not available');
 
-    const result = await db.execute(sql`
+    const result = await db.execute<SqlRow>(sql`
       SELECT * FROM blockchain_anchors
       WHERE status = 'pending'
       ORDER BY created_at ASC
       LIMIT 100
     `);
 
-    return ((result as any)[0] || []).map(this.mapRowToAnchor);
+    return (result.rows || []).map(this.mapRowToAnchor);
   }
 
   /**

@@ -44,7 +44,7 @@ check_prerequisites() {
     fi
     
     # Check required commands
-    local required_commands=("docker" "docker-compose" "node" "npm" "mysql")
+    local required_commands=("docker" "docker-compose" "node" "npm" "psql")
     for cmd in "${required_commands[@]}"; do
         if ! command -v $cmd &> /dev/null; then
             log_error "$cmd is not installed"
@@ -243,7 +243,7 @@ setup_systemd() {
     cat > /etc/systemd/system/vpp-platform.service << EOF
 [Unit]
 Description=VPP Platform Application
-After=network.target mysql.service
+After=network.target postgresql.service
 
 [Service]
 Type=simple
@@ -284,7 +284,7 @@ verify_deployment() {
     fi
     
     # Check database connection
-    if mysql -e "SELECT 1" > /dev/null 2>&1; then
+    if psql -h "${DB_HOST:-localhost}" -p "${DB_PORT:-5432}" -U "${DB_USER:-postgres}" -d "${DB_NAME:-vpp_platform}" -tAc "SELECT 1" > /dev/null 2>&1; then
         log_info "✓ Database is accessible"
     else
         log_warn "✗ Database connection failed"

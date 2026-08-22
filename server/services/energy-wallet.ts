@@ -32,6 +32,7 @@ import {
   verifyPaymentStatus,
   PaymentResponse,
 } from '../_core/paymentGateway';
+import type { SqlRow } from '../sql-row';
 
 export type TopUpMethod = 'mpesa' | 'airtel_money' | 'tigo_pesa';
 
@@ -70,31 +71,31 @@ export class EnergyWalletService {
     const db = await getDb();
     if (!db) throw new Error('Database not available');
 
-    const paymentsResult = await db.execute(sql`
+    const paymentsResult = await db.execute<SqlRow>(sql`
       SELECT
         COALESCE(SUM(CASE WHEN status = 'completed' THEN amount ELSE 0 END), 0) as completed_cents,
-        COALESCE(SUM(CASE WHEN status = 'completed' AND paymentType = 'token_purchase' THEN amount ELSE 0 END), 0) as token_purchases_cents
+        COALESCE(SUM(CASE WHEN status = 'completed' AND "paymentType" = 'token_purchase' THEN amount ELSE 0 END), 0) as token_purchases_cents
       FROM payments
-      WHERE userId = ${userId}
+      WHERE "userId" = ${userId}
     `);
-    const ledger = (paymentsResult as any)[0]?.[0] || {};
+    const ledger = paymentsResult.rows[0] || {};
 
-    const billingsResult = await db.execute(sql`
-      SELECT COALESCE(SUM(totalValue), 0) as issued_cents
+    const billingsResult = await db.execute<SqlRow>(sql`
+      SELECT COALESCE(SUM("totalValue"), 0) as issued_cents
       FROM billings
-      WHERE userId = ${userId} AND status IN ('issued', 'paid', 'overdue')
+      WHERE "userId" = ${userId} AND status IN ('issued', 'paid', 'overdue')
     `);
-    const billingRow = (billingsResult as any)[0]?.[0] || {};
+    const billingRow = billingsResult.rows[0] || {};
 
     // Wallet top-ups are charged through the gateway without creating a
     // `payments` row, so they have to be credited explicitly — otherwise a
     // confirmed top-up leaves the balance unchanged and auto top-up refires.
-    const topUpsResult = await db.execute(sql`
+    const topUpsResult = await db.execute<SqlRow>(sql`
       SELECT COALESCE(SUM(amount_cents), 0) as completed_cents
       FROM wallet_top_up_attempts
       WHERE user_id = ${userId} AND status = 'completed'
     `);
-    const topUpRow = (topUpsResult as any)[0]?.[0] || {};
+    const topUpRow = topUpsResult.rows[0] || {};
 
     const paymentsCompletedCents = Number(ledger.completed_cents || 0);
     const tokenPurchasesCents = Number(ledger.token_purchases_cents || 0);
@@ -111,14 +112,17 @@ export class EnergyWalletService {
       tokenPurchasesCents,
       topUpsCompletedCents,
       reason,
-    });
-    const snapshotId = Number((insertResult as any)[0]?.insertId);
+    }).returning({ id: walletBalanceSnapshots.id });
+    const snapshotId = Number(insertResult[0].id);
 
     // Update the cached balance on the wallet row (create the row if absent)
     await db
       .insert(energyWallets)
       .values({ userId, balanceCents, lastComputedAt: new Date() })
-      .onDuplicateKeyUpdate({ set: { balanceCents, lastComputedAt: new Date() } });
+      .onConflictDoUpdate({
+        target: energyWallets.userId,
+        set: { balanceCents, lastComputedAt: new Date() },
+      });
 
     const rows = await db.select().from(walletBalanceSnapshots).where(eq(walletBalanceSnapshots.id, snapshotId)).limit(1);
     return rows[0];
@@ -195,7 +199,7 @@ export class EnergyWalletService {
     await db
       .insert(energyWallets)
       .values({ userId, ...updateSet } as any)
-      .onDuplicateKeyUpdate({ set: updateSet });
+      .onConflictDoUpdate({ target: energyWallets.userId, set: updateSet });
 
     const updated = await this.getSettings(userId);
     return updated!;
@@ -275,11 +279,11 @@ export class EnergyWalletService {
         triggerType,
         status: 'failed',
         errorMessage: gatewayResponse.error || gatewayResponse.message,
-      });
+      }).returning({ id: walletTopUpAttempts.id });
       return {
         topUpInitiated: false,
         reason: 'gateway_rejected',
-        attemptId: Number((insertResult as any)[0]?.insertId),
+        attemptId: Number(insertResult[0].id),
         gatewayMessage: gatewayResponse.message,
       };
     }
@@ -293,13 +297,13 @@ export class EnergyWalletService {
       status: 'initiated',
       gatewayTransactionId: gatewayResponse.transactionId || null,
       gatewayCheckoutId: gatewayResponse.checkoutRequestId || null,
-    });
+    }).returning({ id: walletTopUpAttempts.id });
 
     console.log(`[EnergyWallet] Top-up initiated for user ${userId}: ${amountCents}c via ${method} (${triggerType})`);
 
     return {
       topUpInitiated: true,
-      attemptId: Number((insertResult as any)[0]?.insertId),
+      attemptId: Number(insertResult[0].id),
       gatewayMessage: gatewayResponse.message,
     };
   }
@@ -338,7 +342,7 @@ export class EnergyWalletService {
         await this.markAttemptCompleted(attempt.id, txnRef);
         completed++;
       } else if (verification.status === 'failed') {
-        await db.execute(sql`
+        await db.execute<SqlRow>(sql`
           UPDATE wallet_top_up_attempts SET status = 'failed', error_message = ${verification.message}
           WHERE id = ${attempt.id}
         `);
@@ -367,7 +371,7 @@ export class EnergyWalletService {
       return this.computeBalanceSnapshot(attempt.userId, 'reconciliation');
     }
 
-    await db.execute(sql`
+    await db.execute<SqlRow>(sql`
       UPDATE wallet_top_up_attempts SET
         status = 'completed',
         completed_at = NOW(),

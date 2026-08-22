@@ -1,10 +1,17 @@
-import { int, mysqlTable, text, timestamp, varchar } from "drizzle-orm/mysql-core";
+import {
+  integer as int,
+  pgTable,
+  serial,
+  text,
+  timestamp,
+  varchar,
+} from "drizzle-orm/pg-core";
 
 /**
  * Biometric Credentials table - stores WebAuthn credentials for biometric authentication
  */
-export const biometricCredentials = mysqlTable("biometric_credentials", {
-  id: int("id").autoincrement().primaryKey(),
+export const biometricCredentials = pgTable("biometric_credentials", {
+  id: serial("id").primaryKey(),
   userId: int("user_id").notNull(),
   
   // WebAuthn credential details
@@ -20,7 +27,7 @@ export const biometricCredentials = mysqlTable("biometric_credentials", {
   lastUsed: timestamp("last_used"),
   
   createdAt: timestamp("created_at").defaultNow().notNull(),
-  updatedAt: timestamp("updated_at").defaultNow().onUpdateNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().$onUpdate(() => new Date()).notNull(),
 });
 
 export type BiometricCredential = typeof biometricCredentials.$inferSelect;

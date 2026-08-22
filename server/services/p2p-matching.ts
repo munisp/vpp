@@ -18,14 +18,12 @@ import { getDb } from '../db';
 import { trades } from '../../drizzle/schema';
 import { p2pMatches } from '../../drizzle/innovations-schema';
 
-function affectedRows(result: unknown): number {
-  const header = Array.isArray(result) ? result[0] : result;
-  return (header as { affectedRows?: number } | undefined)?.affectedRows ?? 0;
+function affectedRows(result: { rowCount: number | null }): number {
+  return result.rowCount ?? 0;
 }
 
-function insertId(result: unknown): number | null {
-  const r = result as any;
-  const id = Number(Array.isArray(r) ? r[0]?.insertId : r?.insertId);
+function insertedId(returned: { id: number }[]): number | null {
+  const id = Number(returned[0]?.id);
   return Number.isFinite(id) && id > 0 ? id : null;
 }
 
@@ -85,8 +83,8 @@ export async function submitOrder(userId: number, side: OrderSide, energyWh: num
       totalAmount,
       timestamp: new Date(),
       status: 'pending',
-    });
-    const orderId = insertId(orderInsert);
+    }).returning({ id: trades.id });
+    const orderId = insertedId(orderInsert);
     if (!orderId) throw new Error('Failed to create order');
 
     // 2. Find opposing orders by price-time priority.
@@ -145,10 +143,10 @@ export async function submitOrder(userId: number, side: OrderSide, energyWh: num
         energyWh: fill,
         priceCentsPerKwh: execPrice,
         totalAmountCents: fillAmount,
-      });
+      }).returning({ id: p2pMatches.id });
 
       matches.push({
-        matchId: insertId(matchInsert),
+        matchId: insertedId(matchInsert),
         buyOrderId,
         sellOrderId,
         buyerId,

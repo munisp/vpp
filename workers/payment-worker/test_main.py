@@ -75,14 +75,15 @@ sys.modules["temporalio.workflow"] = temporal_workflow
 sys.modules["temporalio.client"] = temporal_client
 sys.modules["temporalio.worker"] = temporal_worker
 
-# Stub mysql.connector
-mysql_stub = types.ModuleType("mysql")
-mysql_connector_stub = types.ModuleType("mysql.connector")
-mysql_connector_stub.Error = Exception
-mysql_connector_stub.connect = MagicMock()
-mysql_stub.connector = mysql_connector_stub  # critical: mysql.connector attribute
-sys.modules["mysql"] = mysql_stub
-sys.modules["mysql.connector"] = mysql_connector_stub
+# Stub psycopg2
+psycopg2_stub = types.ModuleType("psycopg2")
+psycopg2_extras_stub = types.ModuleType("psycopg2.extras")
+psycopg2_extras_stub.RealDictCursor = object
+psycopg2_stub.Error = Exception
+psycopg2_stub.connect = MagicMock()
+psycopg2_stub.extras = psycopg2_extras_stub
+sys.modules["psycopg2"] = psycopg2_stub
+sys.modules["psycopg2.extras"] = psycopg2_extras_stub
 
 # Now import the module under test
 sys.path.insert(0, os.path.dirname(__file__))
@@ -202,7 +203,6 @@ class TestUpdatePaymentStatus(unittest.IsolatedAsyncioTestCase):
         mock_conn = MagicMock()
         mock_cursor = MagicMock()
         mock_conn.cursor.return_value = mock_cursor
-        worker.mysql_connector_stub = mysql_connector_stub
 
         with patch.object(worker, "get_db_connection", return_value=mock_conn):
             result = await worker.update_payment_status(42, "completed", "TXN-XYZ", {"foo": "bar"})
@@ -226,10 +226,11 @@ class TestUpdatePaymentStatus(unittest.IsolatedAsyncioTestCase):
         call_args = mock_cursor.execute.call_args[0]
         self.assertNotIn("transactionId", call_args[0])
 
-    async def test_returns_false_on_db_error(self):
+    async def test_raises_on_db_error(self):
+        """A DB failure must propagate so Temporal retries — never a silent False."""
         with patch.object(worker, "get_db_connection", side_effect=Exception("DB down")):
-            result = await worker.update_payment_status(1, "failed")
-        self.assertFalse(result)
+            with self.assertRaises(Exception):
+                await worker.update_payment_status(1, "failed")
 
 
 # ---------------------------------------------------------------------------
@@ -249,7 +250,7 @@ class TestSendPaymentNotification(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result)
         mock_cursor.execute.assert_called_once()
         sql = mock_cursor.execute.call_args[0][0]
-        self.assertIn("INSERT INTO notifications", sql)
+        self.assertIn("INSERT INTO alerts", sql)
 
     async def test_notification_title_reflects_status(self):
         mock_conn = MagicMock()
@@ -260,7 +261,8 @@ class TestSendPaymentNotification(unittest.IsolatedAsyncioTestCase):
             await worker.send_payment_notification(7, 99, "failed", 5000)
 
         args = mock_cursor.execute.call_args[0][1]
-        self.assertIn("Failed", args[1])  # title param
+        self.assertEqual(args[1], "error")  # severity param
+        self.assertIn("Failed", args[2])  # title param
 
 
 # ---------------------------------------------------------------------------
@@ -272,6 +274,7 @@ class TestRecordPaymentAudit(unittest.IsolatedAsyncioTestCase):
     async def test_inserts_audit_log(self):
         mock_conn = MagicMock()
         mock_cursor = MagicMock()
+        mock_cursor.fetchone.return_value = {"paymentMethod": "mpesa"}
         mock_conn.cursor.return_value = mock_cursor
 
         with patch.object(worker, "get_db_connection", return_value=mock_conn):
@@ -279,12 +282,13 @@ class TestRecordPaymentAudit(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(result)
         sql = mock_cursor.execute.call_args[0][0]
-        self.assertIn("INSERT INTO payment_audit_logs", sql)
+        self.assertIn("INSERT INTO payment_gateway_logs", sql)
 
-    async def test_returns_false_on_db_error(self):
+    async def test_raises_on_db_error(self):
+        """No audit trail means no success: the activity must raise."""
         with patch.object(worker, "get_db_connection", side_effect=Exception("DB down")):
-            result = await worker.record_payment_audit(1, "action", {})
-        self.assertFalse(result)
+            with self.assertRaises(Exception):
+                await worker.record_payment_audit(1, "action", {})
 
 
 # ---------------------------------------------------------------------------
@@ -297,10 +301,11 @@ class TestProcessRefund(unittest.IsolatedAsyncioTestCase):
         mock_conn = MagicMock()
         mock_cursor = MagicMock()
         mock_cursor.fetchone.return_value = {
-            "gateway": "mpesa",
+            "paymentMethod": "mpesa",
             "transactionId": "TXN-REV-001",
             "amount": 10000,
             "phoneNumber": "254712345678",
+            "status": "completed",
         }
         mock_conn.cursor.return_value = mock_cursor
 
@@ -327,15 +332,17 @@ class TestProcessRefund(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(result)
 
-    async def test_airtel_marks_refund_pending(self):
-        """Airtel refunds require manual processing; worker marks status refund_pending."""
+    async def test_airtel_flags_manual_review(self):
+        """Airtel refunds have no reversal API: the row is flagged for manual review
+        and the payment status is left untouched, because no money moved."""
         mock_conn = MagicMock()
         mock_cursor = MagicMock()
         mock_cursor.fetchone.return_value = {
-            "gateway": "airtel_money",
+            "paymentMethod": "airtel_money",
             "transactionId": "AIRTEL-001",
             "amount": 5000,
             "phoneNumber": "255712345678",
+            "status": "completed",
         }
         mock_conn.cursor.return_value = mock_cursor
 
@@ -343,10 +350,12 @@ class TestProcessRefund(unittest.IsolatedAsyncioTestCase):
             result = await worker.process_refund(2, "Duplicate charge")
 
         self.assertTrue(result)
-        # Should have called UPDATE with refund_pending
-        update_calls = [c for c in mock_cursor.execute.call_args_list
-                        if "refund_pending" in str(c)]
-        self.assertTrue(len(update_calls) > 0, "Expected refund_pending status update")
+        flagged = [c for c in mock_cursor.execute.call_args_list
+                   if "manual_review_required" in str(c)]
+        self.assertTrue(len(flagged) > 0, "Expected the refund to be flagged for manual review")
+        refunded = [c for c in mock_cursor.execute.call_args_list
+                    if "'refunded'" in str(c)]
+        self.assertEqual(refunded, [], "Payment must not be marked refunded without a reversal")
 
 
 # ---------------------------------------------------------------------------

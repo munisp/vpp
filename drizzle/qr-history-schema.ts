@@ -1,17 +1,31 @@
-import { int, mysqlEnum, mysqlTable, decimal, text, timestamp, varchar } from "drizzle-orm/mysql-core";
+import {
+  decimal,
+  integer as int,
+  pgEnum,
+  pgTable,
+  serial,
+  text,
+  timestamp,
+  varchar,
+} from "drizzle-orm/pg-core";
+
+export const qrCodeHistoryStatusEnum = pgEnum("qr_code_history_status", ["pending", "completed", "failed", "expired"]);
+export const qrCodeHistoryPaymentTypeEnum = pgEnum("qr_code_history_payment_type", ["merchant", "p2p", "bill", "token"]);
+export const qrCodeHistoryOperationTypeEnum = pgEnum("qr_code_history_operation_type", ["scan", "generate"]);
+
 
 /**
  * QR Code History table - tracks all QR code scans and generations
  */
-export const qrCodeHistory = mysqlTable("qr_code_history", {
-  id: int("id").autoincrement().primaryKey(),
+export const qrCodeHistory = pgTable("qr_code_history", {
+  id: serial("id").primaryKey(),
   userId: int("user_id").notNull(),
   
   // QR code operation type
-  operationType: mysqlEnum("operation_type", ["scan", "generate"]).notNull(),
+  operationType: qrCodeHistoryOperationTypeEnum("operation_type").notNull(),
   
   // Payment details
-  paymentType: mysqlEnum("payment_type", ["merchant", "p2p", "bill", "token"]).notNull(),
+  paymentType: qrCodeHistoryPaymentTypeEnum("payment_type").notNull(),
   amount: decimal("amount", { precision: 15, scale: 2 }).notNull(),
   currency: varchar("currency", { length: 10 }).notNull(),
   
@@ -30,7 +44,7 @@ export const qrCodeHistory = mysqlTable("qr_code_history", {
   qrCodeImage: text("qr_code_image"), // Base64 image for generated codes
   
   // Status tracking
-  status: mysqlEnum("status", ["pending", "completed", "failed", "expired"]).default("pending").notNull(),
+  status: qrCodeHistoryStatusEnum("status").default("pending").notNull(),
   
   // Timestamps
   scannedAt: timestamp("scanned_at"),
@@ -39,7 +53,7 @@ export const qrCodeHistory = mysqlTable("qr_code_history", {
   expiresAt: timestamp("expires_at"),
   
   createdAt: timestamp("created_at").defaultNow().notNull(),
-  updatedAt: timestamp("updated_at").defaultNow().onUpdateNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().$onUpdate(() => new Date()).notNull(),
 });
 
 export type QRCodeHistory = typeof qrCodeHistory.$inferSelect;

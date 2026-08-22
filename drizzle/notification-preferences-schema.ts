@@ -1,10 +1,21 @@
-import { boolean, int, mysqlTable, mysqlEnum, timestamp, time } from "drizzle-orm/mysql-core";
+import {
+  boolean,
+  integer as int,
+  pgEnum,
+  pgTable,
+  serial,
+  time,
+  timestamp,
+} from "drizzle-orm/pg-core";
+
+export const notificationPreferencesNotificationFrequencyEnum = pgEnum("notification_preferences_notification_frequency", ["instant", "hourly", "daily"]);
+
 
 /**
  * User Notification Preferences
  */
-export const notificationPreferences = mysqlTable("notification_preferences", {
-  id: int("id").autoincrement().primaryKey(),
+export const notificationPreferences = pgTable("notification_preferences", {
+  id: serial("id").primaryKey(),
   userId: int("user_id").notNull().unique(),
   
   // Email notifications
@@ -32,7 +43,7 @@ export const notificationPreferences = mysqlTable("notification_preferences", {
   
   // Notification preferences
   notificationSound: boolean("notification_sound").default(true).notNull(),
-  notificationFrequency: mysqlEnum("notification_frequency", ["instant", "hourly", "daily"]).default("instant").notNull(),
+  notificationFrequency: notificationPreferencesNotificationFrequencyEnum("notification_frequency").default("instant").notNull(),
   
   // Quiet hours (format: HH:MM:SS)
   quietHoursEnabled: boolean("quiet_hours_enabled").default(false).notNull(),
@@ -40,7 +51,7 @@ export const notificationPreferences = mysqlTable("notification_preferences", {
   quietHoursEnd: time("quiet_hours_end").default("08:00:00"),
   
   createdAt: timestamp("created_at").defaultNow().notNull(),
-  updatedAt: timestamp("updated_at").defaultNow().onUpdateNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().$onUpdate(() => new Date()).notNull(),
 });
 
 export type NotificationPreference = typeof notificationPreferences.$inferSelect;

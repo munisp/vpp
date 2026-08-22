@@ -239,8 +239,8 @@ export async function runNtlAnalysis(assetId: number): Promise<NtlAnalysisResult
         evidence: JSON.stringify(evidence),
         windowStart,
         windowEnd,
-      });
-      const created = await db.select().from(ntlFlags).where(eq(ntlFlags.id, Number(insert[0].insertId))).limit(1);
+      }).returning({ id: ntlFlags.id });
+      const created = await db.select().from(ntlFlags).where(eq(ntlFlags.id, Number(insert[0].id))).limit(1);
       flag = created[0] ?? null;
     }
   }

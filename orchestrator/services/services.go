@@ -28,12 +28,13 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"net/url"
 	"time"
 
 	"github.com/confluentinc/confluent-kafka-go/v2/kafka"
 	dapr "github.com/dapr/go-sdk/client"
 	"github.com/go-redis/redis/v8"
-	_ "github.com/go-sql-driver/mysql"
+	_ "github.com/lib/pq"
 
 	"github.com/vpp-platform/orchestrator/config"
 )
@@ -175,7 +176,7 @@ func (d *DaprService) GetState(ctx context.Context, storeName string, key string
 	return json.Unmarshal(item.Value, out)
 }
 
-// DBService provides lazily-initialized access to the platform MySQL
+// DBService provides lazily-initialized access to the platform PostgreSQL
 // database. Schema ground truth is drizzle/schema.ts: camelCase columns,
 // energy in watt-hours, prices in cents per kWh.
 type DBService struct {
@@ -189,8 +190,10 @@ type DBService struct {
 // first use so that NewServices does not fail when the database is down;
 // every query then fails loudly instead.
 func NewDBService(cfg config.DatabaseConfig) *DBService {
-	dsn := fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?parseTime=true&timeout=5s",
-		cfg.User, cfg.Password, cfg.Host, cfg.Port, cfg.Database)
+	// timezone=UTC: timestamp columns are `timestamp without time zone`
+	// holding UTC, and NOW() is converted with the session time zone.
+	dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s&connect_timeout=5&options=-c%%20timezone%%3DUTC",
+		url.QueryEscape(cfg.User), url.QueryEscape(cfg.Password), cfg.Host, cfg.Port, cfg.Database, cfg.SSLMode)
 	return &DBService{dsn: dsn}
 }
 
@@ -200,7 +203,7 @@ func (d *DBService) conn(ctx context.Context) (*sql.DB, error) {
 	if d.db != nil {
 		return d.db, nil
 	}
-	db, err := sql.Open("mysql", d.dsn)
+	db, err := sql.Open("postgres", d.dsn)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database connection: %w", err)
 	}

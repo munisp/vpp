@@ -44,7 +44,7 @@ Complete guide for deploying the VPP Consumer Platform to production infrastruct
 - Ubuntu 22.04 LTS or later
 - Docker 24.0+ and Docker Compose 2.20+
 - Node.js 22.x
-- MySQL 8.0+ or TiDB 7.0+
+- PostgreSQL 14+ (16.x recommended)
 - Nginx 1.24+
 - Certbot for SSL certificates
 
@@ -108,7 +108,7 @@ VITE_APP_TITLE="VPP Consumer Platform"
 VITE_APP_LOGO="/logo.svg"
 
 # Database
-DATABASE_URL="mysql://user:password@db-server:3306/vpp_production"
+DATABASE_URL="postgresql://user:password@db-server:5432/vpp_production"
 
 # Authentication
 JWT_SECRET="your-super-secret-jwt-key-change-this"
@@ -173,16 +173,14 @@ cp .env.production .env.staging
 ### 1. Create Database
 
 ```sql
--- Connect to MySQL
-mysql -u root -p
+-- Connect to PostgreSQL
+psql -U postgres
 
--- Create database
-CREATE DATABASE vpp_production CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-
--- Create user
-CREATE USER 'vpp_user'@'%' IDENTIFIED BY 'secure-password';
-GRANT ALL PRIVILEGES ON vpp_production.* TO 'vpp_user'@'%';
-FLUSH PRIVILEGES;
+-- Create user and database (UTF8 is the default encoding)
+CREATE ROLE vpp_user LOGIN PASSWORD 'secure-password';
+CREATE DATABASE vpp_production OWNER vpp_user ENCODING 'UTF8';
+\connect vpp_production
+GRANT ALL ON SCHEMA public TO vpp_user;
 ```
 
 ### 2. Run Migrations
@@ -192,11 +190,12 @@ FLUSH PRIVILEGES;
 cd /path/to/vpp_consumer_platform
 pnpm install
 
-# Push schema to database
-pnpm db:push
+# Apply the versioned migrations (never `db:push` in production — see MIGRATIONS.md)
+DATABASE_URL="postgresql://vpp_user:secure-password@db-server:5432/vpp_production" \
+  npx drizzle-kit migrate
 
 # Verify tables
-mysql -u vpp_user -p vpp_production -e "SHOW TABLES;"
+psql -U vpp_user -d vpp_production -c "\dt"
 ```
 
 ### 3. Seed Initial Data (Optional)
@@ -385,7 +384,7 @@ DATE=$(date +%Y%m%d_%H%M%S)
 mkdir -p $BACKUP_DIR
 
 # Backup database
-mysqldump -u vpp_user -p'password' vpp_production | gzip > $BACKUP_DIR/db_$DATE.sql.gz
+PGPASSWORD="$DB_PASSWORD" pg_dump -h "$DB_HOST" -U vpp_user vpp_production | gzip > $BACKUP_DIR/db_$DATE.sql.gz
 
 # Backup uploaded files (if any)
 tar -czf $BACKUP_DIR/files_$DATE.tar.gz /path/to/uploads
@@ -407,7 +406,7 @@ crontab -e
 
 ```bash
 # Restore database
-gunzip < /var/backups/vpp/db_20240115_020000.sql.gz | mysql -u vpp_user -p vpp_production
+gunzip < /var/backups/vpp/db_20240115_020000.sql.gz | PGPASSWORD="$DB_PASSWORD" psql -h "$DB_HOST" -U vpp_user -d vpp_production
 
 # Restore files
 tar -xzf /var/backups/vpp/files_20240115_020000.tar.gz -C /
@@ -424,7 +423,7 @@ tar -xzf /var/backups/vpp/files_20240115_020000.tar.gz -C /
 pm2 logs vpp-app
 
 # Check database connection
-mysql -u vpp_user -p -h db-server vpp_production
+PGPASSWORD="$DB_PASSWORD" psql -h db-server -U vpp_user -d vpp_production
 
 # Check environment variables
 pm2 env vpp-app
@@ -459,11 +458,12 @@ docker-compose up -d --scale database-consumer=3
 ### Database Performance
 
 ```bash
-# Check slow queries
-mysql -u root -p -e "SELECT * FROM mysql.slow_log ORDER BY query_time DESC LIMIT 10;"
+# Check slow queries (requires the pg_stat_statements extension)
+psql -U postgres -d vpp_production -c \
+  "SELECT mean_exec_time, calls, query FROM pg_stat_statements ORDER BY mean_exec_time DESC LIMIT 10;"
 
-# Optimize tables
-mysql -u vpp_user -p vpp_production -e "OPTIMIZE TABLE telemetry;"
+# Reclaim space and refresh planner statistics
+psql -U vpp_user -d vpp_production -c "VACUUM (ANALYZE) telemetry;"
 
 # Add indexes if needed
 ```

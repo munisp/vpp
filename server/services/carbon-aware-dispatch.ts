@@ -10,6 +10,8 @@ import { sql } from 'drizzle-orm';
 import { randomBytes } from 'crypto';
 import { probabilisticForecasting } from './probabilistic-forecasting';
 import { kafkaPublisher } from '../integration/kafka-publisher';
+import type { SqlRow } from '../sql-row';
+import { jsonSetText } from '../sql-json';
 
 // Types for carbon tracking
 export interface EmissionsFactor {
@@ -100,7 +102,7 @@ export class CarbonAwareDispatchService {
     const db = await getDb();
     if (!db) throw new Error('Database not available');
 
-    const result = await db.execute(sql`
+    const result = await db.execute<SqlRow>(sql`
       INSERT INTO emissions_factors (
         region, timestamp, valid_until,
         marginal_emissions, average_emissions,
@@ -113,6 +115,7 @@ export class CarbonAwareDispatchService {
         ${data.gasPercent || null}, ${data.nuclearPercent || null},
         ${data.dataSource || null}, NOW()
       )
+      RETURNING id
     `);
 
     // Publish to Kafka for lakehouse analytics
@@ -129,7 +132,7 @@ export class CarbonAwareDispatchService {
     }
 
     return {
-      id: (result as any).insertId,
+      id: Number(result.rows[0].id),
       region,
       ...data,
       renewablePercent: data.renewablePercent || null,
@@ -148,7 +151,7 @@ export class CarbonAwareDispatchService {
     const db = await getDb();
     if (!db) throw new Error('Database not available');
 
-    const result = await db.execute(sql`
+    const result = await db.execute<SqlRow>(sql`
       SELECT * FROM emissions_factors
       WHERE region = ${region}
         AND timestamp <= NOW()
@@ -157,7 +160,7 @@ export class CarbonAwareDispatchService {
       LIMIT 1
     `);
 
-    const row = (result as any)[0]?.[0];
+    const row = result.rows[0];
     if (!row) {
       // Return default emissions for region
       return this.getDefaultEmissions(region);
@@ -210,14 +213,14 @@ export class CarbonAwareDispatchService {
     if (!db) throw new Error('Database not available');
 
     // Get user's assets
-    const assetsResult = await db.execute(sql`
-      SELECT a.id, a.assetType, a.capacity, a.name,
+    const assetsResult = await db.execute<SqlRow>(sql`
+      SELECT a.id, a."assetType", a.capacity, a.name,
              dc.max_power_export, dc.max_power_import
       FROM assets a
       LEFT JOIN der_capabilities dc ON dc.asset_id = a.id
-      WHERE a.userId = ${userId} AND a.status = 'active'
+      WHERE a."userId" = ${userId} AND a.status = 'active'
     `);
-    const assets = (assetsResult as any)[0] || [];
+    const assets = assetsResult.rows || [];
 
     // Get emissions forecast
     const region = 'NG-LAGOS'; // Should be derived from user location
@@ -308,27 +311,27 @@ export class CarbonAwareDispatchService {
     if (!db) throw new Error('Database not available');
 
     // Get user's energy data
-    const telemetryResult = await db.execute(sql`
+    const telemetryResult = await db.execute<SqlRow>(sql`
       SELECT 
-        a.id as asset_id, a.name as asset_name, a.assetType,
+        a.id as asset_id, a.name as asset_name, a."assetType",
         t.timestamp, t.power, t.energy
       FROM telemetry t
-      JOIN assets a ON a.id = t.assetId
-      WHERE a.userId = ${userId}
+      JOIN assets a ON a.id = t."assetId"
+      WHERE a."userId" = ${userId}
         AND t.timestamp >= ${periodStart}
         AND t.timestamp <= ${periodEnd}
       ORDER BY t.timestamp
     `);
-    const telemetry = (telemetryResult as any)[0] || [];
+    const telemetry = telemetryResult.rows || [];
 
     // Get settlement events for services
-    const settlementResult = await db.execute(sql`
+    const settlementResult = await db.execute<SqlRow>(sql`
       SELECT * FROM settlement_events
       WHERE user_id = ${userId}
         AND created_at >= ${periodStart}
         AND created_at <= ${periodEnd}
     `);
-    const settlements = (settlementResult as any)[0] || [];
+    const settlements = settlementResult.rows || [];
 
     // Calculate totals
     let totalEmissionsAvoided = 0;
@@ -445,7 +448,7 @@ export class CarbonAwareDispatchService {
     const db = await getDb();
     if (!db) return 400; // Default
 
-    const result = await db.execute(sql`
+    const result = await db.execute<SqlRow>(sql`
       SELECT marginal_emissions FROM emissions_factors
       WHERE region = ${region}
         AND timestamp <= ${timestamp}
@@ -454,7 +457,7 @@ export class CarbonAwareDispatchService {
       LIMIT 1
     `);
 
-    const row = (result as any)[0]?.[0];
+    const row = result.rows[0];
     return row?.marginal_emissions || 400;
   }
 
@@ -478,7 +481,7 @@ export class CarbonAwareDispatchService {
 
     const certificateId = `${credit.creditType.toUpperCase()}_${Date.now().toString(36)}_${randomBytes(6).toString('hex')}`;
 
-    const result = await db.execute(sql`
+    const result = await db.execute<SqlRow>(sql`
       INSERT INTO carbon_credits (
         user_id, credit_type, certificate_id,
         energy_mwh, carbon_tonnes, generation_source,
@@ -496,7 +499,7 @@ export class CarbonAwareDispatchService {
     console.log(`[CarbonDispatch] Issued ${credit.creditType} credit ${certificateId} for user ${userId}`);
 
     return {
-      id: (result as any).insertId,
+      id: Number(result.rows[0].id),
       userId,
       creditType: credit.creditType,
       certificateId,
@@ -519,13 +522,13 @@ export class CarbonAwareDispatchService {
     const db = await getDb();
     if (!db) throw new Error('Database not available');
 
-    const result = await db.execute(sql`
+    const result = await db.execute<SqlRow>(sql`
       SELECT * FROM carbon_credits
       WHERE user_id = ${userId}
       ORDER BY created_at DESC
     `);
 
-    return ((result as any)[0] || []).map(this.mapRowToCredit);
+    return (result.rows || []).map(this.mapRowToCredit);
   }
 
   /**
@@ -535,16 +538,19 @@ export class CarbonAwareDispatchService {
     const db = await getDb();
     if (!db) throw new Error('Database not available');
 
-    await db.execute(sql`
+    await db.execute<SqlRow>(sql`
       UPDATE carbon_credits SET
         status = 'retired',
-        metadata = JSON_SET(COALESCE(metadata, '{}'), '$.retiredAt', ${new Date().toISOString()}, '$.retireReason', ${reason || null}),
+        metadata = ${jsonSetText(sql`metadata`, {
+          retiredAt: new Date().toISOString(),
+          retireReason: reason || null,
+        })},
         updated_at = NOW()
       WHERE id = ${creditId}
     `);
 
-    const result = await db.execute(sql`SELECT * FROM carbon_credits WHERE id = ${creditId}`);
-    return this.mapRowToCredit((result as any)[0]?.[0]);
+    const result = await db.execute<SqlRow>(sql`SELECT * FROM carbon_credits WHERE id = ${creditId}`);
+    return this.mapRowToCredit(result.rows[0]);
   }
 
   /**

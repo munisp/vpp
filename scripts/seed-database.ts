@@ -56,7 +56,8 @@ async function seed() {
     ];
 
     for (const user of sampleUsers) {
-      await db.insert(users).values(user).onDuplicateKeyUpdate({
+      await db.insert(users).values(user).onConflictDoUpdate({
+        target: users.openId,
         set: { name: user.name, email: user.email },
       });
     }

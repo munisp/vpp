@@ -26,6 +26,8 @@ import { assets } from '../../drizzle/schema';
 import { anomalyEvents } from '../../drizzle/nextgen-vpp-schema';
 import { gridAnomalyScores, InsertGridAnomalyScore } from '../../drizzle/grid-intel-schema';
 import { sendPushNotification } from '../_core/sendNotification';
+import type { SqlRow } from '../sql-row';
+import { jsonSetText } from '../sql-json';
 
 export type AnomalyMetric = 'power' | 'voltage' | 'frequency';
 export type EarlyWarningSeverity = 'low' | 'medium' | 'high' | 'critical';
@@ -164,16 +166,16 @@ export class GridAnomalyEarlyWarningService {
     if (!db) throw new Error('Database not available');
 
     // Observed window statistics (real telemetry)
-    const observedResult = await db.execute(sql`
+    const observedResult = await db.execute<SqlRow>(sql`
       SELECT AVG(${sql.raw(metric)}) as obs_mean, COUNT(*) as obs_count,
              MIN(timestamp) as window_start, MAX(timestamp) as window_end,
-             HOUR(NOW()) as hod
+             EXTRACT(HOUR FROM NOW()) as hod
       FROM telemetry
-      WHERE assetId = ${assetId}
+      WHERE "assetId" = ${assetId}
         AND ${sql.raw(metric)} IS NOT NULL
-        AND timestamp > DATE_SUB(NOW(), INTERVAL ${windowMinutes} MINUTE)
+        AND timestamp > (NOW() - (${windowMinutes} * INTERVAL '1 minute'))
     `);
-    const observed = (observedResult as any)[0]?.[0];
+    const observed = observedResult.rows[0];
     if (!observed || Number(observed.obs_count) < MIN_WINDOW_SAMPLES) {
       return null; // no real data in window — nothing to score
     }
@@ -182,16 +184,16 @@ export class GridAnomalyEarlyWarningService {
     const hourOfDay = Number(observed.hod);
 
     // Asset's OWN trailing 7-day baseline for the same hour-of-day
-    const baselineResult = await db.execute(sql`
+    const baselineResult = await db.execute<SqlRow>(sql`
       SELECT AVG(${sql.raw(metric)}) as base_mean, STDDEV_POP(${sql.raw(metric)}) as base_std,
              COUNT(*) as base_count
       FROM telemetry
-      WHERE assetId = ${assetId}
+      WHERE "assetId" = ${assetId}
         AND ${sql.raw(metric)} IS NOT NULL
-        AND HOUR(timestamp) = ${hourOfDay}
-        AND timestamp BETWEEN DATE_SUB(NOW(), INTERVAL 7 DAY) AND DATE_SUB(NOW(), INTERVAL ${windowMinutes} MINUTE)
+        AND EXTRACT(HOUR FROM timestamp) = ${hourOfDay}
+        AND timestamp BETWEEN (NOW() - INTERVAL '7 day') AND (NOW() - (${windowMinutes} * INTERVAL '1 minute'))
     `);
-    const baseline = (baselineResult as any)[0]?.[0];
+    const baseline = baselineResult.rows[0];
     const baselineSamples = baseline ? Number(baseline.base_count) : 0;
 
     let baselineMean: number | null = null;
@@ -278,16 +280,16 @@ export class GridAnomalyEarlyWarningService {
 
     const anomalyType = METRIC_TO_ANOMALY_TYPE[score.metric];
 
-    const dupResult = await db.execute(sql`
+    const dupResult = await db.execute<SqlRow>(sql`
       SELECT id FROM anomaly_events
       WHERE asset_id = ${assetId}
         AND anomaly_type = ${anomalyType}
         AND detection_method = 'rolling_zscore_hod'
         AND status IN ('open', 'acknowledged', 'investigating')
-        AND detected_at > DATE_SUB(NOW(), INTERVAL 1 HOUR)
+        AND detected_at > (NOW() - INTERVAL '1 hour')
       LIMIT 1
     `);
-    const existing = (dupResult as any)[0]?.[0];
+    const existing = dupResult.rows[0];
     if (existing) return Number(existing.id);
 
     const deviationPercent = score.baselineMean !== null && score.baselineMean !== 0
@@ -328,8 +330,8 @@ export class GridAnomalyEarlyWarningService {
       recommendedAction,
       status: 'open',
       metadata,
-    });
-    const eventId = Number((insertResult as any)[0]?.insertId);
+    }).returning({ id: anomalyEvents.id });
+    const eventId = Number(insertResult[0].id);
     console.log(`[GridAnomaly] Early-warning event ${eventId} for asset ${assetId}: ${score.metric} score=${score.combinedScore.toFixed(2)} severity=${score.severity}`);
     return eventId;
   }
@@ -338,10 +340,14 @@ export class GridAnomalyEarlyWarningService {
   private async updateScoreEventLink(assetId: number, metric: AnomalyMetric, eventId: number): Promise<void> {
     const db = await getDb();
     if (!db) return;
-    await db.execute(sql`
+    await db.execute<SqlRow>(sql`
       UPDATE grid_anomaly_scores SET anomaly_event_id = ${eventId}
-      WHERE asset_id = ${assetId} AND metric = ${metric} AND anomaly_event_id IS NULL
-      ORDER BY id DESC LIMIT 1
+      WHERE id = (
+        SELECT id FROM grid_anomaly_scores
+        WHERE asset_id = ${assetId} AND metric = ${metric} AND anomaly_event_id IS NULL
+        ORDER BY id DESC
+        LIMIT 1
+      )
     `);
   }
 
@@ -366,31 +372,31 @@ export class GridAnomalyEarlyWarningService {
     const db = await getDb();
     if (!db) throw new Error('Database not available');
 
-    const sevResult = await db.execute(sql`
+    const sevResult = await db.execute<SqlRow>(sql`
       SELECT severity, COUNT(*) as count FROM anomaly_events
       WHERE status IN ('open', 'acknowledged', 'investigating')
       GROUP BY severity
     `);
     const openBySeverity: Record<string, number> = {};
     let totalOpen = 0;
-    for (const row of (sevResult as any)[0] || []) {
+    for (const row of sevResult.rows || []) {
       openBySeverity[row.severity] = Number(row.count);
       totalOpen += Number(row.count);
     }
 
-    const critResult = await db.execute(sql`
+    const critResult = await db.execute<SqlRow>(sql`
       SELECT COUNT(DISTINCT asset_id) as count FROM anomaly_events
       WHERE status IN ('open', 'acknowledged', 'investigating') AND severity = 'critical'
     `);
-    const assetsWithOpenCritical = Number((critResult as any)[0]?.[0]?.count || 0);
+    const assetsWithOpenCritical = Number(critResult.rows[0]?.count || 0);
 
-    const last24Result = await db.execute(sql`
+    const last24Result = await db.execute<SqlRow>(sql`
       SELECT COUNT(*) as count FROM anomaly_events
-      WHERE detected_at > DATE_SUB(NOW(), INTERVAL 24 HOUR)
+      WHERE detected_at > (NOW() - INTERVAL '24 hour')
     `);
-    const eventsLast24h = Number((last24Result as any)[0]?.[0]?.count || 0);
+    const eventsLast24h = Number(last24Result.rows[0]?.count || 0);
 
-    const offendersResult = await db.execute(sql`
+    const offendersResult = await db.execute<SqlRow>(sql`
       SELECT asset_id, COUNT(*) as open_events,
              MAX(CASE severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 ELSE 1 END) as worst
       FROM anomaly_events
@@ -400,7 +406,7 @@ export class GridAnomalyEarlyWarningService {
       LIMIT 10
     `);
     const worstName = (w: number) => (['low', 'medium', 'high', 'critical'] as const)[Math.max(0, Math.min(3, w - 1))];
-    const topOffenders = ((offendersResult as any)[0] || []).map((r: any) => ({
+    const topOffenders = (offendersResult.rows || []).map((r: any) => ({
       assetId: Number(r.asset_id),
       openEvents: Number(r.open_events),
       worstSeverity: worstName(Number(r.worst)),
@@ -422,10 +428,13 @@ export class GridAnomalyEarlyWarningService {
       throw new Error(`Anomaly event ${anomalyId} is already ${rows[0].status}`);
     }
 
-    await db.execute(sql`
+    await db.execute<SqlRow>(sql`
       UPDATE anomaly_events SET
         status = 'acknowledged',
-        metadata = JSON_SET(COALESCE(metadata, '{}'), '$.acknowledgedBy', ${userId}, '$.acknowledgedAt', ${new Date().toISOString()})
+        metadata = ${jsonSetText(sql`metadata`, {
+          acknowledgedBy: userId,
+          acknowledgedAt: new Date().toISOString(),
+        })}
       WHERE id = ${anomalyId}
     `);
 

@@ -74,9 +74,9 @@ export async function createDREventActivity(
       targetReduction: input.targetReduction,
       compensationRate: input.compensationRate,
       status: 'scheduled',
-    });
+    }).returning({ id: demandResponseEvents.id });
 
-    const eventId = result[0]?.insertId;
+    const eventId = result[0].id;
     if (!eventId) throw new Error('Failed to get event ID');
 
     console.log(`[DREventActivity] Created DR event ${eventId}`);
@@ -130,9 +130,9 @@ export async function enrollParticipantsActivity(
         userId: user.id,
         status: 'active',
         autoOptIn: input.autoEnroll,
-      });
+      }).returning({ id: drParticipants.id });
 
-      if (result[0]?.insertId) {
+      if (result[0].id) {
         participantIds.push(user.id);
       }
     }

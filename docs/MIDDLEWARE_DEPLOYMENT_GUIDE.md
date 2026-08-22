@@ -464,7 +464,7 @@ Create `.env.production`:
 
 ```bash
 # Database
-DATABASE_URL=mysql://user:password@prod-db:3306/vpp_platform
+DATABASE_URL=postgresql://user:password@prod-db:5432/vpp_platform
 
 # Temporal
 TEMPORAL_ADDRESS=temporal.prod.example.com:7233

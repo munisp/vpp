@@ -1,11 +1,24 @@
-import { int, mysqlEnum, mysqlTable, text, timestamp, varchar, boolean } from "drizzle-orm/mysql-core";
+import {
+  boolean,
+  integer as int,
+  pgEnum,
+  pgTable,
+  serial,
+  text,
+  timestamp,
+  varchar,
+} from "drizzle-orm/pg-core";
+
+export const drCampaignsStatusEnum = pgEnum("dr_campaigns_status", ["draft", "scheduled", "active", "completed", "cancelled"]);
+export const participantScoresSegmentEnum = pgEnum("participant_scores_segment", ["platinum", "gold", "silver", "bronze", "inactive"]);
+
 
 /**
  * Participant Performance Scores
  * ML-based scoring for DR participants
  */
-export const participantScores = mysqlTable("participant_scores", {
-  id: int("id").autoincrement().primaryKey(),
+export const participantScores = pgTable("participant_scores", {
+  id: serial("id").primaryKey(),
   userId: int("userId").notNull().unique(),
   
   // Performance metrics
@@ -30,13 +43,13 @@ export const participantScores = mysqlTable("participant_scores", {
   averageResponseTime: int("averageResponseTime"), // Average seconds to respond
   
   // Segmentation
-  segment: mysqlEnum("segment", ["platinum", "gold", "silver", "bronze", "inactive"]).notNull(),
+  segment: participantScoresSegmentEnum("segment").notNull(),
   
   // Last updated
   lastCalculated: timestamp("lastCalculated").defaultNow().notNull(),
   metadata: text("metadata"),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
-  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().$onUpdate(() => new Date()).notNull(),
 });
 
 export type ParticipantScore = typeof participantScores.$inferSelect;
@@ -46,8 +59,8 @@ export type InsertParticipantScore = typeof participantScores.$inferInsert;
  * Participant Segments
  * Define segment criteria and targeting rules
  */
-export const participantSegments = mysqlTable("participant_segments", {
-  id: int("id").autoincrement().primaryKey(),
+export const participantSegments = pgTable("participant_segments", {
+  id: serial("id").primaryKey(),
   name: varchar("name", { length: 100 }).notNull(),
   description: text("description"),
   
@@ -66,7 +79,7 @@ export const participantSegments = mysqlTable("participant_segments", {
   
   metadata: text("metadata"),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
-  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().$onUpdate(() => new Date()).notNull(),
 });
 
 export type ParticipantSegment = typeof participantSegments.$inferSelect;
@@ -76,8 +89,8 @@ export type InsertParticipantSegment = typeof participantSegments.$inferInsert;
  * Targeted DR Campaigns
  * DR events targeted at specific segments
  */
-export const drCampaigns = mysqlTable("dr_campaigns", {
-  id: int("id").autoincrement().primaryKey(),
+export const drCampaigns = pgTable("dr_campaigns", {
+  id: serial("id").primaryKey(),
   name: varchar("name", { length: 200 }).notNull(),
   description: text("description"),
   
@@ -93,7 +106,7 @@ export const drCampaigns = mysqlTable("dr_campaigns", {
   bonusCompensation: int("bonusCompensation"), // Extra cents/kWh for this campaign
   
   // Status
-  status: mysqlEnum("status", ["draft", "scheduled", "active", "completed", "cancelled"]).default("draft").notNull(),
+  status: drCampaignsStatusEnum("status").default("draft").notNull(),
   
   // Timing
   scheduledStart: timestamp("scheduledStart"),
@@ -108,7 +121,7 @@ export const drCampaigns = mysqlTable("dr_campaigns", {
   createdBy: int("createdBy").notNull(),
   metadata: text("metadata"),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
-  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().$onUpdate(() => new Date()).notNull(),
 });
 
 export type DrCampaign = typeof drCampaigns.$inferSelect;

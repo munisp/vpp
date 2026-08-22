@@ -185,7 +185,7 @@ async function startServer() {
  *  1. stop accepting new connections (server.close),
  *  2. close the socket.io server (which also closes the underlying HTTP
  *     server, so close socket.io first),
- *  3. best-effort drain of the MySQL pool (redis singletons register their
+ *  3. best-effort drain of the PostgreSQL pool (redis singletons register their
  *     own SIGTERM/SIGINT handlers — see server/integration/redis-cache.ts),
  *  4. exit 0; force-exit if cleanup takes longer than 10s.
  */

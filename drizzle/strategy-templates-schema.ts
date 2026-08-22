@@ -1,11 +1,19 @@
-import { int, mysqlTable, text, timestamp, json, varchar } from "drizzle-orm/mysql-core";
+import {
+  integer as int,
+  json,
+  pgTable,
+  serial,
+  text,
+  timestamp,
+  varchar,
+} from "drizzle-orm/pg-core";
 
 /**
  * Strategy Templates - Pre-built trading strategy configurations
  * Users can clone these templates to quickly set up proven trading strategies
  */
-export const strategyTemplates = mysqlTable("strategy_templates", {
-  id: int("id").autoincrement().primaryKey(),
+export const strategyTemplates = pgTable("strategy_templates", {
+  id: serial("id").primaryKey(),
   name: text("name").notNull(),
   description: text("description").notNull(),
   category: varchar("category", { length: 50 }).notNull(),
@@ -58,7 +66,7 @@ export const strategyTemplates = mysqlTable("strategy_templates", {
   difficulty: varchar("difficulty", { length: 20 }).default("beginner").notNull(),
   
   createdAt: timestamp("createdAt").defaultNow().notNull(),
-  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().$onUpdate(() => new Date()).notNull(),
 });
 
 export type StrategyTemplate = typeof strategyTemplates.$inferSelect;

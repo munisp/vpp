@@ -13,6 +13,8 @@ import { settlementLedger } from './settlement-ledger';
 import { kafkaPublisher } from '../integration/kafka-publisher';
 import { marketPrices } from '../../drizzle/schema';
 import { pricePredictionService } from '../ml/price-prediction';
+import type { SqlRow } from '../sql-row';
+import { jsonSetText } from '../sql-json';
 
 // Types for EV charging
 export interface ElectricVehicle {
@@ -118,7 +120,7 @@ export class EVChargingService {
     const db = await getDb();
     if (!db) throw new Error('Database not available');
 
-    const result = await db.execute(sql`
+    const result = await db.execute<SqlRow>(sql`
       INSERT INTO electric_vehicles (
         user_id, vin, make, model, year,
         battery_capacity_kwh, usable_battery_kwh,
@@ -136,11 +138,12 @@ export class EVChargingService {
         ${ev.bidirectionalProtocol || 'none'},
         2000, 8000, 'active', NOW(), NOW()
       )
+      RETURNING id
     `);
 
     console.log(`[EVCharging] Registered EV for user ${userId}`);
 
-    return this.getEV((result as any).insertId) as Promise<ElectricVehicle>;
+    return this.getEV(Number(result.rows[0].id)) as Promise<ElectricVehicle>;
   }
 
   /**
@@ -150,11 +153,11 @@ export class EVChargingService {
     const db = await getDb();
     if (!db) throw new Error('Database not available');
 
-    const result = await db.execute(sql`
+    const result = await db.execute<SqlRow>(sql`
       SELECT * FROM electric_vehicles WHERE id = ${evId}
     `);
 
-    const row = (result as any)[0]?.[0];
+    const row = result.rows[0];
     return row ? this.mapRowToEV(row) : null;
   }
 
@@ -165,11 +168,11 @@ export class EVChargingService {
     const db = await getDb();
     if (!db) throw new Error('Database not available');
 
-    const result = await db.execute(sql`
+    const result = await db.execute<SqlRow>(sql`
       SELECT * FROM electric_vehicles WHERE user_id = ${userId} AND status = 'active'
     `);
 
-    return ((result as any)[0] || []).map(this.mapRowToEV);
+    return (result.rows || []).map(this.mapRowToEV);
   }
 
   /**
@@ -195,7 +198,7 @@ export class EVChargingService {
 
     const stationId = `EVSE_${Date.now().toString(36)}_${Math.random().toString(36).substring(2, 6)}`;
 
-    const result = await db.execute(sql`
+    const result = await db.execute<SqlRow>(sql`
       INSERT INTO charging_stations (
         user_id, site_id, station_id, name,
         latitude, longitude, address,
@@ -213,7 +216,7 @@ export class EVChargingService {
 
     console.log(`[EVCharging] Registered station ${stationId}`);
 
-    return this.getStation((result as any).insertId) as Promise<ChargingStation>;
+    return this.getStation(Number(result.rows[0].id)) as Promise<ChargingStation>;
   }
 
   /**
@@ -230,8 +233,8 @@ export class EVChargingService {
       query = sql`SELECT * FROM charging_stations WHERE station_id = ${stationId}`;
     }
 
-    const result = await db.execute(query);
-    const row = (result as any)[0]?.[0];
+    const result = await db.execute<SqlRow>(query);
+    const row = result.rows[0];
     return row ? this.mapRowToStation(row) : null;
   }
 
@@ -266,7 +269,7 @@ export class EVChargingService {
 
     const sessionId = `CS_${Date.now().toString(36)}_${Math.random().toString(36).substring(2, 8)}`;
 
-    const result = await db.execute(sql`
+    const result = await db.execute<SqlRow>(sql`
       INSERT INTO charging_sessions (
         ev_id, station_id, user_id, session_id,
         start_time, start_soc_percent, session_type,
@@ -283,12 +286,12 @@ export class EVChargingService {
     `);
 
     // Update EV and station status
-    await db.execute(sql`
+    await db.execute<SqlRow>(sql`
       UPDATE electric_vehicles SET is_plugged_in = true, is_charging = true, updated_at = NOW()
       WHERE id = ${evId}
     `);
 
-    await db.execute(sql`
+    await db.execute<SqlRow>(sql`
       UPDATE charging_stations SET status = 'charging', updated_at = NOW()
       WHERE id = ${stationId}
     `);
@@ -311,7 +314,7 @@ export class EVChargingService {
       console.error('[EVCharging] Error publishing to Kafka:', error);
     }
 
-    return this.getSession((result as any).insertId) as Promise<ChargingSession>;
+    return this.getSession(Number(result.rows[0].id)) as Promise<ChargingSession>;
   }
 
   /**
@@ -328,8 +331,8 @@ export class EVChargingService {
       query = sql`SELECT * FROM charging_sessions WHERE session_id = ${sessionId}`;
     }
 
-    const result = await db.execute(query);
-    const row = (result as any)[0]?.[0];
+    const result = await db.execute<SqlRow>(query);
+    const row = result.rows[0];
     return row ? this.mapRowToSession(row) : null;
   }
 
@@ -348,15 +351,14 @@ export class EVChargingService {
     const db = await getDb();
     if (!db) throw new Error('Database not available');
 
-    await db.execute(sql`
+    await db.execute<SqlRow>(sql`
       UPDATE charging_sessions SET
         energy_delivered_wh = COALESCE(${update.energyDeliveredWh || null}, energy_delivered_wh),
         energy_exported_wh = COALESCE(${update.energyExportedWh || null}, energy_exported_wh),
-        metadata = JSON_SET(
-          COALESCE(metadata, '{}'),
-          '$.currentSocPercent', ${update.currentSocPercent || null},
-          '$.currentPowerKw', ${update.currentPowerKw || null}
-        ),
+        metadata = ${jsonSetText(sql`metadata`, {
+          currentSocPercent: update.currentSocPercent ?? null,
+          currentPowerKw: update.currentPowerKw ?? null,
+        })},
         updated_at = NOW()
       WHERE session_id = ${sessionId}
     `);
@@ -365,7 +367,7 @@ export class EVChargingService {
     if (update.currentSocPercent !== undefined) {
       const session = await this.getSession(sessionId);
       if (session) {
-        await db.execute(sql`
+        await db.execute<SqlRow>(sql`
           UPDATE electric_vehicles SET
             current_soc_percent = ${update.currentSocPercent * 100},
             updated_at = NOW()
@@ -392,7 +394,7 @@ export class EVChargingService {
     const session = await this.getSession(sessionId);
     if (!session) throw new Error('Session not found');
 
-    await db.execute(sql`
+    await db.execute<SqlRow>(sql`
       UPDATE charging_sessions SET
         end_time = NOW(),
         end_soc_percent = ${endData.endSocPercent || null},
@@ -404,7 +406,7 @@ export class EVChargingService {
     `);
 
     // Update EV status
-    await db.execute(sql`
+    await db.execute<SqlRow>(sql`
       UPDATE electric_vehicles SET
         is_charging = false,
         current_soc_percent = ${endData.endSocPercent ? endData.endSocPercent * 100 : null},
@@ -413,7 +415,7 @@ export class EVChargingService {
     `);
 
     // Update station status
-    await db.execute(sql`
+    await db.execute<SqlRow>(sql`
       UPDATE charging_stations SET status = 'available', updated_at = NOW()
       WHERE id = ${session.stationId}
     `);
@@ -731,8 +733,8 @@ export class EVChargingService {
       throw new Error('Must specify userId or communityId');
     }
 
-    const result = await db.execute(query);
-    const vehicles = (result as any)[0] || [];
+    const result = await db.execute<SqlRow>(query);
+    const vehicles = result.rows || [];
 
     let totalCapacityKw = 0;
     let availableCapacityKw = 0;
@@ -790,12 +792,12 @@ export class EVChargingService {
     if (!ev.isPluggedIn) return { success: false, message: 'EV not plugged in' };
 
     // Get active session
-    const sessionResult = await db.execute(sql`
+    const sessionResult = await db.execute<SqlRow>(sql`
       SELECT * FROM charging_sessions
       WHERE ev_id = ${evId} AND status IN ('charging', 'paused', 'discharging')
       ORDER BY start_time DESC LIMIT 1
     `);
-    const session = (sessionResult as any)[0]?.[0];
+    const session = sessionResult.rows[0];
     if (!session) return { success: false, message: 'No active session' };
 
     // Check SoC constraints
@@ -809,22 +811,21 @@ export class EVChargingService {
     const newStatus = command.action === 'start_discharge' ? 'discharging' : 
                       command.action === 'stop_discharge' ? 'paused' : session.status;
 
-    await db.execute(sql`
+    await db.execute<SqlRow>(sql`
       UPDATE charging_sessions SET
         status = ${newStatus},
         session_type = 'v2g',
-        metadata = JSON_SET(
-          COALESCE(metadata, '{}'),
-          '$.v2gCommand', ${command.action},
-          '$.v2gPowerKw', ${command.powerKw || null},
-          '$.v2gStartTime', ${new Date().toISOString()}
-        ),
+        metadata = ${jsonSetText(sql`metadata`, {
+          v2gCommand: command.action,
+          v2gPowerKw: command.powerKw ?? null,
+          v2gStartTime: new Date().toISOString(),
+        })},
         updated_at = NOW()
       WHERE id = ${session.id}
     `);
 
     // Update station status
-    await db.execute(sql`
+    await db.execute<SqlRow>(sql`
       UPDATE charging_stations SET
         status = ${command.action === 'start_discharge' ? 'discharging' : 'occupied'},
         updated_at = NOW()

@@ -4,16 +4,31 @@
  * Extended schema for managing IoT devices, authentication, and communication
  */
 
-import { int, mysqlEnum, mysqlTable, text, timestamp, varchar, boolean } from "drizzle-orm/mysql-core";
+import {
+  boolean,
+  integer as int,
+  pgEnum,
+  pgTable,
+  serial,
+  text,
+  timestamp,
+  varchar,
+} from "drizzle-orm/pg-core";
+
+export const deviceLogsEventTypeEnum = pgEnum("device_logs_event_type", ["connected", "disconnected", "error", "warning", "info"]);
+export const deviceCommandsStatusEnum = pgEnum("device_commands_status", ["pending", "sent", "acknowledged", "failed"]);
+export const devicesStatusEnum = pgEnum("devices_status", ["online", "offline", "error", "maintenance"]);
+export const devicesDeviceTypeEnum = pgEnum("devices_device_type", ["smart_meter", "inverter", "battery_controller", "sensor"]);
+
 
 /**
  * Device registry - tracks all IoT devices connected to the platform
  */
-export const devices = mysqlTable("devices", {
-  id: int("id").autoincrement().primaryKey(),
+export const devices = pgTable("devices", {
+  id: serial("id").primaryKey(),
   assetId: int("assetId").notNull(), // Links to assets table
   deviceId: varchar("deviceId", { length: 255 }).notNull().unique(), // Unique device identifier (MAC, serial, etc.)
-  deviceType: mysqlEnum("deviceType", ["smart_meter", "inverter", "battery_controller", "sensor"]).notNull(),
+  deviceType: devicesDeviceTypeEnum("deviceType").notNull(),
   manufacturer: varchar("manufacturer", { length: 255 }),
   model: varchar("model", { length: 255 }),
   firmwareVersion: varchar("firmwareVersion", { length: 50 }),
@@ -24,7 +39,7 @@ export const devices = mysqlTable("devices", {
   mqttPasswordHash: text("mqttPasswordHash"), // Hashed password for device authentication
   
   // Status and Health
-  status: mysqlEnum("status", ["online", "offline", "error", "maintenance"]).default("offline").notNull(),
+  status: devicesStatusEnum("status").default("offline").notNull(),
   lastSeen: timestamp("lastSeen"),
   lastMessageAt: timestamp("lastMessageAt"),
   
@@ -36,7 +51,7 @@ export const devices = mysqlTable("devices", {
   metadata: text("metadata"), // JSON string for additional device info
   
   createdAt: timestamp("createdAt").defaultNow().notNull(),
-  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().$onUpdate(() => new Date()).notNull(),
 });
 
 export type Device = typeof devices.$inferSelect;
@@ -45,12 +60,12 @@ export type InsertDevice = typeof devices.$inferInsert;
 /**
  * Device commands - track commands sent to devices
  */
-export const deviceCommands = mysqlTable("device_commands", {
-  id: int("id").autoincrement().primaryKey(),
+export const deviceCommands = pgTable("device_commands", {
+  id: serial("id").primaryKey(),
   deviceId: int("deviceId").notNull(),
   command: varchar("command", { length: 100 }).notNull(),
   payload: text("payload"), // JSON string
-  status: mysqlEnum("status", ["pending", "sent", "acknowledged", "failed"]).default("pending").notNull(),
+  status: deviceCommandsStatusEnum("status").default("pending").notNull(),
   sentAt: timestamp("sentAt"),
   acknowledgedAt: timestamp("acknowledgedAt"),
   response: text("response"), // JSON string
@@ -63,10 +78,10 @@ export type InsertDeviceCommand = typeof deviceCommands.$inferInsert;
 /**
  * Device logs - audit trail of device events
  */
-export const deviceLogs = mysqlTable("device_logs", {
-  id: int("id").autoincrement().primaryKey(),
+export const deviceLogs = pgTable("device_logs", {
+  id: serial("id").primaryKey(),
   deviceId: int("deviceId").notNull(),
-  eventType: mysqlEnum("eventType", ["connected", "disconnected", "error", "warning", "info"]).notNull(),
+  eventType: deviceLogsEventTypeEnum("eventType").notNull(),
   message: text("message").notNull(),
   metadata: text("metadata"), // JSON string
   createdAt: timestamp("createdAt").defaultNow().notNull(),

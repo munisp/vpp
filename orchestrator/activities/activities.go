@@ -49,7 +49,7 @@ func NewActivities(
 }
 
 // parseUserID converts the orchestrator's string user ID to the numeric
-// userId used by the MySQL schema (drizzle/schema.ts). It fails loudly for
+// userId used by the PostgreSQL schema (drizzle/schema.ts). It fails loudly for
 // non-numeric IDs rather than guessing a mapping.
 func parseUserID(userID string) (int64, error) {
 	id, err := strconv.ParseInt(userID, 10, 64)
@@ -313,9 +313,9 @@ func (a *Activities) GetMarketPriceActivity(ctx context.Context) (float64, error
 	}
 
 	row, err := a.db.QueryRowContext(ctx, `
-		SELECT price FROM marketPrices
-		WHERE validUntil > UTC_TIMESTAMP()
-		ORDER BY `+"`timestamp`"+` DESC
+		SELECT price FROM "marketPrices"
+		WHERE "validUntil" > NOW()
+		ORDER BY "timestamp" DESC
 		LIMIT 1`)
 	if err != nil {
 		return 0, fmt.Errorf("market price unavailable: %w", err)
@@ -341,9 +341,9 @@ func (a *Activities) GetBatteryStateOfChargeActivity(ctx context.Context, assetI
 	}
 
 	row, err := a.db.QueryRowContext(ctx, `
-		SELECT stateOfCharge FROM telemetry
-		WHERE assetId = ? AND stateOfCharge IS NOT NULL
-		ORDER BY `+"`timestamp`"+` DESC
+		SELECT "stateOfCharge" FROM telemetry
+		WHERE "assetId" = $1 AND "stateOfCharge" IS NOT NULL
+		ORDER BY "timestamp" DESC
 		LIMIT 1`, id)
 	if err != nil {
 		return 0, fmt.Errorf("battery state of charge unavailable for asset %s: %w", assetID, err)
@@ -397,12 +397,12 @@ func (a *Activities) FindBestOfferActivity(ctx context.Context, amount float64, 
 	maxPriceCents := int64(maxPrice * 100.0)
 
 	row, err := a.db.QueryRowContext(ctx, `
-		SELECT id, userId, energy, price FROM trades
-		WHERE tradeType = 'p2p_sell'
+		SELECT id, "userId", energy, price FROM trades
+		WHERE "tradeType" = 'p2p_sell'
 		  AND status = 'pending'
-		  AND energy >= ?
-		  AND price <= ?
-		ORDER BY price ASC, `+"`timestamp`"+` ASC
+		  AND energy >= $1
+		  AND price <= $2
+		ORDER BY price ASC, "timestamp" ASC
 		LIMIT 1`, minWattHours, maxPriceCents)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query the order book: %w", err)
@@ -516,9 +516,9 @@ func (a *Activities) GetCurrentConsumptionActivity(ctx context.Context, userID s
 	row, err := a.db.QueryRowContext(ctx, `
 		SELECT AVG(t.power)
 		FROM telemetry t
-		JOIN assets a ON a.id = t.assetId
-		WHERE a.userId = ?
-		  AND t.timestamp >= UTC_TIMESTAMP() - INTERVAL 5 MINUTE`, uid)
+		JOIN assets a ON a.id = t."assetId"
+		WHERE a."userId" = $1
+		  AND t.timestamp >= NOW() - INTERVAL '5 minutes'`, uid)
 	if err != nil {
 		return 0, fmt.Errorf("consumption telemetry unavailable for user %s: %w", userID, err)
 	}
@@ -572,9 +572,9 @@ func (a *Activities) CalculateDRPerformanceActivity(ctx context.Context, userID 
 		row, err := a.db.QueryRowContext(ctx, `
 			SELECT AVG(t.power)
 			FROM telemetry t
-			JOIN assets a ON a.id = t.assetId
-			WHERE a.userId = ?
-			  AND t.timestamp >= ? AND t.timestamp < ?`, uid, from, to)
+			JOIN assets a ON a.id = t."assetId"
+			WHERE a."userId" = $1
+			  AND t.timestamp >= $2 AND t.timestamp < $3`, uid, from, to)
 		if err != nil {
 			return 0, err
 		}
@@ -611,9 +611,9 @@ func (a *Activities) CalculateDRPerformanceActivity(ctx context.Context, userID 
 
 		// Price the measured reduction at the real current market price.
 		row, err := a.db.QueryRowContext(ctx, `
-			SELECT price FROM marketPrices
-			WHERE validUntil > UTC_TIMESTAMP()
-			ORDER BY `+"`timestamp`"+` DESC
+			SELECT price FROM "marketPrices"
+			WHERE "validUntil" > NOW()
+			ORDER BY "timestamp" DESC
 			LIMIT 1`)
 		if err != nil {
 			return nil, fmt.Errorf("market price unavailable; refusing to fabricate DR credits: %w", err)
@@ -787,13 +787,13 @@ func (a *Activities) UpdateLeaderboardActivity(ctx context.Context, userID strin
 // anything else, e.g. "all_time", aggregates everything). An empty dataset
 // yields an empty leaderboard — names are never fabricated.
 func (a *Activities) CalculateLeaderboardScoresActivity(ctx context.Context, period string) (map[string]float64, error) {
-	query := `SELECT userId, COALESCE(SUM(totalAmount), 0) FROM trades WHERE status = 'executed'`
+	query := `SELECT "userId", COALESCE(SUM("totalAmount"), 0) FROM trades WHERE status = 'executed'`
 	var args []interface{}
 	if since, bounded := periodStart(period); bounded {
-		query += " AND `timestamp` >= ?"
+		query += ` AND "timestamp" >= $1`
 		args = append(args, since)
 	}
-	query += " GROUP BY userId"
+	query += ` GROUP BY "userId"`
 
 	rows, err := a.db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -886,10 +886,10 @@ func (a *Activities) CheckAchievementsActivity(ctx context.Context, userID strin
 	}
 
 	row, err := a.db.QueryRowContext(ctx, `
-		SELECT eventsParticipated, totalReduction, reliabilityScore, compensationEarned
+		SELECT events_participated, total_reduction, reliability_score, compensation_earned
 		FROM leaderboard_entries
-		WHERE user_id = ? AND period = 'all_time'
-		ORDER BY periodEnd DESC
+		WHERE user_id = $1 AND period = 'all_time'
+		ORDER BY period_end DESC
 		LIMIT 1`, uid)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load achievement metrics: %w", err)
@@ -910,7 +910,7 @@ func (a *Activities) CheckAchievementsActivity(ctx context.Context, userID strin
 	}
 
 	rows, err := a.db.QueryContext(ctx, `
-		SELECT name, criteria_type, criteria_value FROM achievements WHERE is_active = 1`)
+		SELECT name, criteria_type, criteria_value FROM achievements WHERE is_active = true`)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load achievements: %w", err)
 	}
@@ -937,7 +937,7 @@ func (a *Activities) CheckAchievementsActivity(ctx context.Context, userID strin
 	awardedRows, err := a.db.QueryContext(ctx, `
 		SELECT a.name FROM user_achievements ua
 		JOIN achievements a ON a.id = ua.achievement_id
-		WHERE ua.user_id = ?`, uid)
+		WHERE ua.user_id = $1`, uid)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load awarded achievements: %w", err)
 	}
@@ -973,7 +973,7 @@ func (a *Activities) AwardAchievementActivity(ctx context.Context, userID string
 		return err
 	}
 
-	row, err := a.db.QueryRowContext(ctx, `SELECT id FROM achievements WHERE name = ?`, achievementID)
+	row, err := a.db.QueryRowContext(ctx, `SELECT id FROM achievements WHERE name = $1`, achievementID)
 	if err != nil {
 		return fmt.Errorf("failed to resolve achievement %q: %w", achievementID, err)
 	}
@@ -984,7 +984,7 @@ func (a *Activities) AwardAchievementActivity(ctx context.Context, userID string
 
 	if _, err := a.db.ExecContext(ctx, `
 		INSERT INTO user_achievements (user_id, achievement_id, unlocked_at)
-		VALUES (?, ?, UTC_TIMESTAMP())`, uid, id); err != nil {
+		VALUES ($1, $2, NOW() AT TIME ZONE 'UTC')`, uid, id); err != nil {
 		return fmt.Errorf("failed to record achievement %q for user %s: %w", achievementID, userID, err)
 	}
 	return nil

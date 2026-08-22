@@ -38,7 +38,7 @@ func RegisterWorkflows(w worker.Worker) {
 
 // RegisterActivities registers every implemented, honest activity with the
 // worker. Nothing that fabricates data is registered: every activity below
-// either performs real work (Dapr state, Redis, Kafka, MySQL per
+// either performs real work (Dapr state, Redis, Kafka, PostgreSQL per
 // drizzle/schema.ts, or a configured payment gateway) or fails loudly with an
 // explicit error.
 //
@@ -70,7 +70,7 @@ func RegisterActivities(w worker.Worker, svc *services.Services) {
 	w.RegisterActivity(act.RegisterAssetActivity)
 	w.RegisterActivity(act.SetupPaymentMethodActivity)
 
-	// Trading activities (real data only: Dapr state, Redis cache, MySQL
+	// Trading activities (real data only: Dapr state, Redis cache, PostgreSQL
 	// order book / marketPrices / telemetry)
 	w.RegisterActivity(act.GetAutoTradingRulesActivity)
 	w.RegisterActivity(act.GetActiveStrategiesActivity)

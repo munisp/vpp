@@ -44,7 +44,8 @@ export const notificationsRouter = router({
         p256dh: subscription.keys.p256dh,
         auth: subscription.keys.auth,
         expirationTime: subscription.expirationTime ? new Date(subscription.expirationTime) : null,
-      }).onDuplicateKeyUpdate({
+      }).onConflictDoUpdate({
+        target: pushSubscriptions.endpoint,
         set: {
           p256dh: subscription.keys.p256dh,
           auth: subscription.keys.auth,

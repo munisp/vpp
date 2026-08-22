@@ -1,5 +1,5 @@
 import { eq, and, desc, gte, lte, sql } from "drizzle-orm";
-import { drizzle } from "drizzle-orm/mysql2";
+import { drizzle } from "drizzle-orm/node-postgres";
 import {
   InsertUser,
   users,
@@ -41,7 +41,16 @@ let _db: ReturnType<typeof drizzle> | null = null;
 export async function getDb() {
   if (!_db && process.env.DATABASE_URL) {
     try {
-      _db = drizzle(process.env.DATABASE_URL);
+      // `timezone=UTC` is not optional: every timestamp column is
+      // `timestamp without time zone` holding UTC, and `NOW()` is converted
+      // with the *session* time zone. A non-UTC session would silently shift
+      // every server-generated timestamp (payment, settlement, DR windows).
+      _db = drizzle({
+        connection: {
+          connectionString: process.env.DATABASE_URL,
+          options: '-c timezone=UTC',
+        },
+      });
     } catch (error) {
       console.warn("[Database] Failed to connect:", error);
       _db = null;
@@ -114,7 +123,8 @@ export async function upsertUser(user: InsertUser): Promise<void> {
       updateSet.lastSignedIn = new Date();
     }
 
-    await db.insert(users).values(values).onDuplicateKeyUpdate({
+    await db.insert(users).values(values).onConflictDoUpdate({
+      target: users.openId,
       set: updateSet,
     });
   } catch (error) {
@@ -148,8 +158,8 @@ export async function createAsset(asset: InsertAsset): Promise<Asset> {
   const db = await getDb();
   if (!db) throw new Error("Database not available");
 
-  const result = await db.insert(assets).values(asset);
-  const insertedId = Number(result[0].insertId);
+  const result = await db.insert(assets).values(asset).returning({ id: assets.id });
+  const insertedId = Number(result[0].id);
   const created = await getAssetById(insertedId);
   if (!created) throw new Error("Failed to create asset");
   return created;
@@ -236,8 +246,8 @@ export async function createContract(contract: InsertContract): Promise<Contract
   const db = await getDb();
   if (!db) throw new Error("Database not available");
 
-  const result = await db.insert(contracts).values(contract);
-  const insertedId = Number(result[0].insertId);
+  const result = await db.insert(contracts).values(contract).returning({ id: contracts.id });
+  const insertedId = Number(result[0].id);
   const created = await getContractById(insertedId);
   if (!created) throw new Error("Failed to create contract");
   return created;
@@ -271,8 +281,8 @@ export async function createTrade(trade: InsertTrade): Promise<Trade> {
   const db = await getDb();
   if (!db) throw new Error("Database not available");
 
-  const result = await db.insert(trades).values(trade);
-  const insertedId = Number(result[0].insertId);
+  const result = await db.insert(trades).values(trade).returning({ id: trades.id });
+  const insertedId = Number(result[0].id);
   const created = await getTradeById(insertedId);
   if (!created) throw new Error("Failed to create trade");
   return created;
@@ -320,7 +330,7 @@ export async function updateTradeStatus(
         : eq(trades.id, id)
     );
 
-  return Number(result[0].affectedRows) > 0;
+  return (result.rowCount ?? 0) > 0;
 }
 
 // ============= Market Price Functions =============
@@ -363,8 +373,8 @@ export async function createBilling(billing: InsertBilling): Promise<Billing> {
   const db = await getDb();
   if (!db) throw new Error("Database not available");
 
-  const result = await db.insert(billings).values(billing);
-  const insertedId = Number(result[0].insertId);
+  const result = await db.insert(billings).values(billing).returning({ id: billings.id });
+  const insertedId = Number(result[0].id);
   const created = await getBillingById(insertedId);
   if (!created) throw new Error("Failed to create billing");
   return created;
@@ -414,8 +424,8 @@ export async function createPayment(payment: InsertPayment): Promise<Payment> {
   const db = await getDb();
   if (!db) throw new Error("Database not available");
 
-  const result = await db.insert(payments).values(payment);
-  const insertedId = Number(result[0].insertId);
+  const result = await db.insert(payments).values(payment).returning({ id: payments.id });
+  const insertedId = Number(result[0].id);
   const created = await getPaymentById(insertedId);
   if (!created) throw new Error("Failed to create payment");
   return created;
@@ -477,7 +487,7 @@ export async function updatePaymentStatus(
         : eq(payments.id, id)
     );
 
-  return Number(result[0].affectedRows) > 0;
+  return (result.rowCount ?? 0) > 0;
 }
 
 // ============= Token Functions =============
@@ -486,8 +496,8 @@ export async function createToken(token: InsertToken): Promise<Token> {
   const db = await getDb();
   if (!db) throw new Error("Database not available");
 
-  const result = await db.insert(tokens).values(token);
-  const insertedId = Number(result[0].insertId);
+  const result = await db.insert(tokens).values(token).returning({ id: tokens.id });
+  const insertedId = Number(result[0].id);
   const created = await getTokenById(insertedId);
   if (!created) throw new Error("Failed to create token");
   return created;
@@ -531,8 +541,8 @@ export async function createAlert(alert: InsertAlert): Promise<Alert> {
   const db = await getDb();
   if (!db) throw new Error("Database not available");
 
-  const result = await db.insert(alerts).values(alert);
-  const insertedId = Number(result[0].insertId);
+  const result = await db.insert(alerts).values(alert).returning({ id: alerts.id });
+  const insertedId = Number(result[0].id);
   const created = await getAlertById(insertedId);
   if (!created) throw new Error("Failed to create alert");
   return created;
@@ -581,7 +591,8 @@ export async function upsertTradingPreference(pref: InsertTradingPreference): Pr
   await db
     .insert(tradingPreferences)
     .values(pref)
-    .onDuplicateKeyUpdate({
+    .onConflictDoUpdate({
+      target: tradingPreferences.userId,
       set: {
         tradingMode: pref.tradingMode,
         minExportPrice: pref.minExportPrice,

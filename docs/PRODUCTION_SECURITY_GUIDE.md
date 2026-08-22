@@ -637,47 +637,51 @@ app.use(cors(corsOptions));
 ### Connection Security
 
 ```typescript
-// Use SSL for database connections
-const db = drizzle(mysql({
-  host: process.env.DB_HOST,
-  user: process.env.DB_USER,
-  password: process.env.DB_PASSWORD,
-  database: process.env.DB_NAME,
-  ssl: {
-    ca: fs.readFileSync('/path/to/ca-cert.pem'),
-    rejectUnauthorized: true
-  }
-}));
+// Require TLS (verify-full) for database connections
+const db = drizzle({
+  connection: {
+    connectionString: process.env.DATABASE_URL, // ...?sslmode=verify-full
+    ssl: {
+      ca: fs.readFileSync('/path/to/ca-cert.pem'),
+      rejectUnauthorized: true,
+    },
+    options: '-c timezone=UTC',
+  },
+});
 ```
 
 ### Encryption at Rest
 
-Enable MySQL encryption:
+PostgreSQL has no built-in tablespace encryption; encrypt at the storage
+layer (LUKS / EBS / Cloud SQL / RDS encryption) and encrypt individual
+sensitive columns in the application. For column-level encryption in the
+database, `pgcrypto` is available:
 
 ```sql
--- Enable encryption for tablespace
-ALTER TABLESPACE mysql ENCRYPTION='Y';
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
--- Create encrypted table
-CREATE TABLE users (
-  id INT PRIMARY KEY,
-  email VARCHAR(255)
-) ENCRYPTION='Y';
+-- Encrypt a sensitive value with a key held outside the database
+SELECT pgp_sym_encrypt('sensitive value', :'encryption_key');
 ```
 
 ### Principle of Least Privilege
 
 ```sql
--- Create application user with limited permissions
-CREATE USER 'vpp_app'@'localhost' IDENTIFIED BY 'strong_password';
+-- Create application role with limited permissions
+CREATE ROLE vpp_app LOGIN PASSWORD 'strong_password';
 
--- Grant only necessary permissions
-GRANT SELECT, INSERT, UPDATE, DELETE ON vpp_platform.* TO 'vpp_app'@'localhost';
+-- Grant only necessary permissions on the existing schema
+GRANT CONNECT ON DATABASE vpp_platform TO vpp_app;
+GRANT USAGE ON SCHEMA public TO vpp_app;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO vpp_app;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO vpp_app;
 
--- Revoke dangerous permissions
-REVOKE DROP, CREATE, ALTER ON vpp_platform.* FROM 'vpp_app'@'localhost';
+-- Same grants for tables created later by migrations
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+  GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO vpp_app;
 
-FLUSH PRIVILEGES;
+-- DDL stays with the migration role: vpp_app must not own the schema
+REVOKE CREATE ON SCHEMA public FROM vpp_app;
 ```
 
 ## 9. Security Monitoring

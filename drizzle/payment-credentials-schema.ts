@@ -1,27 +1,43 @@
-import { int, mysqlTable, text, timestamp, varchar, mysqlEnum } from "drizzle-orm/mysql-core";
+import {
+  integer as int,
+  pgEnum,
+  pgTable,
+  serial,
+  text,
+  timestamp,
+  varchar,
+} from "drizzle-orm/pg-core";
+
+export const paymentGatewayLogsStatusEnum = pgEnum("payment_gateway_logs_status", ["pending", "success", "failed", "timeout"]);
+export const paymentGatewayLogsGatewayEnum = pgEnum("payment_gateway_logs_gateway", ["mpesa", "airtel_money", "tigo_pesa"]);
+export const paymentCredentialsIsValidatedEnum = pgEnum("payment_credentials_is_validated", ["true", "false"]);
+export const paymentCredentialsIsActiveEnum = pgEnum("payment_credentials_is_active", ["true", "false"]);
+export const paymentCredentialsEnvironmentEnum = pgEnum("payment_credentials_environment", ["sandbox", "production"]);
+export const paymentCredentialsGatewayEnum = pgEnum("payment_credentials_gateway", ["mpesa", "airtel_money", "tigo_pesa"]);
+
 
 /**
  * Payment Gateway Credentials
  * Stores encrypted API credentials for payment gateways
  */
-export const paymentCredentials = mysqlTable("payment_credentials", {
-  id: int("id").autoincrement().primaryKey(),
-  gateway: mysqlEnum("gateway", ["mpesa", "airtel_money", "tigo_pesa"]).notNull(),
-  environment: mysqlEnum("environment", ["sandbox", "production"]).notNull().default("sandbox"),
+export const paymentCredentials = pgTable("payment_credentials", {
+  id: serial("id").primaryKey(),
+  gateway: paymentCredentialsGatewayEnum("gateway").notNull(),
+  environment: paymentCredentialsEnvironmentEnum("environment").notNull().default("sandbox"),
   
   // Encrypted credentials (stored as encrypted JSON)
   credentials: text("credentials").notNull(), // Encrypted JSON blob
   
   // Status and validation
-  isActive: mysqlEnum("is_active", ["true", "false"]).notNull().default("false"),
-  isValidated: mysqlEnum("is_validated", ["true", "false"]).notNull().default("false"),
+  isActive: paymentCredentialsIsActiveEnum("is_active").notNull().default("false"),
+  isValidated: paymentCredentialsIsValidatedEnum("is_validated").notNull().default("false"),
   lastValidated: timestamp("last_validated"),
   validationError: text("validation_error"),
   
   // Metadata
   createdBy: int("created_by").notNull(),
   createdAt: timestamp("created_at").defaultNow().notNull(),
-  updatedAt: timestamp("updated_at").defaultNow().onUpdateNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().$onUpdate(() => new Date()).notNull(),
 });
 
 export type PaymentCredential = typeof paymentCredentials.$inferSelect;
@@ -31,10 +47,10 @@ export type InsertPaymentCredential = typeof paymentCredentials.$inferInsert;
  * Payment Gateway Transactions Log
  * Audit trail for all payment gateway interactions
  */
-export const paymentGatewayLogs = mysqlTable("payment_gateway_logs", {
-  id: int("id").autoincrement().primaryKey(),
+export const paymentGatewayLogs = pgTable("payment_gateway_logs", {
+  id: serial("id").primaryKey(),
   paymentId: int("payment_id"), // Reference to payments table
-  gateway: mysqlEnum("gateway", ["mpesa", "airtel_money", "tigo_pesa"]).notNull(),
+  gateway: paymentGatewayLogsGatewayEnum("gateway").notNull(),
   
   // Request/Response
   requestType: varchar("request_type", { length: 50 }).notNull(), // STK_PUSH, QUERY, CALLBACK
@@ -43,7 +59,7 @@ export const paymentGatewayLogs = mysqlTable("payment_gateway_logs", {
   statusCode: int("status_code"),
   
   // Status
-  status: mysqlEnum("status", ["pending", "success", "failed", "timeout"]).notNull(),
+  status: paymentGatewayLogsStatusEnum("status").notNull(),
   errorMessage: text("error_message"),
   
   // Metadata

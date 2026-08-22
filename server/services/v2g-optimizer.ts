@@ -22,6 +22,7 @@ import { marketPrices } from '../../drizzle/schema';
 import { v2gSchedules } from '../../drizzle/grid-intel-schema';
 import { pricePredictionService } from '../ml/price-prediction';
 import { evCharging } from './ev-charging';
+import type { SqlRow } from '../sql-row';
 
 export interface ScheduleInterval {
   startTime: Date;
@@ -255,8 +256,8 @@ export class V2gOptimizerService {
       naiveBaselineCostCents,
       expectedRevenueCents,
       status: 'active',
-    });
-    const scheduleId = Number((insertResult as any)[0]?.insertId);
+    }).returning({ id: v2gSchedules.id });
+    const scheduleId = Number(insertResult[0].id);
 
     console.log(`[V2GOptimizer] Schedule ${scheduleId} for EV ${input.evId}: ${intervals.length} intervals, cost=${expectedCostCents}c, revenue=${expectedRevenueCents}c, naive=${naiveBaselineCostCents}c (source=${source})`);
 
@@ -363,7 +364,7 @@ export class V2gOptimizerService {
     if (schedule.status !== 'active' && schedule.status !== 'draft') {
       throw new Error(`Cannot cancel a schedule with status ${schedule.status}`);
     }
-    await db.execute(sql`UPDATE v2g_schedules SET status = 'cancelled' WHERE id = ${scheduleId}`);
+    await db.execute<SqlRow>(sql`UPDATE v2g_schedules SET status = 'cancelled' WHERE id = ${scheduleId}`);
     return this.getSchedule(scheduleId);
   }
 }

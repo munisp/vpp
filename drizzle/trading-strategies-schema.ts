@@ -1,7 +1,16 @@
-import { int, mysqlTable, text, timestamp, boolean, json, varchar } from "drizzle-orm/mysql-core";
+import {
+  boolean,
+  integer as int,
+  json,
+  pgTable,
+  serial,
+  text,
+  timestamp,
+  varchar,
+} from "drizzle-orm/pg-core";
 
-export const tradingStrategies = mysqlTable("trading_strategies", {
-  id: int("id").autoincrement().primaryKey(),
+export const tradingStrategies = pgTable("trading_strategies", {
+  id: serial("id").primaryKey(),
   userId: int("userId").notNull(),
   name: text("name").notNull(),
   description: text("description"),
@@ -59,7 +68,7 @@ export const tradingStrategies = mysqlTable("trading_strategies", {
   }>(),
   
   createdAt: timestamp("createdAt").defaultNow().notNull(),
-  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().$onUpdate(() => new Date()).notNull(),
   lastActivatedAt: timestamp("lastActivatedAt"),
 });
 

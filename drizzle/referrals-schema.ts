@@ -1,10 +1,26 @@
-import { int, mysqlEnum, mysqlTable, text, timestamp, varchar } from "drizzle-orm/mysql-core";
+import {
+  integer as int,
+  pgEnum,
+  pgTable,
+  serial,
+  text,
+  timestamp,
+  varchar,
+} from "drizzle-orm/pg-core";
+
+export const referralRewardsStatusEnum = pgEnum("referral_rewards_status", ["pending", "processed", "failed"]);
+export const referralRewardsCurrencyEnum = pgEnum("referral_rewards_currency", ["NGN", "TZS", "USD", "CREDITS"]);
+export const referralRewardsRewardTypeEnum = pgEnum("referral_rewards_reward_type", ["credits", "cash", "discount", "tokens"]);
+export const referralsRewardCurrencyEnum = pgEnum("referrals_reward_currency", ["NGN", "TZS", "USD", "CREDITS"]);
+export const referralsRewardTypeEnum = pgEnum("referrals_reward_type", ["credits", "cash", "discount", "tokens"]);
+export const referralsStatusEnum = pgEnum("referrals_status", ["pending", "completed", "rewarded", "expired"]);
+
 
 /**
  * Referrals table - tracks user referrals and rewards
  */
-export const referrals = mysqlTable("referrals", {
-  id: int("id").autoincrement().primaryKey(),
+export const referrals = pgTable("referrals", {
+  id: serial("id").primaryKey(),
   
   // Referrer information
   referrerId: int("referrer_id").notNull(), // User who made the referral
@@ -16,12 +32,12 @@ export const referrals = mysqlTable("referrals", {
   refereePhone: varchar("referee_phone", { length: 20 }), // Phone of referred user
   
   // Status tracking
-  status: mysqlEnum("status", ["pending", "completed", "rewarded", "expired"]).default("pending").notNull(),
+  status: referralsStatusEnum("status").default("pending").notNull(),
   
   // Reward information
-  rewardType: mysqlEnum("reward_type", ["credits", "cash", "discount", "tokens"]).default("credits").notNull(),
+  rewardType: referralsRewardTypeEnum("reward_type").default("credits").notNull(),
   rewardAmount: int("reward_amount").default(0).notNull(), // Amount in cents or credits
-  rewardCurrency: mysqlEnum("reward_currency", ["NGN", "TZS", "USD", "CREDITS"]).default("CREDITS").notNull(),
+  rewardCurrency: referralsRewardCurrencyEnum("reward_currency").default("CREDITS").notNull(),
   
   // Completion tracking
   completedAt: timestamp("completed_at"), // When referee completed required action
@@ -33,7 +49,7 @@ export const referrals = mysqlTable("referrals", {
   metadata: text("metadata"), // JSON string for additional data
   
   createdAt: timestamp("created_at").defaultNow().notNull(),
-  updatedAt: timestamp("updated_at").defaultNow().onUpdateNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().$onUpdate(() => new Date()).notNull(),
 });
 
 export type Referral = typeof referrals.$inferSelect;
@@ -42,19 +58,19 @@ export type InsertReferral = typeof referrals.$inferInsert;
 /**
  * Referral rewards table - tracks all rewards earned through referrals
  */
-export const referralRewards = mysqlTable("referral_rewards", {
-  id: int("id").autoincrement().primaryKey(),
+export const referralRewards = pgTable("referral_rewards", {
+  id: serial("id").primaryKey(),
   
   referralId: int("referral_id").notNull(), // Reference to referrals table
   userId: int("user_id").notNull(), // User who received the reward
   
   // Reward details
-  rewardType: mysqlEnum("reward_type", ["credits", "cash", "discount", "tokens"]).notNull(),
+  rewardType: referralRewardsRewardTypeEnum("reward_type").notNull(),
   amount: int("amount").notNull(), // Amount in cents or credits
-  currency: mysqlEnum("currency", ["NGN", "TZS", "USD", "CREDITS"]).notNull(),
+  currency: referralRewardsCurrencyEnum("currency").notNull(),
   
   // Status
-  status: mysqlEnum("status", ["pending", "processed", "failed"]).default("pending").notNull(),
+  status: referralRewardsStatusEnum("status").default("pending").notNull(),
   processedAt: timestamp("processed_at"),
   
   // Metadata
@@ -62,7 +78,7 @@ export const referralRewards = mysqlTable("referral_rewards", {
   metadata: text("metadata"), // JSON string for additional data
   
   createdAt: timestamp("created_at").defaultNow().notNull(),
-  updatedAt: timestamp("updated_at").defaultNow().onUpdateNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().$onUpdate(() => new Date()).notNull(),
 });
 
 export type ReferralReward = typeof referralRewards.$inferSelect;

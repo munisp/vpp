@@ -294,8 +294,8 @@ export async function processInboundSms(params: {
     providerMessageId: params.providerMessageId ?? null,
   };
 
-  const insertResult = await db.insert(smsCommandLog).values(logValues);
-  const logId = Number(insertResult[0].insertId);
+  const insertResult = await db.insert(smsCommandLog).values(logValues).returning({ id: smsCommandLog.id });
+  const logId = Number(insertResult[0].id);
 
   // Real Africa's Talking reply send (delegates to the shared notifications helper).
   let replySent = false;

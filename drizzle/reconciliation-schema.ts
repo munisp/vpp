@@ -1,14 +1,35 @@
-import { int, mysqlEnum, mysqlTable, text, timestamp, varchar, boolean } from "drizzle-orm/mysql-core";
+import {
+  boolean,
+  integer as int,
+  pgEnum,
+  pgTable,
+  serial,
+  text,
+  timestamp,
+  varchar,
+} from "drizzle-orm/pg-core";
+
+export const reconciliationAuditLogsActionEnum = pgEnum("reconciliation_audit_logs_action", [
+    "created",
+    "matched",
+    "flagged_discrepancy",
+    "manual_review",
+    "resolved",
+    "rejected"
+  ]);
+export const reconciliationReportsReportTypeEnum = pgEnum("reconciliation_reports_report_type", ["daily", "weekly", "monthly"]);
+export const paymentReconciliationsStatusEnum = pgEnum("payment_reconciliations_status", ["matched", "unmatched", "discrepancy", "manual_review"]);
+
 
 /**
  * Payment Reconciliation Records
  * Tracks reconciliation status of payments
  */
-export const paymentReconciliations = mysqlTable("payment_reconciliations", {
-  id: int("id").autoincrement().primaryKey(),
+export const paymentReconciliations = pgTable("payment_reconciliations", {
+  id: serial("id").primaryKey(),
   paymentId: int("paymentId").notNull(),
   reconciliationDate: timestamp("reconciliationDate").notNull(),
-  status: mysqlEnum("status", ["matched", "unmatched", "discrepancy", "manual_review"]).notNull(),
+  status: paymentReconciliationsStatusEnum("status").notNull(),
   
   // Gateway data
   gatewayTransactionId: varchar("gatewayTransactionId", { length: 255 }),
@@ -33,7 +54,7 @@ export const paymentReconciliations = mysqlTable("payment_reconciliations", {
   
   metadata: text("metadata"), // JSON for additional data
   createdAt: timestamp("createdAt").defaultNow().notNull(),
-  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().$onUpdate(() => new Date()).notNull(),
 });
 
 export type PaymentReconciliation = typeof paymentReconciliations.$inferSelect;
@@ -43,10 +64,10 @@ export type InsertPaymentReconciliation = typeof paymentReconciliations.$inferIn
  * Reconciliation Reports
  * Daily/weekly/monthly reconciliation summaries
  */
-export const reconciliationReports = mysqlTable("reconciliation_reports", {
-  id: int("id").autoincrement().primaryKey(),
+export const reconciliationReports = pgTable("reconciliation_reports", {
+  id: serial("id").primaryKey(),
   reportDate: timestamp("reportDate").notNull(),
-  reportType: mysqlEnum("reportType", ["daily", "weekly", "monthly"]).notNull(),
+  reportType: reconciliationReportsReportTypeEnum("reportType").notNull(),
   
   // Summary statistics
   totalPayments: int("totalPayments").notNull(),
@@ -80,17 +101,10 @@ export type InsertReconciliationReport = typeof reconciliationReports.$inferInse
  * Reconciliation Audit Logs
  * Track all reconciliation actions
  */
-export const reconciliationAuditLogs = mysqlTable("reconciliation_audit_logs", {
-  id: int("id").autoincrement().primaryKey(),
+export const reconciliationAuditLogs = pgTable("reconciliation_audit_logs", {
+  id: serial("id").primaryKey(),
   reconciliationId: int("reconciliationId").notNull(),
-  action: mysqlEnum("action", [
-    "created",
-    "matched",
-    "flagged_discrepancy",
-    "manual_review",
-    "resolved",
-    "rejected"
-  ]).notNull(),
+  action: reconciliationAuditLogsActionEnum("action").notNull(),
   performedBy: int("performedBy"), // User ID or null for system
   notes: text("notes"),
   previousStatus: varchar("previousStatus", { length: 50 }),

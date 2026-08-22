@@ -26,7 +26,7 @@ export async function getParticipantPerformanceTrends(
   // Get monthly performance
   const monthlyPerformance = await db
     .select({
-      month: sql<string>`DATE_FORMAT(${demandResponseEvents.startTime}, '%Y-%m')`,
+      month: sql<string>`to_char(${demandResponseEvents.startTime}, 'YYYY-MM')`,
       eventsParticipated: count(drResponses.id),
       totalReduction: sum(drResponses.actualReduction),
       avgAccuracy: avg(sql<number>`(${drResponses.actualReduction} / ${demandResponseEvents.targetReduction}) * 100`),
@@ -40,8 +40,8 @@ export async function getParticipantPerformanceTrends(
         lte(demandResponseEvents.startTime, endDate)
       )
     )
-    .groupBy(sql`DATE_FORMAT(${demandResponseEvents.startTime}, '%Y-%m')`)
-    .orderBy(sql`DATE_FORMAT(${demandResponseEvents.startTime}, '%Y-%m')`);
+    .groupBy(sql`to_char(${demandResponseEvents.startTime}, 'YYYY-MM')`)
+    .orderBy(sql`to_char(${demandResponseEvents.startTime}, 'YYYY-MM')`);
 
   return monthlyPerformance.map(row => ({
     month: row.month,
@@ -64,7 +64,7 @@ export async function getEarningsForecast(userId: number) {
 
   const historicalEarnings = await db
     .select({
-      month: sql<string>`DATE_FORMAT(${drCompensation.paidAt}, '%Y-%m')`,
+      month: sql<string>`to_char(${drCompensation.paidAt}, 'YYYY-MM')`,
       earnings: sum(drCompensation.amount),
     })
     .from(drCompensation)
@@ -74,8 +74,8 @@ export async function getEarningsForecast(userId: number) {
         gte(drCompensation.paidAt, threeMonthsAgo)
       )
     )
-    .groupBy(sql`DATE_FORMAT(${drCompensation.paidAt}, '%Y-%m')`)
-    .orderBy(sql`DATE_FORMAT(${drCompensation.paidAt}, '%Y-%m')`);
+    .groupBy(sql`to_char(${drCompensation.paidAt}, 'YYYY-MM')`)
+    .orderBy(sql`to_char(${drCompensation.paidAt}, 'YYYY-MM')`);
 
   const monthlyAvg = historicalEarnings.length > 0
     ? historicalEarnings.reduce((sum, row) => sum + Number(row.earnings || 0), 0) / historicalEarnings.length
@@ -157,7 +157,7 @@ export async function getPeerComparison(userId: number) {
     .where(
       and(
         eq(drResponses.userId, userId),
-        sql`DATE_FORMAT(${demandResponseEvents.startTime}, '%Y-%m') = ${currentMonth}`
+        sql`to_char(${demandResponseEvents.startTime}, 'YYYY-MM') = ${currentMonth}`
       )
     );
 
@@ -178,7 +178,7 @@ export async function getPeerComparison(userId: number) {
         FROM ${drResponses}
         WHERE ${drResponses.userId} = ${userId}
         INNER JOIN ${demandResponseEvents} ON ${drResponses.eventId} = ${demandResponseEvents.id}
-        AND DATE_FORMAT(${demandResponseEvents.startTime}, '%Y-%m') = ${currentMonth}
+        AND to_char(${demandResponseEvents.startTime}, 'YYYY-MM') = ${currentMonth}
       ) as user_stats`
     );
 
@@ -232,7 +232,7 @@ export async function getEnergySavingsTracker(userId: number) {
 
   const monthlySavings = await db
     .select({
-      month: sql<string>`DATE_FORMAT(${demandResponseEvents.startTime}, '%Y-%m')`,
+      month: sql<string>`to_char(${demandResponseEvents.startTime}, 'YYYY-MM')`,
       energySaved: sum(drResponses.actualReduction),
       compensation: sum(drCompensation.amount),
     })
@@ -245,8 +245,8 @@ export async function getEnergySavingsTracker(userId: number) {
         gte(demandResponseEvents.startTime, twelveMonthsAgo)
       )
     )
-    .groupBy(sql`DATE_FORMAT(${demandResponseEvents.startTime}, '%Y-%m')`)
-    .orderBy(sql`DATE_FORMAT(${demandResponseEvents.startTime}, '%Y-%m')`);
+    .groupBy(sql`to_char(${demandResponseEvents.startTime}, 'YYYY-MM')`)
+    .orderBy(sql`to_char(${demandResponseEvents.startTime}, 'YYYY-MM')`);
 
   return monthlySavings.map(row => ({
     month: row.month,

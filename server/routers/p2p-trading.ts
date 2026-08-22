@@ -19,9 +19,8 @@ import { and, desc, eq, inArray, isNull, ne } from 'drizzle-orm';
  * and the offer is withdrawn from the marketplace by its `counterpartyId`.
  */
 
-function affectedRows(result: unknown): number {
-  const header = Array.isArray(result) ? result[0] : result;
-  return (header as { affectedRows?: number } | undefined)?.affectedRows ?? 0;
+function affectedRows(result: { rowCount: number | null }): number {
+  return result.rowCount ?? 0;
 }
 
 const CreateOfferSchema = z.object({
@@ -110,11 +109,11 @@ export const p2pTradingRouter = router({
         totalAmount,
         timestamp: new Date(),
         status: 'pending',
-      });
+      }).returning({ id: trades.id });
 
       return {
         success: true,
-        offerId: Number((insertResult as any)[0]?.insertId ?? (insertResult as any).insertId),
+        offerId: Number(insertResult[0].id),
         message: 'P2P sell offer created.',
       };
     }),
@@ -183,12 +182,12 @@ export const p2pTradingRouter = router({
             sellOfferId: offer.id,
             matchedAt: new Date().toISOString(),
           }),
-        });
+        }).returning({ id: trades.id });
 
         return {
           success: true,
           offerId: offer.id,
-          buyTradeId: Number((buyInsert as any)[0]?.insertId ?? (buyInsert as any).insertId),
+          buyTradeId: Number(buyInsert[0].id),
           settlement: 'awaiting_payment' as const,
           amountDueCents: offer.totalAmount,
           message:

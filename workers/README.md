@@ -37,7 +37,7 @@ This directory contains Temporal workers for executing VPP platform workflows.
 ## Prerequisites
 
 - Docker and Docker Compose
-- Database connection (MySQL/TiDB)
+- Database connection (PostgreSQL)
 - Temporal Server (included in docker-compose)
 
 ## Environment Variables
@@ -46,7 +46,7 @@ Create a `.env` file in the `workers` directory:
 
 ```env
 # Database Configuration
-DATABASE_URL=mysql://user:password@host:port/database
+DATABASE_URL=postgresql://user:password@host:port/database
 DB_HOST=localhost
 DB_NAME=vpp_platform
 DB_USER=root
@@ -148,7 +148,7 @@ After=network.target
 Type=simple
 User=vpp
 WorkingDirectory=/opt/vpp/workers/dr-worker
-Environment="DATABASE_URL=mysql://..."
+Environment="DATABASE_URL=postgresql://..."
 Environment="TEMPORAL_ADDRESS=localhost:7233"
 ExecStart=/opt/vpp/workers/dr-worker/dr-worker
 Restart=always
@@ -214,7 +214,7 @@ docker-compose logs temporal
 
 Verify database credentials and network connectivity:
 ```bash
-mysql -h $DB_HOST -u $DB_USER -p$DB_PASSWORD $DB_NAME
+PGPASSWORD=$DB_PASSWORD psql -h $DB_HOST -U $DB_USER -d $DB_NAME
 ```
 
 ### Worker crashes
@@ -269,7 +269,7 @@ temporal workflow start \
              └────────────────┴────────────────┘
                              │
                     ┌────────▼─────────┐
-                    │   MySQL/TiDB     │
+                    │   PostgreSQL     │
                     │    Database      │
                     └──────────────────┘
 ```

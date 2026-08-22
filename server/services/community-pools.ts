@@ -28,6 +28,7 @@ import {
   AllocationEntry,
 } from '../../drizzle/grid-intel-schema';
 import { communityEnergy } from './community-energy';
+import type { SqlRow } from '../sql-row';
 
 export type PoolRuleType = 'proportional_consumption' | 'equal' | 'proportional_generation' | 'custom_weights';
 
@@ -87,7 +88,7 @@ export class CommunityPoolsService {
         customWeights: customWeightsJson,
         updatedBy: actorUserId,
       })
-      .onDuplicateKeyUpdate({ set: updateSet });
+      .onConflictDoUpdate({ target: poolAllocationRules.communityId, set: updateSet });
 
     const rules = await this.getPoolRules(communityId);
     return rules!;
@@ -130,17 +131,17 @@ export class CommunityPoolsService {
     // negative = consumption/import, 5-minute sampling interval).
     const memberEnergy: MemberEnergy[] = [];
     for (const member of members) {
-      const telemetryResult = await db.execute(sql`
+      const telemetryResult = await db.execute<SqlRow>(sql`
         SELECT
           COALESCE(SUM(CASE WHEN t.power > 0 THEN t.power * 5 / 60 ELSE 0 END), 0) as generation_wh,
           COALESCE(SUM(CASE WHEN t.power < 0 THEN ABS(t.power) * 5 / 60 ELSE 0 END), 0) as consumption_wh
         FROM telemetry t
-        JOIN assets a ON a.id = t.assetId
-        WHERE a.userId = ${member.userId}
+        JOIN assets a ON a.id = t."assetId"
+        WHERE a."userId" = ${member.userId}
           AND t.timestamp >= ${periodStart}
           AND t.timestamp <= ${periodEnd}
       `);
-      const row = (telemetryResult as any)[0]?.[0] || {};
+      const row = telemetryResult.rows[0] || {};
       memberEnergy.push({
         userId: member.userId,
         generationWh: Number(row.generation_wh || 0),
@@ -189,8 +190,8 @@ export class CommunityPoolsService {
       netValueCents,
       status: 'computed',
       runBy,
-    });
-    const runId = Number((runInsert as any)[0]?.insertId);
+    }).returning({ id: allocationRuns.id });
+    const runId = Number(runInsert[0].id);
 
     for (let i = 0; i < shares.length; i++) {
       await db.insert(allocationEntries).values({
@@ -326,13 +327,13 @@ export class CommunityPoolsService {
     if (actorIsPlatformAdmin) return;
     const db = await getDb();
     if (!db) throw new Error('Database not available');
-    const result = await db.execute(sql`
+    const result = await db.execute<SqlRow>(sql`
       SELECT id FROM community_members
       WHERE community_id = ${communityId} AND user_id = ${userId}
         AND role IN ('admin', 'operator') AND status = 'active'
       LIMIT 1
     `);
-    if (!((result as any)[0]?.length > 0)) {
+    if (!(result.rows?.length > 0)) {
       throw new Error('Only an active pool admin/operator can perform this action');
     }
   }
@@ -347,12 +348,12 @@ export class CommunityPoolsService {
   private async assertMember(communityId: number, userId: number): Promise<void> {
     const db = await getDb();
     if (!db) throw new Error('Database not available');
-    const result = await db.execute(sql`
+    const result = await db.execute<SqlRow>(sql`
       SELECT id FROM community_members
       WHERE community_id = ${communityId} AND user_id = ${userId} AND status = 'active'
       LIMIT 1
     `);
-    if (!((result as any)[0]?.length > 0)) {
+    if (!(result.rows?.length > 0)) {
       throw new Error('You are not an active member of this community');
     }
   }

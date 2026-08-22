@@ -60,7 +60,7 @@ echo "System Services:"
 echo "---------------"
 check_service "VPP Application" "systemctl is-active vpp-platform"
 check_service "Nginx" "systemctl is-active nginx"
-check_service "MySQL" "systemctl is-active mysql"
+check_service "PostgreSQL" "systemctl is-active postgresql"
 check_service "Docker" "systemctl is-active docker"
 echo ""
 
@@ -98,13 +98,14 @@ echo ""
 
 echo "Database Connection:"
 echo "-------------------"
-if command -v mysql &> /dev/null; then
-    if mysql -e "SELECT 1" > /dev/null 2>&1; then
-        echo -e "MySQL: ${GREEN}✓ Connected${NC}"
+PGDATABASE_NAME="${DB_NAME:-vpp_platform}"
+if command -v psql &> /dev/null; then
+    if psql -h "${DB_HOST:-localhost}" -p "${DB_PORT:-5432}" -U "${DB_USER:-postgres}" -d postgres -tAc "SELECT 1" > /dev/null 2>&1; then
+        echo -e "PostgreSQL: ${GREEN}✓ Connected${NC}"
         ((CHECKS_PASSED++))
         
         # Check if VPP database exists
-        if mysql -e "USE vpp_platform" > /dev/null 2>&1; then
+        if psql -h "${DB_HOST:-localhost}" -p "${DB_PORT:-5432}" -U "${DB_USER:-postgres}" -d "$PGDATABASE_NAME" -tAc "SELECT 1" > /dev/null 2>&1; then
             echo -e "VPP Database: ${GREEN}✓ Exists${NC}"
             ((CHECKS_PASSED++))
         else
@@ -112,11 +113,11 @@ if command -v mysql &> /dev/null; then
             ((CHECKS_FAILED++))
         fi
     else
-        echo -e "MySQL: ${RED}✗ Connection failed${NC}"
+        echo -e "PostgreSQL: ${RED}✗ Connection failed${NC}"
         ((CHECKS_FAILED++))
     fi
 else
-    echo -e "${YELLOW}⚠ MySQL client not installed${NC}"
+    echo -e "${YELLOW}⚠ psql client not installed${NC}"
 fi
 echo ""
 

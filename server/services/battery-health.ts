@@ -127,8 +127,8 @@ export async function computeBatteryHealth(assetId: number, userId: number): Pro
         warrantyRisk: partial.warrantyRisk,
         warrantyRiskReasons: partial.warrantyRiskReasons,
         insufficientData: partial.insufficientData,
-      });
-      partial.snapshotId = Number((insert as any)[0]?.insertId ?? (insert as any).insertId ?? 0) || null;
+      }).returning({ id: batteryHealthSnapshots.id });
+      partial.snapshotId = Number(insert[0].id ?? 0) || null;
     } catch (error) {
       console.error('[BatteryHealth] Failed to persist snapshot:', error);
     }

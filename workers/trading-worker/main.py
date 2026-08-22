@@ -15,8 +15,9 @@ from dataclasses import dataclass
 from temporalio import activity, workflow
 from temporalio.client import Client
 from temporalio.worker import Worker
-import mysql.connector
-from mysql.connector import Error
+import psycopg2
+import psycopg2.extras
+from psycopg2 import Error
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -65,11 +66,16 @@ class P2PTradingResult:
 def get_db_connection():
     """Create database connection"""
     try:
-        connection = mysql.connector.connect(
+        connection = psycopg2.connect(
             host=os.getenv('DB_HOST', 'localhost'),
-            database=os.getenv('DB_NAME', 'vpp_platform'),
-            user=os.getenv('DB_USER', 'root'),
+            port=os.getenv('DB_PORT', '5432'),
+            dbname=os.getenv('DB_NAME', 'vpp_platform'),
+            user=os.getenv('DB_USER', 'postgres'),
             password=os.getenv('DB_PASSWORD', ''),
+            sslmode=os.getenv('DB_SSLMODE', 'require'),
+            # timestamp columns hold UTC and NOW() is converted with the
+            # session time zone, so the session must be UTC.
+            options='-c timezone=UTC',
         )
         return connection
     except Error as e:
@@ -84,18 +90,18 @@ async def get_available_energy(user_id: int, asset_id: int) -> float:
     logger.info(f"Getting available energy for user {user_id}, asset {asset_id}")
     
     connection = get_db_connection()
-    cursor = connection.cursor(dictionary=True)
+    cursor = connection.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     
     try:
         # Get user's assets (real columns per drizzle/schema.ts: userId, assetType)
         if asset_id > 0:
             cursor.execute(
-                "SELECT id, assetType, capacity FROM assets WHERE userId = %s AND id = %s AND status = 'active'",
+                'SELECT id, "assetType", capacity FROM assets WHERE "userId" = %s AND id = %s AND status = \'active\'',
                 (user_id, asset_id)
             )
         else:
             cursor.execute(
-                "SELECT id, assetType, capacity FROM assets WHERE userId = %s AND status = 'active'",
+                'SELECT id, "assetType", capacity FROM assets WHERE "userId" = %s AND status = \'active\'',
                 (user_id,)
             )
 
@@ -106,9 +112,9 @@ async def get_available_energy(user_id: int, asset_id: int) -> float:
             # Get latest telemetry for this asset
             # (real columns: assetId, power, stateOfCharge, timestamp)
             cursor.execute(
-                """SELECT power, stateOfCharge, timestamp
+                """SELECT power, "stateOfCharge", timestamp
                    FROM telemetry
-                   WHERE assetId = %s
+                   WHERE "assetId" = %s
                    ORDER BY timestamp DESC
                    LIMIT 1""",
                 (asset['id'],)
@@ -143,7 +149,7 @@ async def find_matching_orders(strategy: str, price: Optional[int], limit: int =
     logger.info(f"Finding matching orders for strategy {strategy}")
     
     connection = get_db_connection()
-    cursor = connection.cursor(dictionary=True)
+    cursor = connection.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     
     try:
         # Find pending trades that match the strategy
@@ -152,18 +158,18 @@ async def find_matching_orders(strategy: str, price: Optional[int], limit: int =
             # Looking for buyers (import orders)
             if price:
                 cursor.execute(
-                    """SELECT id, userId, energy/1000 as quantity, price, totalAmount
+                    """SELECT id, "userId", energy / 1000.0 as quantity, price, "totalAmount"
                        FROM trades
-                       WHERE tradeType = 'import' AND status = 'pending' AND price >= %s
+                       WHERE "tradeType" = 'import' AND status = 'pending' AND price >= %s
                        ORDER BY price DESC
                        LIMIT %s""",
                     (price, limit)
                 )
             else:
                 cursor.execute(
-                    """SELECT id, userId, energy/1000 as quantity, price, totalAmount
+                    """SELECT id, "userId", energy / 1000.0 as quantity, price, "totalAmount"
                        FROM trades
-                       WHERE tradeType = 'import' AND status = 'pending'
+                       WHERE "tradeType" = 'import' AND status = 'pending'
                        ORDER BY price DESC
                        LIMIT %s""",
                     (limit,)
@@ -172,18 +178,18 @@ async def find_matching_orders(strategy: str, price: Optional[int], limit: int =
             # Looking for sellers (export orders)
             if price:
                 cursor.execute(
-                    """SELECT id, userId, energy/1000 as quantity, price, totalAmount
+                    """SELECT id, "userId", energy / 1000.0 as quantity, price, "totalAmount"
                        FROM trades
-                       WHERE tradeType = 'export' AND status = 'pending' AND price <= %s
+                       WHERE "tradeType" = 'export' AND status = 'pending' AND price <= %s
                        ORDER BY price ASC
                        LIMIT %s""",
                     (price, limit)
                 )
             else:
                 cursor.execute(
-                    """SELECT id, userId, energy/1000 as quantity, price, totalAmount
+                    """SELECT id, "userId", energy / 1000.0 as quantity, price, "totalAmount"
                        FROM trades
-                       WHERE tradeType = 'export' AND status = 'pending'
+                       WHERE "tradeType" = 'export' AND status = 'pending'
                        ORDER BY price ASC
                        LIMIT %s""",
                     (limit,)
@@ -218,17 +224,18 @@ async def create_trade(buyer_id: int, seller_id: int, quantity: float, price: in
         # Create seller's trade record (export side)
         cursor.execute(
             """INSERT INTO trades
-               (userId, tradeType, tradingMode, energy, price, totalAmount, timestamp, status, counterpartyId, metadata)
-               VALUES (%s, 'p2p_sell', 'p2p', %s, %s, %s, NOW(), 'pending', %s, %s)""",
+               ("userId", "tradeType", "tradingMode", energy, price, "totalAmount", timestamp, status, "counterpartyId", metadata)
+               VALUES (%s, 'p2p_sell', 'p2p', %s, %s, %s, NOW(), 'pending', %s, %s)
+               RETURNING id""",
             (seller_id, energy_wh, price, total_amount, buyer_id,
              json.dumps({"buyer_id": buyer_id, "quantity_kwh": quantity}))
         )
-        trade_id = cursor.lastrowid
+        trade_id = cursor.fetchone()[0]
 
         # Create buyer's trade record (import side) — 10 columns, 10 values
         cursor.execute(
             """INSERT INTO trades
-               (userId, tradeType, tradingMode, energy, price, totalAmount, timestamp, status, counterpartyId, metadata)
+               ("userId", "tradeType", "tradingMode", energy, price, "totalAmount", timestamp, status, "counterpartyId", metadata)
                VALUES (%s, 'p2p_buy', 'p2p', %s, %s, %s, NOW(), 'pending', %s, %s)""",
             (buyer_id, energy_wh, price, total_amount, seller_id,
              json.dumps({"seller_id": seller_id, "linked_trade_id": trade_id}))
@@ -318,11 +325,12 @@ async def lock_funds(user_id: int, amount: int, trade_id: Optional[int] = None) 
         }
         cursor.execute(
             """INSERT INTO payments
-               (userId, paymentType, amount, currency, paymentMethod, status, metadata)
-               VALUES (%s, 'invoice', %s, 'TZS', 'bank_transfer', 'pending', %s)""",
+               ("userId", "paymentType", amount, currency, "paymentMethod", status, metadata)
+               VALUES (%s, 'invoice', %s, 'TZS', 'bank_transfer', 'pending', %s)
+               RETURNING id""",
             (user_id, amount, json.dumps(metadata))
         )
-        hold_id = cursor.lastrowid
+        hold_id = cursor.fetchone()[0]
         connection.commit()
         logger.info(f"Escrow hold {hold_id} created for user {user_id}: {amount} cents")
         return hold_id
@@ -345,14 +353,17 @@ def _set_escrow_status(hold_id: int, new_status: str) -> None:
     try:
         cursor.execute(
             """UPDATE payments
-               SET metadata = JSON_SET(
-                       COALESCE(metadata, JSON_OBJECT()),
-                       '$.escrowStatus', %s,
-                       '$.escrowStatusAt', DATE_FORMAT(NOW(), '%%Y-%%m-%%dT%%H:%%i:%%sZ')
-                   ),
-                   updatedAt = NOW()
+               SET metadata = jsonb_set(
+                       jsonb_set(
+                           COALESCE(metadata::jsonb, '{}'::jsonb),
+                           '{escrowStatus}', to_jsonb(%s::text), true
+                       ),
+                       '{escrowStatusAt}',
+                       to_jsonb(to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')), true
+                   )::text,
+                   "updatedAt" = NOW()
                WHERE id = %s AND status = 'pending'
-                 AND JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.escrowStatus')) = 'held'""",
+                 AND metadata::jsonb ->> 'escrowStatus' = 'held'""",
             (new_status, hold_id)
         )
         if cursor.rowcount == 0:
@@ -415,8 +426,8 @@ async def schedule_energy_transfer(seller_id: int, buyer_id: int, quantity: floa
         # Create alert for seller
         cursor.execute(
             """INSERT INTO alerts
-               (userId, alertType, severity, title, message, isRead, metadata, createdAt)
-               VALUES (%s, 'trading', 'info', 'Energy Transfer Scheduled', %s, 0, %s, NOW())""",
+               ("userId", "alertType", severity, title, message, "isRead", metadata, "createdAt")
+               VALUES (%s, 'trading', 'info', 'Energy Transfer Scheduled', %s, false, %s, NOW())""",
             (seller_id,
              f'You have a scheduled energy transfer of {quantity}kWh to buyer at {delivery_time}',
              json.dumps({"type": "energy_transfer", "buyer_id": buyer_id,
@@ -426,8 +437,8 @@ async def schedule_energy_transfer(seller_id: int, buyer_id: int, quantity: floa
         # Create alert for buyer
         cursor.execute(
             """INSERT INTO alerts
-               (userId, alertType, severity, title, message, isRead, metadata, createdAt)
-               VALUES (%s, 'trading', 'info', 'Energy Transfer Scheduled', %s, 0, %s, NOW())""",
+               ("userId", "alertType", severity, title, message, "isRead", metadata, "createdAt")
+               VALUES (%s, 'trading', 'info', 'Energy Transfer Scheduled', %s, false, %s, NOW())""",
             (buyer_id,
              f'You have a scheduled energy delivery of {quantity}kWh from seller at {delivery_time}',
              json.dumps({"type": "energy_transfer", "seller_id": seller_id,
@@ -462,12 +473,12 @@ async def monitor_energy_delivery(trade_id: int, duration: int) -> dict:
     logger.info(f"Monitoring delivery for trade {trade_id}, duration: {duration}h")
 
     connection = get_db_connection()
-    cursor = connection.cursor(dictionary=True)
+    cursor = connection.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
     try:
         # Get trade details (trade_id is the seller's p2p_sell row; userId = seller)
         cursor.execute(
-            "SELECT userId, counterpartyId, energy FROM trades WHERE id = %s",
+            'SELECT "userId", "counterpartyId", energy FROM trades WHERE id = %s',
             (trade_id,)
         )
         trade = cursor.fetchone()
@@ -482,9 +493,9 @@ async def monitor_energy_delivery(trade_id: int, duration: int) -> dict:
         cursor.execute(
             """SELECT AVG(t.power) AS avg_power, COUNT(*) AS samples
                FROM telemetry t
-               JOIN assets a ON t.assetId = a.id
-               WHERE a.userId = %s
-                 AND t.timestamp BETWEEN DATE_SUB(NOW(), INTERVAL %s HOUR) AND NOW()""",
+               JOIN assets a ON t."assetId" = a.id
+               WHERE a."userId" = %s
+                 AND t.timestamp BETWEEN NOW() - make_interval(hours => %s) AND NOW()""",
             (seller_id, duration)
         )
         row = cursor.fetchone()
@@ -548,7 +559,7 @@ async def update_trade_status(trade_id: int, status: str) -> bool:
         # Also update any linked trades (buyer/seller counterpart)
         cursor.execute(
             """UPDATE trades SET status = %s
-               WHERE JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.linked_trade_id')) = %s""",
+               WHERE metadata::jsonb ->> 'linked_trade_id' = %s""",
             (db_status, str(trade_id))
         )
 

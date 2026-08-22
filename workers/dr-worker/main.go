@@ -7,10 +7,11 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"net/url"
 	"os"
 	"time"
 
-	_ "github.com/go-sql-driver/mysql"
+	_ "github.com/lib/pq"
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/worker"
 	"go.temporal.io/sdk/workflow"
@@ -46,7 +47,12 @@ func initDB() error {
 		return fmt.Errorf("DATABASE_URL environment variable not set")
 	}
 
-	db, err = sql.Open("mysql", databaseURL)
+	dsn, err := withUTCSession(databaseURL)
+	if err != nil {
+		return err
+	}
+
+	db, err = sql.Open("postgres", dsn)
 	if err != nil {
 		return fmt.Errorf("failed to connect to database: %w", err)
 	}
@@ -57,6 +63,23 @@ func initDB() error {
 
 	log.Println("[DB] Connected to database")
 	return nil
+}
+
+// withUTCSession forces the PostgreSQL session time zone to UTC. Timestamp
+// columns are `timestamp without time zone` holding UTC, and NOW() is
+// converted using the session time zone, so a non-UTC session would silently
+// shift every timestamp this worker writes (DR windows, compensation).
+func withUTCSession(databaseURL string) (string, error) {
+	parsed, err := url.Parse(databaseURL)
+	if err != nil {
+		return "", fmt.Errorf("DATABASE_URL is not a valid URL: %w", err)
+	}
+	query := parsed.Query()
+	if query.Get("options") == "" {
+		query.Set("options", "-c timezone=UTC")
+		parsed.RawQuery = query.Encode()
+	}
+	return parsed.String(), nil
 }
 
 // DR Event Workflow
@@ -206,7 +229,7 @@ func UpdateEventStatusActivity(ctx context.Context, eventID int, status string) 
 	// Real table per drizzle/schema.ts: demandResponseEvents
 	// (status enum: scheduled/active/completed/cancelled)
 	_, err := db.ExecContext(ctx,
-		"UPDATE demandResponseEvents SET status = ?, updatedAt = NOW() WHERE id = ?",
+		`UPDATE "demandResponseEvents" SET status = $1, "updatedAt" = NOW() WHERE id = $2`,
 		status, eventID,
 	)
 	if err != nil {
@@ -221,7 +244,7 @@ func EnrollParticipantsActivity(ctx context.Context, input EnrollParticipantsInp
 
 	rows, err := db.QueryContext(ctx, `
 		SELECT id FROM users
-		WHERE id IN (SELECT userId FROM drParticipants WHERE status = 'active')
+		WHERE id IN (SELECT "userId" FROM "drParticipants" WHERE status = 'active')
 	`)
 	if err != nil {
 		return result, fmt.Errorf("failed to query participants: %w", err)
@@ -244,12 +267,12 @@ func EnrollParticipantsActivity(ctx context.Context, input EnrollParticipantsInp
 		// (eventId, userId), so idempotency under Temporal activity retries is
 		// enforced with WHERE NOT EXISTS instead of ON DUPLICATE KEY UPDATE.
 		_, err = db.ExecContext(ctx, `
-			INSERT INTO drResponses (eventId, userId, participationStatus, responseTime)
-			SELECT ?, ?, ?, NOW() FROM DUAL
+			INSERT INTO "drResponses" ("eventId", "userId", "participationStatus", "responseTime")
+			SELECT $1, $2, $3::"drResponses_participation_status", NOW()
 			WHERE NOT EXISTS (
-				SELECT 1 FROM drResponses WHERE eventId = ? AND userId = ?
+				SELECT 1 FROM "drResponses" WHERE "eventId" = $1 AND "userId" = $2
 			)
-		`, input.EventID, userID, participationStatus, input.EventID, userID)
+		`, input.EventID, userID, participationStatus)
 		if err != nil {
 			// A DB error must fail the activity so Temporal retries — an event
 			// that enrolls 0 due to DB errors is a failure, not count=0 success.
@@ -278,7 +301,7 @@ func SendNotificationsActivity(ctx context.Context, input SendNotificationsInput
 	var eventTitle string
 	var startTime, endTime time.Time
 	err := db.QueryRowContext(ctx,
-		"SELECT eventName, startTime, endTime FROM demandResponseEvents WHERE id = ?",
+		`SELECT "eventName", "startTime", "endTime" FROM "demandResponseEvents" WHERE id = $1`,
 		input.EventID,
 	).Scan(&eventTitle, &startTime, &endTime)
 	if err != nil {
@@ -303,8 +326,8 @@ func SendNotificationsActivity(ctx context.Context, input SendNotificationsInput
 
 	// Fetch all enrolled participants from the real drResponses table.
 	rows, err := db.QueryContext(ctx,
-		`SELECT userId FROM drResponses
-		 WHERE eventId = ? AND participationStatus IN ('opted_in', 'auto_enrolled')`,
+		`SELECT "userId" FROM "drResponses"
+		 WHERE "eventId" = $1 AND "participationStatus" IN ('opted_in', 'auto_enrolled')`,
 		input.EventID,
 	)
 	if err != nil {
@@ -329,8 +352,8 @@ func SendNotificationsActivity(ctx context.Context, input SendNotificationsInput
 		// Real table per drizzle/schema.ts: alerts
 		// (alertType enum: system/trading/billing/maintenance)
 		_, err = db.ExecContext(ctx,
-			`INSERT INTO alerts (userId, alertType, severity, title, message, isRead, metadata, createdAt)
-			 VALUES (?, 'system', 'info', ?, ?, 0, ?, NOW())`,
+			`INSERT INTO alerts ("userId", "alertType", severity, title, message, "isRead", metadata, "createdAt")
+			 VALUES ($1, 'system', 'info', $2, $3, false, $4, NOW())`,
 			userID, title, body, string(data),
 		)
 		if err != nil {
@@ -356,8 +379,8 @@ func MonitorComplianceActivity(ctx context.Context, input MonitorComplianceInput
 
 	// Fetch enrolled participants from the real drResponses table
 	rows, err := db.QueryContext(ctx,
-		`SELECT userId FROM drResponses
-		 WHERE eventId = ? AND participationStatus IN ('opted_in', 'auto_enrolled')`,
+		`SELECT "userId" FROM "drResponses"
+		 WHERE "eventId" = $1 AND "participationStatus" IN ('opted_in', 'auto_enrolled')`,
 		input.EventID,
 	)
 	if err != nil {
@@ -379,9 +402,9 @@ func MonitorComplianceActivity(ctx context.Context, input MonitorComplianceInput
 		err = db.QueryRowContext(ctx, `
 			SELECT AVG(t.power)
 			FROM telemetry t
-			JOIN assets a ON t.assetId = a.id
-			WHERE a.userId = ?
-			  AND t.timestamp BETWEEN ? AND ?
+			JOIN assets a ON t."assetId" = a.id
+			WHERE a."userId" = $1
+			  AND t.timestamp BETWEEN $2 AND $3
 		`, userID, windowStart, now).Scan(&avgPower)
 		if err != nil {
 			return fmt.Errorf("failed to query telemetry for user %d: %w", userID, err)
@@ -410,11 +433,11 @@ func MonitorComplianceActivity(ctx context.Context, input MonitorComplianceInput
 		// Update the participant's compliance record. drResponses has no
 		// complianceScore column, so the score is kept in the metadata JSON.
 		_, err = db.ExecContext(ctx, `
-			UPDATE drResponses
-			SET actualReduction = ?,
-			    metadata = JSON_SET(COALESCE(metadata, JSON_OBJECT()), '$.complianceScore', ?),
-			    updatedAt = NOW()
-			WHERE eventId = ? AND userId = ?
+			UPDATE "drResponses"
+			SET "actualReduction" = $1,
+			    metadata = (jsonb_set(COALESCE(metadata, '{}')::jsonb, '{complianceScore}', to_jsonb($2::numeric), true))::text,
+			    "updatedAt" = NOW()
+			WHERE "eventId" = $3 AND "userId" = $4
 		`, reductionKW, complianceScore, input.EventID, userID)
 		if err != nil {
 			return fmt.Errorf("failed to update compliance for user %d: %w", userID, err)
@@ -437,10 +460,10 @@ func CalculateCompensationActivity(ctx context.Context, input CalculateCompensat
 	// drResponses.actualReduction is kW (int); join users for the payout
 	// currency (drCompensation.currency enum: NGN/TZS/USD, NOT NULL).
 	rows, err := db.QueryContext(ctx,
-		`SELECT r.id, r.userId, r.actualReduction, u.currency
-		 FROM drResponses r
-		 JOIN users u ON u.id = r.userId
-		 WHERE r.eventId = ? AND r.participationStatus IN ('opted_in', 'auto_enrolled')`,
+		`SELECT r.id, r."userId", r."actualReduction", u.currency
+		 FROM "drResponses" r
+		 JOIN users u ON u.id = r."userId"
+		 WHERE r."eventId" = $1 AND r."participationStatus" IN ('opted_in', 'auto_enrolled')`,
 		input.EventID,
 	)
 	if err != nil {
@@ -481,21 +504,21 @@ func CalculateCompensationActivity(ctx context.Context, input CalculateCompensat
 		// user/event response, so guard on it (no unique key exists, hence
 		// WHERE NOT EXISTS rather than ON DUPLICATE KEY UPDATE).
 		_, err = db.ExecContext(ctx, `
-			INSERT INTO drCompensation (userId, eventId, responseId, amount, currency, status, metadata)
-			SELECT ?, ?, ?, ?, ?, 'pending', ? FROM DUAL
+			INSERT INTO "drCompensation" ("userId", "eventId", "responseId", amount, currency, status, metadata)
+			SELECT $1, $2, $3, $4, $5::"drCompensation_currency", 'pending', $6
 			WHERE NOT EXISTS (
-				SELECT 1 FROM drCompensation WHERE responseId = ?
+				SELECT 1 FROM "drCompensation" WHERE "responseId" = $3
 			)
-		`, userID, input.EventID, responseID, compensationCents, currency, string(metadata), responseID)
+		`, userID, input.EventID, responseID, compensationCents, currency, string(metadata))
 		if err != nil {
 			return fmt.Errorf("failed to insert compensation for user %d: %w", userID, err)
 		}
 
 		// Record the earned compensation on the response row itself.
 		_, err = db.ExecContext(ctx, `
-			UPDATE drResponses
-			SET compensation = ?, completedAt = COALESCE(completedAt, NOW()), updatedAt = NOW()
-			WHERE id = ?
+			UPDATE "drResponses"
+			SET compensation = $1, "completedAt" = COALESCE("completedAt", NOW()), "updatedAt" = NOW()
+			WHERE id = $2
 		`, compensationCents, responseID)
 		if err != nil {
 			return fmt.Errorf("failed to update compensation on response %d: %w", responseID, err)

@@ -1,0 +1,70 @@
+# Example configuration for the Modbus poller.
+#
+# Register maps are vendor and firmware specific and are never guessed: an
+# undeclared register is not polled, and a register that fails to read or decode
+# is reported as an error rather than published as zero.
+#
+# Register names carry meaning for the platform: names containing "power" (unit
+# W), "energy" (unit Wh) and "soc" (unit %) map onto telemetry columns; V, A, Hz
+# and C map by unit. Anything else is stored as raw metadata.
+
+poll_interval_secs = 30
+request_timeout_ms = 3000
+
+[platform]
+base_url = "http://vpp-server:3000"
+shared_secret = "" # GRID_PROTOCOL_SHARED_SECRET, >= 32 characters
+timeout_secs = 15
+
+[[devices]]
+# Must match the asset's modbus device id registered on the platform.
+id = "inverter-001"
+
+[devices.transport]
+type = "tcp"
+host = "10.20.0.11"
+port = 502
+unit_id = 1
+
+[[devices.registers]]
+name = "active_power"
+address = 40083
+kind = "holding"
+data_type = "i32"
+word_order = "big"
+# Raw value is in 0.1 W steps on this (illustrative) device.
+scale = 0.1
+unit = "W"
+
+[[devices.registers]]
+name = "total_energy"
+address = 40093
+kind = "holding"
+data_type = "u32"
+scale = 1000.0
+unit = "Wh"
+
+[[devices.registers]]
+name = "battery_soc"
+address = 40151
+kind = "input"
+data_type = "u16"
+scale = 0.1
+unit = "%"
+
+[[devices]]
+id = "meter-002"
+
+[devices.transport]
+type = "rtu"
+path = "/dev/ttyUSB0"
+baud_rate = 9600
+unit_id = 3
+
+[[devices.registers]]
+name = "grid_frequency"
+address = 70
+kind = "input"
+data_type = "f32"
+word_order = "little"
+unit = "Hz"

@@ -678,3 +678,4 @@ export * from './nextgen-vpp-schema';
 export * from './innovations-schema';
 export * from './grid-intel-schema';
 export * from './trust-access-schema';
+export * from './grid-protocol-schema';

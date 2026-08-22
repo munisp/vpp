@@ -24,6 +24,15 @@ ocpp:
   heartbeat_interval: 300s
   call_timeout: 30s
 
+control:
+  # No setpoint this service delivers may outlive this window: the bound is sent
+  # to the charge point as validFrom/validTo, so hardware stops obeying on its
+  # own clock if the platform disappears. Capped at 24h.
+  max_validity: 1h
+  # How often expired windows are swept and the standing safe fallback profile is
+  # re-asserted. Must be shorter than max_validity.
+  sweep_interval: 30s
+
 openadr:
   enabled: false
   vtn_base_url: "https://vtn.utility.example/OpenADR2/Simple/2.0b"

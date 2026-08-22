@@ -62,6 +62,7 @@ import { solarYieldRouter } from './routers/solarYield';
 import { ntlDetectionRouter } from './routers/ntlDetection';
 import { priceAlertEngineRouter } from './routers/priceAlertEngine';
 import { complianceReportsRouter } from './routers/complianceReports';
+import { controlWindowsRouter } from './routers/controlWindows';
 
 // Next-gen VPP routers
 import {
@@ -152,6 +153,7 @@ export const appRouter = router({
   carbonCredits: carbonCreditsRouter,
   gridAnomaly: gridAnomalyRouter,
   v2gOptimizer: v2gOptimizerRouter,
+  controlWindows: controlWindowsRouter,
   energyWallet: energyWalletRouter,
   communityPools: communityPoolsRouter,
   drForecast: drForecastRouter,

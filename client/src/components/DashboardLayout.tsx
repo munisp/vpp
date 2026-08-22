@@ -44,6 +44,7 @@ import {
   AlertTriangle,
   CloudSun,
   SlidersHorizontal,
+  Target,
   ShieldAlert,
   FileCheck,
   Users,
@@ -106,6 +107,7 @@ const getMenuSections = (userRole?: string): MenuSection[] => [
       { icon: SlidersHorizontal, label: "Control Windows", path: "/grid/control-windows" },
       { icon: AlertTriangle, label: "Anomalies", path: "/grid/anomalies" },
       { icon: CloudSun, label: "DR Forecast", path: "/grid/dr-forecast" },
+      { icon: Target, label: "Forecast Accuracy", path: "/grid/forecast-accuracy" },
       ...(userRole === 'admin'
         ? [
             { icon: ShieldAlert, label: "NTL Detection", path: "/grid/ntl" },

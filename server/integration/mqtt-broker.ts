@@ -354,6 +354,35 @@ class MQTTBrokerService {
   }
 
   /**
+   * Publish a price schedule to a site.
+   *
+   * Not a command: the site decides what to do with a price, so this is not
+   * retained (a stale price curve must not be replayed to a reconnecting site)
+   * and the resolved promise means the broker accepted the message, never that
+   * the site received or acted on it.
+   */
+  async publishSiteSignal(siteRef: string, payload: Record<string, unknown>): Promise<void> {
+    if (!this.client || !this.connected) {
+      throw new Error('MQTT client not connected');
+    }
+
+    const topic = `vpp/sites/${siteRef}/price-signal`;
+    const body = JSON.stringify({ ...payload, published_at: new Date().toISOString() });
+
+    return new Promise((resolve, reject) => {
+      this.client!.publish(topic, body, { qos: 1 }, err => {
+        if (err) {
+          console.error(`[MQTT] Failed to publish price signal to ${siteRef}:`, err);
+          reject(err);
+        } else {
+          console.log(`[MQTT] Published price signal to ${siteRef}`);
+          resolve();
+        }
+      });
+    });
+  }
+
+  /**
    * Register callback for device readings
    */
   onReading(callback: (reading: DeviceReading) => void): void {

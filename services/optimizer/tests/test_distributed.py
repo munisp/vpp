@@ -123,6 +123,80 @@ def test_failed_subproblem_aborts_coordination():
     assert result.diagnostics["failed_site"] == "bad"
 
 
+def _aggregate_net(result, index: int) -> float:
+    return sum(
+        interval.grid_import_w - interval.grid_export_w
+        for site in result.sites
+        for interval in site.intervals
+        if interval.index == index
+    )
+
+
+def test_price_signal_pulls_the_fleet_up_towards_an_under_shot_target():
+    # Left alone, both sites discharge their cheap stored energy and import
+    # almost nothing. The grid wants 8 kW of load in that interval, so the
+    # signal has to become a discount before any site will take it.
+    sites = [
+        _site("a", [1_000], import_price=30.0),
+        _site("b", [1_000], import_price=30.0),
+    ]
+    result = coordinate(
+        CoordinationRequest(
+            sites=sites,
+            shared_import_limit_w=[40_000],
+            shared_import_target_w=[8_000],
+            max_iterations=60,
+            tolerance_w=500.0,
+            step_size_cents_per_kwh=20.0,
+        )
+    )
+    assert result.status is SolveStatus.OPTIMAL
+    assert result.converged is True
+    assert abs(_aggregate_net(result, 0) - 8_000) <= 500.0
+    # Paying sites to absorb energy is the whole point of a two-sided signal.
+    assert min(result.shadow_prices_cents_per_kwh) < 0
+    assert result.target_deviation_w is not None
+    assert abs(result.target_deviation_w[0]) <= 500.0
+
+
+def test_target_tracking_reports_the_signed_deviation_it_could_not_close():
+    # Inelastic load with no assets: the fleet cannot reach a 20 kW target and
+    # the response must show the gap rather than an on-target aggregate.
+    result = coordinate(
+        CoordinationRequest(
+            sites=[_site("a", [2_000], with_battery=False)],
+            shared_import_limit_w=[40_000],
+            shared_import_target_w=[20_000],
+            max_iterations=3,
+            tolerance_w=100.0,
+        )
+    )
+    assert result.status is SolveStatus.NOT_CONVERGED
+    assert result.converged is False
+    assert result.target_deviation_w is not None
+    assert result.target_deviation_w[0] < 0
+    assert "misses the requested grid profile" in str(result.diagnostics["reason"])
+
+
+def test_cap_only_coordination_reports_no_target_deviation():
+    result = coordinate(
+        CoordinationRequest(
+            sites=[_site("a", [2_000])], shared_import_limit_w=[100_000]
+        )
+    )
+    assert result.target_deviation_w is None
+    assert result.aggregate_net_w != []
+
+
+def test_a_target_above_the_shared_cap_is_rejected():
+    with pytest.raises(ValueError, match="may not exceed"):
+        CoordinationRequest(
+            sites=[_site("a", [1_000])],
+            shared_import_limit_w=[5_000],
+            shared_import_target_w=[6_000],
+        )
+
+
 def test_sites_must_share_one_horizon():
     with pytest.raises(ValueError, match="one horizon"):
         CoordinationRequest(

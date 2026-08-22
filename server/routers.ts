@@ -80,6 +80,7 @@ import {
   derCapabilitiesRouter,
   priceSignalRouter,
   fleetTelemetryRouter,
+  locationalFlexibilityRouter,
 } from './routers/nextgen';
 
 // Start performance alerting
@@ -172,6 +173,7 @@ export const appRouter = router({
   optimization: optimizationRouter,
   priceSignal: priceSignalRouter,
   fleetTelemetry: fleetTelemetryRouter,
+  locationalFlexibility: locationalFlexibilityRouter,
   settlement: settlementRouter,
   edge: edgeRouter,
   carbon: carbonRouter,

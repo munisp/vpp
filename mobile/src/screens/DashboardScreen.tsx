@@ -293,6 +293,11 @@ export default function DashboardScreen({ navigation }: any) {
             onPress={() => navigation.navigate('CommunityTelemetry')}
           />
           <ActionButton
+            icon="📍"
+            label="Local Grid"
+            onPress={() => navigation.navigate('LocationalFlexibility')}
+          />
+          <ActionButton
             icon="📖"
             label="Order Book"
             onPress={() => navigation.navigate('OrderBook')}

@@ -118,6 +118,34 @@ function nullableField(value: number | string | null | undefined): string {
   return value === null || value === undefined ? '' : String(value);
 }
 
+/**
+ * `power_kw` is a whole-kilowatt column, so a fractional kW figure is rounded to
+ * fit it rather than failing the insert. Precision is not lost from the record:
+ * the energy figure is in watt-hours and callers keep the exact watts in
+ * `event_data`. The rounded value is what gets hashed, so the chain covers the
+ * number the row actually holds.
+ */
+function wholeKilowatts(value: number | null | undefined): number | null {
+  if (value === null || value === undefined) return null;
+  if (!Number.isFinite(value)) {
+    throw new Error(`Settlement power must be a finite number, received ${value}`);
+  }
+  return Math.round(value);
+}
+
+/**
+ * Money and metering columns are whole minor units and whole watt-hours. A
+ * fractional value here means the caller has a unit bug, and rounding it away
+ * would settle an amount nobody computed, so it is refused.
+ */
+function wholeUnits(value: number | null | undefined, field: string): number | null {
+  if (value === null || value === undefined) return null;
+  if (!Number.isInteger(value)) {
+    throw new Error(`Settlement ${field} must be whole units, received ${value}`);
+  }
+  return value;
+}
+
 /** Raw-SQL numeric columns arrive as `number | string | null` depending on type. */
 function numberOrNull(value: unknown): number | null {
   return value === null || value === undefined ? null : Number(value);
@@ -208,6 +236,14 @@ export class SettlementLedgerService {
       sequenceNumber,
     });
 
+    const energyWh = wholeUnits(input.energyWh, 'energyWh');
+    const powerKw = wholeKilowatts(input.powerKw);
+    const durationMinutes = wholeUnits(input.durationMinutes, 'durationMinutes');
+    const ratePerUnit = wholeUnits(input.ratePerUnit, 'ratePerUnit');
+    const grossAmount = wholeUnits(input.grossAmount, 'grossAmount');
+    const fees = wholeUnits(input.fees, 'fees');
+    const netAmount = wholeUnits(input.netAmount, 'netAmount');
+
     const eventHash = chainHash({
       previousHash,
       eventType: input.eventType,
@@ -215,13 +251,13 @@ export class SettlementLedgerService {
       counterpartyId: input.counterpartyId ?? null,
       sourceType: input.sourceType,
       sourceId: input.sourceId,
-      energyWh: input.energyWh ?? null,
-      powerKw: input.powerKw ?? null,
-      durationMinutes: input.durationMinutes ?? null,
-      ratePerUnit: input.ratePerUnit ?? null,
-      grossAmount: input.grossAmount ?? null,
-      fees: input.fees ?? null,
-      netAmount: input.netAmount ?? null,
+      energyWh,
+      powerKw,
+      durationMinutes,
+      ratePerUnit,
+      grossAmount,
+      fees,
+      netAmount,
       currency: input.currency,
       measurementMethod: input.measurementMethod ?? null,
       baselineMethod: input.baselineMethod ?? null,
@@ -240,8 +276,8 @@ export class SettlementLedgerService {
       ) VALUES (
         ${eventHash}, ${previousHash}, ${sequenceNumber}, ${input.eventType},
         ${input.userId}, ${input.counterpartyId ?? null}, ${input.sourceType}, ${input.sourceId},
-        ${input.energyWh ?? null}, ${input.powerKw ?? null}, ${input.durationMinutes ?? null}, ${input.ratePerUnit ?? null},
-        ${input.grossAmount ?? null}, ${input.fees ?? null}, ${input.netAmount ?? null}, ${input.currency},
+        ${energyWh}, ${powerKw}, ${durationMinutes}, ${ratePerUnit},
+        ${grossAmount}, ${fees}, ${netAmount}, ${input.currency},
         ${input.measurementMethod ?? null}, ${input.baselineMethod ?? null}, 'pending',
         ${eventData}, NOW()
       )
@@ -277,13 +313,13 @@ export class SettlementLedgerService {
       counterpartyId: input.counterpartyId || null,
       sourceType: input.sourceType,
       sourceId: input.sourceId,
-      energyWh: input.energyWh || null,
-      powerKw: input.powerKw || null,
-      durationMinutes: input.durationMinutes || null,
-      ratePerUnit: input.ratePerUnit || null,
-      grossAmount: input.grossAmount || null,
-      fees: input.fees || null,
-      netAmount: input.netAmount || null,
+      energyWh,
+      powerKw,
+      durationMinutes,
+      ratePerUnit,
+      grossAmount,
+      fees,
+      netAmount,
       currency: input.currency,
       measurementMethod: input.measurementMethod || null,
       baselineMethod: input.baselineMethod || null,

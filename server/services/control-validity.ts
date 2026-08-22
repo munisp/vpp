@@ -41,7 +41,8 @@ export type ControlSource =
   | 'v2g_schedule'
   | 'dr_event'
   | 'grid_instruction'
-  | 'manual';
+  | 'manual'
+  | 'p2p_trade';
 
 /** Longest window a control may claim unless the deployment raises it. */
 export const DEFAULT_MAX_VALIDITY_SECONDS = 3600;

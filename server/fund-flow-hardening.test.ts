@@ -64,6 +64,37 @@ describe('toGatewayMajorUnits', () => {
   });
 });
 
+describe('gateway callback amounts', () => {
+  it('parses provider amounts into the same cents the charge was created with', async () => {
+    const { toGatewayMajorUnits } = await import('./_core/paymentGateway');
+    const { MpesaGateway } = await import('./payment-gateways/mpesa');
+
+    const chargedCents = 500000;
+    const providerAmount = toGatewayMajorUnits(chargedCents);
+
+    const gateway = new MpesaGateway();
+    const callback = await gateway.processCallback({
+      Body: {
+        stkCallback: {
+          ResultCode: 0,
+          ResultDesc: 'The service request is processed successfully.',
+          CheckoutRequestID: 'ws_CO_1',
+          MerchantRequestID: 'mr_1',
+          CallbackMetadata: {
+            Item: [
+              { Name: 'Amount', Value: providerAmount },
+              { Name: 'MpesaReceiptNumber', Value: 'RCPT1' },
+              { Name: 'PhoneNumber', Value: 254700000000 },
+            ],
+          },
+        },
+      },
+    });
+
+    expect(callback.amount).toBe(chargedCents);
+  });
+});
+
 describe('payment QR codes', () => {
   beforeEach(() => {
     process.env.QR_SIGNING_SECRET = 'a'.repeat(48);

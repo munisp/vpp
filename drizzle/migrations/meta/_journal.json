@@ -15,6 +15,13 @@
       "when": 1787433971168,
       "tag": "0001_control_validity",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1787435462457,
+      "tag": "0002_mqtt_bounded_control",
+      "breakpoints": true
     }
   ]
 }

@@ -15,7 +15,7 @@ import { derCapabilities, DispatchEligibility } from './der-capabilities';
 import { probabilisticForecasting, ForecastResult, ForecastQuantiles } from './probabilistic-forecasting';
 import { settlementLedger } from './settlement-ledger';
 import { kafkaPublisher } from '../integration/kafka-publisher';
-import { mqttBrokerService } from '../integration/mqtt-broker';
+import { dispatchDeviceSetpoint } from './control-delivery';
 import {
   MilpAsset,
   MilpDispatchRequest,
@@ -117,6 +117,16 @@ interface IntervalContext {
   solarForecast?: ForecastQuantiles;
   // true when priceForecast is the hardcoded fallback curve, not real forecast data
   priceForecastEstimated?: boolean;
+}
+
+/** Timestamp columns arrive as Date from pg but as a string from raw JSON rows. */
+function toDate(value: unknown): Date {
+  if (value instanceof Date) return value;
+  if (typeof value === 'string' || typeof value === 'number') {
+    const parsed = new Date(value);
+    if (!Number.isNaN(parsed.getTime())) return parsed;
+  }
+  throw new Error(`Expected a timestamp, got ${JSON.stringify(value)}`);
 }
 
 export class OptimizationEngine {
@@ -1005,9 +1015,12 @@ export class OptimizationEngine {
     let dispatchedCount = 0;
     let queuedCount = 0;
 
-    // Get schedule and setpoints
+    // Explicit columns: `ds.*, dsp.*` collides on id/status/metadata, and the
+    // updates below key off dsp.id.
     const scheduleResult = await db.execute<SqlRow>(sql`
-      SELECT ds.*, dsp.* FROM dispatch_schedules ds
+      SELECT dsp.id, dsp.asset_id, dsp.target_power_watts,
+             dsp.interval_start, dsp.interval_end
+      FROM dispatch_schedules ds
       JOIN dispatch_setpoints dsp ON dsp.schedule_id = ds.id
       WHERE ds.schedule_id = ${scheduleId}
         AND dsp.status = 'scheduled'
@@ -1019,8 +1032,15 @@ export class OptimizationEngine {
 
     for (const sp of setpoints) {
       try {
-        // Send command to device via MQTT
-        const result = await this.dispatchToDevice(sp.asset_id, sp.target_power_watts);
+        // Bounded by the setpoint's own interval: the device stops obeying when
+        // the interval it was optimized for ends, whether or not the next
+        // dispatch arrives.
+        const result = await this.dispatchToDevice(
+          Number(sp.asset_id),
+          Number(sp.target_power_watts),
+          toDate(sp.interval_start),
+          toDate(sp.interval_end)
+        );
 
         if (result.dispatched) {
           // Mark 'dispatched' ONLY when the command actually reached the broker
@@ -1078,14 +1098,23 @@ export class OptimizationEngine {
   }
 
   /**
-   * Dispatch command to device via MQTT.
+   * Dispatch a bounded setpoint to a device via MQTT.
    *
-   * Records the command in device_commands, then publishes a set_power command
-   * through the MQTT broker. Returns { dispatched: true } only when the publish
-   * actually succeeds; otherwise the command stays 'queued' with the error
-   * recorded so nothing is ever reported as sent when it was not.
+   * Goes through the control-delivery path, so the command carries its validity
+   * window and its fallback policy and is recorded as a control assignment the
+   * expiry sweep can close out. An optimizer setpoint that outlives the interval
+   * it was computed for is a hazard: the device falls back to its own local
+   * logic (`resume_local`) instead of holding a stale target indefinitely.
+   *
+   * Returns { dispatched: true } only when the broker actually took the message;
+   * otherwise the command stays pending with the error recorded.
    */
-  private async dispatchToDevice(assetId: number, targetPowerWatts: number): Promise<{ dispatched: boolean; error?: string }> {
+  private async dispatchToDevice(
+    assetId: number,
+    targetPowerWatts: number,
+    validFrom: Date,
+    validTo: Date
+  ): Promise<{ dispatched: boolean; error?: string }> {
     const db = await getDb();
     if (!db) throw new Error('Database not available');
 
@@ -1114,15 +1143,28 @@ export class OptimizationEngine {
     `);
     const commandId = Number(commandResult.rows[0].id);
 
-    // Publish the set_power command to the device via MQTT
     try {
-      await mqttBrokerService.publishCommand(device.deviceId, 'set_power', { targetPowerWatts });
+      const dispatch = await dispatchDeviceSetpoint({
+        deviceId: device.deviceId,
+        setpointWatts: targetPowerWatts,
+        validFrom,
+        validTo,
+        fallbackPolicy: 'resume_local',
+        source: 'optimizer',
+        assetId,
+      });
+      if (!dispatch.published) {
+        throw new Error(dispatch.reason || 'MQTT publish failed');
+      }
 
       await db.execute<SqlRow>(sql`
         UPDATE device_commands SET status = 'sent', "sentAt" = NOW() WHERE id = ${commandId}
       `);
 
-      console.log(`[Optimization] Dispatched set_power=${targetPowerWatts}W to device ${device.deviceId}`);
+      console.log(
+        `[Optimization] Dispatched set_power=${targetPowerWatts}W to device ${device.deviceId} ` +
+          `until ${dispatch.validTo.toISOString()} (assignment ${dispatch.assignmentId})`
+      );
       return { dispatched: true };
     } catch (error: any) {
       const dispatchError = error?.message || String(error);

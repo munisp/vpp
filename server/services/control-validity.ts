@@ -17,7 +17,7 @@
  * closes without a refresh.
  */
 
-import { and, count, desc, eq, isNull, lte, sql } from 'drizzle-orm';
+import { and, count, desc, eq, inArray, isNull, lte, sql } from 'drizzle-orm';
 import { getDb } from '../db';
 import {
   controlAssignments,
@@ -26,7 +26,15 @@ import {
   type InsertControlAssignment,
 } from '../../drizzle/control-schema';
 
-export type ControlProtocol = 'ocpp16' | 'sep2' | 'openadr' | 'modbus';
+export type ControlProtocol = 'ocpp16' | 'sep2' | 'openadr' | 'modbus' | 'mqtt';
+/**
+ * `broker_queued` is a publish the MQTT broker acknowledged at QoS 1 without a
+ * device answer: the setpoint is on its way and counts as in force, unlike
+ * `unconfirmed`, where the platform does not know whether anything was delivered.
+ */
+export type ControlDelivery = 'accepted' | 'broker_queued' | 'rejected' | 'unconfirmed';
+/** Deliveries that mean a setpoint is (or will be) running on the hardware. */
+export const IN_FORCE_DELIVERIES = ['accepted', 'broker_queued'] as const;
 export type ControlFallbackPolicy = 'safe_limit' | 'resume_local' | 'hold_last';
 export type ControlSource =
   | 'optimizer'
@@ -187,7 +195,7 @@ export interface RecordAssignmentInput {
   window: ControlWindow;
   fallbackPolicy: ControlFallbackPolicy;
   fallbackLimitWatts: number | null;
-  delivery: 'accepted' | 'rejected' | 'unconfirmed';
+  delivery: ControlDelivery;
   deliveryDetail?: string;
 }
 
@@ -225,10 +233,11 @@ export async function recordControlAssignment(
   // the target with no authoritative window, and a successor without the
   // supersession would leave two live windows fighting over the same device.
   return db.transaction(async tx => {
-    // Only an accepted replacement supersedes: a refused or unconfirmed plan did
-    // not replace anything on the device, and retiring the predecessor would drop
-    // a live setpoint out of the expiry sweep and the operator health counts.
-    if (input.delivery === 'accepted') {
+    // Only a replacement that is in force supersedes: a refused or unconfirmed
+    // plan did not replace anything on the device, and retiring the predecessor
+    // would drop a live setpoint out of the expiry sweep and the operator health
+    // counts.
+    if (isInForce(input.delivery)) {
       await tx
         .update(controlAssignments)
         .set({ supersededAt: new Date() })
@@ -237,7 +246,7 @@ export async function recordControlAssignment(
             eq(controlAssignments.protocol, input.protocol),
             eq(controlAssignments.targetRef, input.targetRef),
             eq(controlAssignments.subTargetRef, subTargetRef),
-            eq(controlAssignments.delivery, 'accepted'),
+            inArray(controlAssignments.delivery, [...IN_FORCE_DELIVERIES]),
             isNull(controlAssignments.supersededAt),
             isNull(controlAssignments.fallbackAppliedAt)
           )
@@ -275,7 +284,7 @@ export async function expiredAssignments(
     .from(controlAssignments)
     .where(
       and(
-        eq(controlAssignments.delivery, 'accepted'),
+        inArray(controlAssignments.delivery, [...IN_FORCE_DELIVERIES]),
         isNull(controlAssignments.supersededAt),
         isNull(controlAssignments.fallbackAppliedAt),
         lte(controlAssignments.validTo, now),
@@ -502,10 +511,14 @@ export interface ControlHealth {
   heldPastWindow: number;
 }
 
+export function isInForce(delivery: ControlDelivery): boolean {
+  return (IN_FORCE_DELIVERIES as readonly string[]).includes(delivery);
+}
+
 /** An assignment is the live control for its target while this holds. */
 function liveControl() {
   return and(
-    eq(controlAssignments.delivery, 'accepted'),
+    inArray(controlAssignments.delivery, [...IN_FORCE_DELIVERIES]),
     isNull(controlAssignments.supersededAt),
     isNull(controlAssignments.fallbackAppliedAt)
   );

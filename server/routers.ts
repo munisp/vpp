@@ -78,6 +78,7 @@ import {
   complianceRouter,
   blockchainRouter,
   derCapabilitiesRouter,
+  priceSignalRouter,
 } from './routers/nextgen';
 
 // Start performance alerting
@@ -168,6 +169,7 @@ export const appRouter = router({
   evCharging: evChargingRouter,
   forecasting: forecastingRouter,
   optimization: optimizationRouter,
+  priceSignal: priceSignalRouter,
   settlement: settlementRouter,
   edge: edgeRouter,
   carbon: carbonRouter,

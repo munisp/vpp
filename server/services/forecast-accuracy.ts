@@ -424,13 +424,15 @@ export async function scoreForecastRun(runId: string): Promise<ForecastScore> {
     });
 
   // Keep the run's own metric columns consistent with the score so existing
-  // readers of `forecast_runs` see measured values instead of nulls.
+  // readers of `forecast_runs` see measured values instead of nulls. All three
+  // columns hold hundredths of their unit, MAPE included, because every reader
+  // divides them by 100.
   if (metrics) {
     await db.execute(sql`
       UPDATE forecast_runs
       SET mae_value = ${scaled(metrics.mae)},
           rmse_value = ${scaled(metrics.rmse)},
-          mape_value = ${metrics.mapeBp === null ? null : Math.round(metrics.mapeBp / 100)}
+          mape_value = ${metrics.mapeBp}
       WHERE run_id = ${runId}
     `);
   }

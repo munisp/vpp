@@ -124,8 +124,8 @@ export const evChargingRouter = router({
         input => input.action === 'stop_discharge' || input.durationMinutes !== undefined,
         { message: 'durationMinutes is required for discharge commands', path: ['durationMinutes'] }
       ))
-      .mutation(async ({ input }) => {
+      .mutation(async ({ input, ctx }) => {
         const { evId, ...command } = input;
-        return evChargingService.dispatchV2G(evId, command);
+        return evChargingService.dispatchV2G(evId, command, ctx.user.id);
       }),
 });

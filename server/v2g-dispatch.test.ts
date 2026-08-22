@@ -151,7 +151,7 @@ describe('dispatchV2G', () => {
       action: 'start_discharge',
       powerKw: 7,
       durationMinutes: 30,
-    });
+    }, 3);
 
     expect(result.success).toBe(true);
     expect(delivery.dispatches).toHaveLength(1);
@@ -173,6 +173,15 @@ describe('dispatchV2G', () => {
     expect(db.calls).toBe(5);
   });
 
+  it('refuses to command a vehicle the caller does not own', async () => {
+    await mockDb([[evRow()], [sessionRow()], [stationRow()]]);
+    const delivery = await mockDelivery();
+    await expect(
+      (await service()).dispatchV2G(7, { action: 'start_discharge', durationMinutes: 30 }, 4)
+    ).rejects.toThrow(/does not belong to this user/);
+    expect(delivery.dispatches).toHaveLength(0);
+  });
+
   it('clamps the discharge to the lower of the vehicle and station ratings', async () => {
     await mockDb([[evRow()], [sessionRow()], [stationRow()]]);
     const delivery = await mockDelivery();
@@ -180,7 +189,7 @@ describe('dispatchV2G', () => {
       action: 'start_discharge',
       powerKw: 50,
       durationMinutes: 15,
-    });
+    }, 3);
 
     expect(result.dischargeKw).toBe(10);
     expect(delivery.dispatches[0].periods).toEqual([
@@ -191,7 +200,7 @@ describe('dispatchV2G', () => {
   it('refuses a discharge that does not say when it stops', async () => {
     const db = await mockDb([[evRow()], [sessionRow()], [stationRow()]]);
     const delivery = await mockDelivery();
-    const result = await (await service()).dispatchV2G(7, { action: 'start_discharge' });
+    const result = await (await service()).dispatchV2G(7, { action: 'start_discharge' }, 3);
 
     expect(result.success).toBe(false);
     expect(result.message).toMatch(/durationMinutes is required/);
@@ -205,7 +214,7 @@ describe('dispatchV2G', () => {
     const result = await (await service()).dispatchV2G(7, {
       action: 'start_discharge',
       durationMinutes: 30,
-    });
+    }, 3);
 
     expect(result.success).toBe(false);
     expect(result.message).toMatch(/SoC \(15%\) at or below minimum \(20%\)/);
@@ -221,7 +230,7 @@ describe('dispatchV2G', () => {
     const result = await (await service()).dispatchV2G(7, {
       action: 'start_discharge',
       durationMinutes: 30,
-    });
+    }, 3);
 
     expect(result.success).toBe(false);
     expect(result.delivery).toBe('rejected');
@@ -237,7 +246,7 @@ describe('dispatchV2G', () => {
     const result = await (await service()).dispatchV2G(7, {
       action: 'start_discharge',
       durationMinutes: 30,
-    });
+    }, 3);
 
     expect(result.success).toBe(false);
     expect(result.message).toMatch(/OCPP none/);
@@ -250,7 +259,7 @@ describe('dispatchV2G', () => {
     const result = await (await service()).dispatchV2G(7, {
       action: 'start_discharge',
       durationMinutes: 30,
-    });
+    }, 3);
 
     expect(result.success).toBe(false);
     expect(result.message).toMatch(/records no OCPP connector/);
@@ -260,7 +269,7 @@ describe('dispatchV2G', () => {
   it('clears the profile to stop a discharge', async () => {
     const db = await mockDb([[evRow()], [sessionRow({ status: 'discharging' })], [stationRow()]]);
     const delivery = await mockDelivery();
-    const result = await (await service()).dispatchV2G(7, { action: 'stop_discharge' });
+    const result = await (await service()).dispatchV2G(7, { action: 'stop_discharge' }, 3);
 
     expect(result.success).toBe(true);
     expect(delivery.revocations[0]).toMatchObject({ chargePointId: 'CP-1', connectorId: 1 });
@@ -270,7 +279,7 @@ describe('dispatchV2G', () => {
   it('keeps the session discharging when the stop command fails', async () => {
     const db = await mockDb([[evRow()], [sessionRow({ status: 'discharging' })], [stationRow()]]);
     await mockDelivery({ revokeError: new Error('charge point is not connected') });
-    const result = await (await service()).dispatchV2G(7, { action: 'stop_discharge' });
+    const result = await (await service()).dispatchV2G(7, { action: 'stop_discharge' }, 3);
 
     expect(result.success).toBe(false);
     expect(result.message).toMatch(/could not be stopped/);

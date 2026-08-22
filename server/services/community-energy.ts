@@ -206,6 +206,7 @@ export class CommunityEnergyService {
         ${options.autoParticipate ?? true}, ${options.priorityLevel || 5},
         'pending', NOW(), NOW()
       )
+      RETURNING id
     `);
 
     // Recalculate share percentages
@@ -441,6 +442,7 @@ export class CommunityEnergyService {
         ${totalRevenue}, ${totalCost}, ${netValue},
         ${JSON.stringify(memberAllocations)}, 'calculated', NOW()
       )
+      RETURNING id
     `);
 
     console.log(`[CommunityEnergy] Calculated allocation for community ${communityId}: net=${netValue}c`);

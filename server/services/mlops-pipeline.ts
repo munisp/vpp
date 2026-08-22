@@ -397,6 +397,7 @@ export class MLOpsPipelineService {
         ${JSON.stringify(event.affectedFeatures)}, ${event.recommendedAction},
         NOW()
       )
+      RETURNING id
     `);
 
     return {
@@ -637,6 +638,7 @@ export class MLOpsPipelineService {
         ${options.triggeredBy || null}, 'queued',
         ${JSON.stringify(options.trainingConfig || {})}, NOW()
       )
+      RETURNING id
     `);
 
     console.log(`[MLOps] Triggered retraining job ${jobId} for model ${model.modelName}`);

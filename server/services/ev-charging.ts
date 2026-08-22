@@ -243,6 +243,7 @@ export class EVChargingService {
         ${station.ocppVersion || null}, ${station.ocppEndpoint || null}, 'offline',
         NOW(), NOW()
       )
+      RETURNING id
     `);
 
     console.log(`[EVCharging] Registered station ${stationId}`);
@@ -314,6 +315,7 @@ export class EVChargingService {
         ${options.maxPowerKw ? options.maxPowerKw * 10 : null},
         0, 0, 'starting', NOW(), NOW()
       )
+      RETURNING id
     `);
 
     // Update EV and station status
@@ -811,6 +813,10 @@ export class EVChargingService {
    * are only moved to a discharging state once the charge point accepted the
    * profile: a refused or unreachable charge point reports failure and leaves the
    * records showing that no discharge is running.
+   *
+   * `actorUserId` is mandatory and must own the vehicle: the command exports a
+   * customer's battery through their charger, so it may not be addressable by
+   * vehicle id alone.
    */
   async dispatchV2G(
     evId: number,
@@ -819,13 +825,17 @@ export class EVChargingService {
       powerKw?: number;
       durationMinutes?: number;
       minSocPercent?: number;
-    }
+    },
+    actorUserId: number
   ): Promise<V2GDispatchResult> {
     const db = await getDb();
     if (!db) throw new Error('Database not available');
 
     const ev = await this.getEV(evId);
     if (!ev) return { success: false, message: 'EV not found' };
+    if (ev.userId !== actorUserId) {
+      throw new Error(`EV ${evId} does not belong to this user`);
+    }
     if (!ev.v2gCapable) return { success: false, message: 'EV not V2G capable' };
     if (!ev.isPluggedIn) return { success: false, message: 'EV not plugged in' };
 

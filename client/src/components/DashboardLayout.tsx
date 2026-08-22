@@ -43,11 +43,14 @@ import {
   CalendarClock,
   AlertTriangle,
   CloudSun,
+  SlidersHorizontal,
+  Target,
   ShieldAlert,
   FileCheck,
   Users,
   MessageSquare,
-  Globe
+  Globe,
+  Coins
 } from "lucide-react";
 import { CSSProperties, useEffect, useRef, useState } from "react";
 import { useLocation } from "wouter";
@@ -102,8 +105,11 @@ const getMenuSections = (userRole?: string): MenuSection[] => [
   {
     label: "Grid Ops",
     items: [
+      { icon: SlidersHorizontal, label: "Control Windows", path: "/grid/control-windows" },
       { icon: AlertTriangle, label: "Anomalies", path: "/grid/anomalies" },
       { icon: CloudSun, label: "DR Forecast", path: "/grid/dr-forecast" },
+      { icon: Target, label: "Forecast Accuracy", path: "/grid/forecast-accuracy" },
+      { icon: Coins, label: "Price Signals", path: "/grid/price-signals" },
       ...(userRole === 'admin'
         ? [
             { icon: ShieldAlert, label: "NTL Detection", path: "/grid/ntl" },

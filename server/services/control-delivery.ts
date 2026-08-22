@@ -22,6 +22,7 @@ import {
   claimForFallback,
   closeHoldLast,
   expiredAssignments,
+  liveAssignmentFor,
   recordControlAssignment,
   recordFallbackOutcome,
   resolveControlWindow,
@@ -30,6 +31,7 @@ import {
   type ControlSource,
   type FallbackOutcome,
 } from './control-validity';
+import { mqttBrokerService } from '../integration/mqtt-broker';
 import type { ControlAssignment } from '../../drizzle/control-schema';
 
 export interface DispatchChargingPlanInput {
@@ -147,6 +149,113 @@ export async function dispatchChargingPlan(
   }
 }
 
+export interface DispatchDeviceSetpointInput {
+  /** Device id the MQTT command topic is addressed to. */
+  deviceId: string;
+  /** Signed watts: negative charges/consumes, positive exports. */
+  setpointWatts: number;
+  validFrom?: Date;
+  validTo?: Date;
+  validForSeconds?: number;
+  fallbackPolicy: ControlFallbackPolicy;
+  fallbackLimitWatts?: number;
+  source: ControlSource;
+  sourceId?: number;
+  assetId?: number;
+  userId?: number;
+}
+
+export interface DispatchDeviceSetpointResult {
+  /** True when the broker took the message; the device has not answered. */
+  published: boolean;
+  status: 'broker_queued' | 'unconfirmed';
+  assignmentId: number | null;
+  validFrom: Date;
+  validTo: Date;
+  fallbackPolicy: ControlFallbackPolicy;
+  fallbackLimitWatts: number | null;
+  reason?: string;
+}
+
+/**
+ * Sends a bounded setpoint to an MQTT device (battery, inverter, controllable
+ * load) and records the assignment.
+ *
+ * The window and the fallback travel in the command payload, because that is the
+ * only expiry an MQTT device can enforce for itself: there is no protocol-level
+ * validity field as there is in OCPP, so a firmware that loses the platform must
+ * be able to read `validTo` off the last command it holds.
+ *
+ * MQTT gives no device answer, so a successful publish is recorded as
+ * `broker_queued`, never `accepted`: the broker has the message at QoS 1, and
+ * that is all the platform knows.
+ */
+export async function dispatchDeviceSetpoint(
+  input: DispatchDeviceSetpointInput
+): Promise<DispatchDeviceSetpointResult> {
+  const window = resolveControlWindow({
+    validFrom: input.validFrom,
+    validTo: input.validTo,
+    validForSeconds: input.validForSeconds,
+  });
+  const fallbackWatts = resolveFallbackLimit(input.fallbackPolicy, input.fallbackLimitWatts);
+
+  const shared = {
+    protocol: 'mqtt' as const,
+    targetRef: input.deviceId,
+    assetId: input.assetId,
+    userId: input.userId,
+    source: input.source,
+    sourceId: input.sourceId,
+    setpointWatts: input.setpointWatts,
+    window,
+    fallbackPolicy: input.fallbackPolicy,
+    fallbackLimitWatts: fallbackWatts,
+  };
+
+  try {
+    await mqttBrokerService.publishCommand(input.deviceId, 'set_power', {
+      targetPowerWatts: Math.round(input.setpointWatts),
+      validFrom: window.validFrom.toISOString(),
+      validTo: window.validTo.toISOString(),
+      validForSeconds: window.seconds,
+      fallbackPolicy: input.fallbackPolicy,
+      fallbackLimitWatts: fallbackWatts,
+    });
+    const assignmentId = await recordControlAssignment({
+      ...shared,
+      delivery: 'broker_queued',
+      deliveryDetail: 'published to the MQTT broker; the device does not acknowledge commands',
+    });
+    return {
+      published: true,
+      status: 'broker_queued',
+      assignmentId,
+      validFrom: window.validFrom,
+      validTo: window.validTo,
+      fallbackPolicy: input.fallbackPolicy,
+      fallbackLimitWatts: fallbackWatts,
+    };
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    const assignmentId = await recordControlAssignment({
+      ...shared,
+      delivery: 'unconfirmed',
+      deliveryDetail: `MQTT publish failed: ${reason}`,
+    });
+    return {
+      published: false,
+      status: 'unconfirmed',
+      assignmentId,
+      validFrom: window.validFrom,
+      validTo: window.validTo,
+      fallbackPolicy: input.fallbackPolicy,
+      fallbackLimitWatts: fallbackWatts,
+      reason,
+    };
+  }
+}
+
 /**
  * Installs the standing safe-limit profile a charge point falls back to. Run
  * this when a charge point is commissioned; the protocol service re-asserts it
@@ -171,6 +280,54 @@ export async function installFallbackProfile(input: {
   return { status: result.status, limitWatts };
 }
 
+export interface RevokeControlResult {
+  revoked: boolean;
+  status: string;
+  assignmentId: number | null;
+}
+
+/**
+ * Ends a platform control early: the profile is cleared on the charge point and
+ * the live assignment is closed out as operator-revoked.
+ *
+ * The record is only closed when the charge point confirmed the clear. A refused
+ * or unreachable charge point keeps the assignment open, because the setpoint is
+ * still installed on the hardware.
+ */
+export async function revokeControl(input: {
+  chargePointId: string;
+  connectorId: number;
+  chargingProfileId?: number;
+  reason: string;
+}): Promise<RevokeControlResult> {
+  const assignment = await liveAssignmentFor('ocpp16', input.chargePointId, input.connectorId);
+  const chargingProfileId =
+    input.chargingProfileId ??
+    (assignment?.commandRef !== undefined ? Number(assignment.commandRef) : undefined);
+  if (chargingProfileId === undefined || !Number.isInteger(chargingProfileId)) {
+    throw new GridCommandError(
+      409,
+      `no platform control is recorded for ${input.chargePointId} connector ${input.connectorId}; refusing to clear an unidentified profile`
+    );
+  }
+
+  const result = await clearChargingProfile({
+    chargePointId: input.chargePointId,
+    chargingProfileId,
+    connectorId: input.connectorId,
+  });
+
+  if (assignment) {
+    await recordFallbackOutcome(
+      assignment.id,
+      'operator_revoked',
+      'applied',
+      `profile ${chargingProfileId} cleared (${result.status}): ${input.reason}`
+    );
+  }
+  return { revoked: true, status: result.status, assignmentId: assignment?.id ?? null };
+}
+
 /** Maps a failed fallback delivery onto what the platform actually knows. */
 function classifyFallbackFailure(error: unknown): FallbackOutcome {
   if (!(error instanceof GridCommandError)) return 'unconfirmed';
@@ -183,6 +340,12 @@ export interface FallbackSweepResult {
   examined: number;
   applied: number;
   held: number;
+  /**
+   * Fallbacks the platform sent but cannot prove the device applied — an MQTT
+   * publish the broker took with no device answer. Not a success and not an
+   * error; the asset may still be on the expired setpoint.
+   */
+  unconfirmed: number;
   failed: number;
   /** Rows another sweeper had already claimed; not an error. */
   skipped: number;
@@ -205,6 +368,7 @@ export async function sweepExpiredControls(
     examined: expired.length,
     applied: 0,
     held: 0,
+    unconfirmed: 0,
     failed: 0,
     skipped: 0,
     details: [],
@@ -226,9 +390,15 @@ export async function sweepExpiredControls(
       continue;
     }
     try {
-      const detail = await applyFallback(assignment);
-      await recordFallbackOutcome(assignment.id, 'window_expired', 'applied', detail);
-      result.applied += 1;
+      const { outcome, detail } = await applyFallback(assignment);
+      await recordFallbackOutcome(assignment.id, 'window_expired', outcome, detail);
+      if (outcome === 'applied') {
+        result.applied += 1;
+      } else if (outcome === 'unconfirmed') {
+        result.unconfirmed += 1;
+      } else {
+        result.failed += 1;
+      }
       result.details.push(`assignment ${assignment.id}: ${detail}`);
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
@@ -249,7 +419,13 @@ export async function sweepExpiredControls(
   return result;
 }
 
-async function applyFallback(assignment: ControlAssignment): Promise<string> {
+interface AppliedFallback {
+  outcome: FallbackOutcome;
+  detail: string;
+}
+
+async function applyFallback(assignment: ControlAssignment): Promise<AppliedFallback> {
+  if (assignment.protocol === 'mqtt') return applyMqttFallback(assignment);
   if (assignment.protocol !== 'ocpp16') {
     // OpenADR and 2030.5 controls expire at the VTN/utility side and Modbus
     // fallback is enforced by the poller. Claiming to have driven them from here
@@ -267,7 +443,10 @@ async function applyFallback(assignment: ControlAssignment): Promise<string> {
       chargingProfileId: Number.isFinite(profileId) ? profileId : undefined,
       connectorId: assignment.subTargetRef || undefined,
     });
-    return `resume_local: ClearChargingProfile answered ${cleared.status}`;
+    return {
+      outcome: 'applied',
+      detail: `resume_local: ClearChargingProfile answered ${cleared.status}`,
+    };
   }
 
   const limitWatts = assignment.fallbackLimitWatts;
@@ -283,7 +462,47 @@ async function applyFallback(assignment: ControlAssignment): Promise<string> {
     limitWatts,
     chargingProfileId: 1,
   });
-  return `safe_limit: ${limitWatts}W profile answered ${applied.status}`;
+  return {
+    outcome: 'applied',
+    detail: `safe_limit: ${limitWatts}W profile answered ${applied.status}`,
+  };
+}
+
+/**
+ * Publishes the declared fallback to an MQTT device. The outcome is always
+ * `unconfirmed`: the device never answers, so the platform can prove it sent the
+ * fallback and nothing more. The command the device already holds carries the
+ * same fallback, which is what actually protects the asset if this publish never
+ * arrives.
+ */
+async function applyMqttFallback(assignment: ControlAssignment): Promise<AppliedFallback> {
+  if (assignment.fallbackPolicy === 'resume_local') {
+    await mqttBrokerService.publishCommand(assignment.targetRef, 'clear_setpoint', {
+      reason: 'control window expired',
+      expiredAt: assignment.validTo.toISOString(),
+    });
+    return {
+      outcome: 'unconfirmed',
+      detail: 'resume_local: clear_setpoint published to the broker; the device does not acknowledge',
+    };
+  }
+
+  const limitWatts = assignment.fallbackLimitWatts;
+  if (limitWatts === null) {
+    throw new GridCommandError(
+      500,
+      `assignment ${assignment.id} declares safe_limit but stored no fallback watts`
+    );
+  }
+  await mqttBrokerService.publishCommand(assignment.targetRef, 'set_power', {
+    targetPowerWatts: limitWatts,
+    reason: 'control window expired',
+    expiredAt: assignment.validTo.toISOString(),
+  });
+  return {
+    outcome: 'unconfirmed',
+    detail: `safe_limit: ${limitWatts}W published to the broker; the device does not acknowledge`,
+  };
 }
 
 let sweepTimer: NodeJS.Timeout | null = null;
@@ -306,7 +525,8 @@ export function startControlFallbackSweeper(): boolean {
         if (summary.examined > 0) {
           console.log(
             `[ControlFallback] swept ${summary.examined} expired controls: ` +
-              `${summary.applied} fallback applied, ${summary.held} held, ${summary.failed} failed`
+              `${summary.applied} fallback applied, ${summary.held} held, ` +
+                `${summary.unconfirmed} unconfirmed, ${summary.failed} failed`
           );
           for (const detail of summary.details) {
             console.log(`[ControlFallback] ${detail}`);

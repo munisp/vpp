@@ -18,6 +18,7 @@ import { verifyWebhookSignature } from "../webhooks/verify-signature";
 import { smsInboundRouter } from "../webhooks/sms-inbound";
 import { gridProtocolRouter } from "../webhooks/grid-protocols";
 import { webSocketService } from "../integration/websocket-service";
+import { startControlFallbackSweeper } from "../services/control-delivery";
 
 function isPortAvailable(port: number): Promise<boolean> {
   return new Promise(resolve => {
@@ -156,6 +157,19 @@ async function startServer() {
   
   // Initialize scheduled report jobs
   initScheduledReportJobs();
+
+  // Expire control windows and deliver their fallbacks. Opt-in via
+  // GRID_CONTROL_SWEEP_MS so a deployment running the sweep from a worker does
+  // not run it twice; without it, expired setpoints only fall back when an
+  // operator sweeps by hand.
+  if (startControlFallbackSweeper()) {
+    console.log(`[ControlFallback] sweeper started every ${process.env.GRID_CONTROL_SWEEP_MS}ms`);
+  } else {
+    console.warn(
+      "[ControlFallback] GRID_CONTROL_SWEEP_MS is not set: expired control windows " +
+        "will not fall back automatically in this process"
+    );
+  }
   
   // Note: webSocketService.initialize removed - using single WebSocket server from initializeWebSocket
   

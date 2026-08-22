@@ -85,21 +85,19 @@ export class V2gOptimizerService {
     if (ev.userId !== userId) throw new Error('EV does not belong to this user');
 
     // Vehicle parameters — real record or explicit input; fail loud if unknown
-    const batteryCapacityKwh = input.batteryCapacityKwh
-      ?? ((ev.usableBatteryKwh || ev.batteryCapacityKwh) ? (ev.usableBatteryKwh || ev.batteryCapacityKwh)! / 10 : null);
+    const batteryCapacityKwh = input.batteryCapacityKwh ?? ev.usableBatteryKwh ?? ev.batteryCapacityKwh;
     if (!batteryCapacityKwh || batteryCapacityKwh <= 0) {
       throw new Error('Vehicle battery capacity unknown: provide batteryCapacityKwh or update the EV record');
     }
-    const startSoc = input.startSocPercent
-      ?? (ev.currentSocPercent !== null ? ev.currentSocPercent / 100 : null);
+    const startSoc = input.startSocPercent ?? ev.currentSocPercent;
     if (startSoc === null) {
       throw new Error('Current state of charge unknown: provide startSocPercent or update the EV record');
     }
-    const maxChargeKw = input.maxChargeKw ?? (ev.maxChargingPowerKw ? ev.maxChargingPowerKw / 10 : null);
+    const maxChargeKw = input.maxChargeKw ?? ev.maxChargingPowerKw;
     if (!maxChargeKw || maxChargeKw <= 0) {
       throw new Error('Max charging power unknown: provide maxChargeKw or update the EV record');
     }
-    const maxDischargeKw = input.maxDischargeKw ?? (ev.maxDischargingPowerKw ? ev.maxDischargingPowerKw / 10 : 0);
+    const maxDischargeKw = input.maxDischargeKw ?? ev.maxDischargingPowerKw ?? 0;
 
     const now = new Date();
     const departure = new Date(input.departureTime);

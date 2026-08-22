@@ -46,6 +46,7 @@ export const controlAssignmentsProtocolEnum = pgEnum("control_assignments_protoc
   "sep2",
   "openadr",
   "modbus",
+  "mqtt",
 ]);
 export const controlAssignmentsSourceEnum = pgEnum("control_assignments_source", [
   "optimizer",
@@ -53,13 +54,22 @@ export const controlAssignmentsSourceEnum = pgEnum("control_assignments_source",
   "dr_event",
   "grid_instruction",
   "manual",
+  "p2p_trade",
 ]);
 export const controlAssignmentsFallbackPolicyEnum = pgEnum(
   "control_assignments_fallback_policy",
   controlFallbackPolicies
 );
+/**
+ * `broker_queued` is what an MQTT setpoint can honestly claim: the broker took
+ * the message at QoS 1, but the device has not answered, and no MQTT device on
+ * this platform reports command acknowledgements. It counts as in force — the
+ * setpoint will reach the device — while staying distinguishable from a device
+ * that actually confirmed.
+ */
 export const controlAssignmentsDeliveryEnum = pgEnum("control_assignments_delivery", [
   "accepted",
+  "broker_queued",
   "rejected",
   "unconfirmed",
 ]);

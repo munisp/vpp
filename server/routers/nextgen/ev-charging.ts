@@ -112,12 +112,20 @@ export const evChargingRouter = router({
       .input(z.object({
         evId: z.number(),
         action: z.enum(['start_discharge', 'stop_discharge', 'set_power']),
-        powerKw: z.number().optional(),
-        durationMinutes: z.number().optional(),
-        targetSocPercent: z.number().optional(),
-      }))
-      .mutation(async ({ input }) => {
+        powerKw: z.number().positive().optional(),
+        /**
+         * How long the discharge applies. Required for discharge commands: the
+         * charge point enforces the window itself, so an unbounded V2G command
+         * would keep exporting after the platform stopped asking.
+         */
+        durationMinutes: z.number().int().min(1).max(1440).optional(),
+        minSocPercent: z.number().min(0).max(100).optional(),
+      }).refine(
+        input => input.action === 'stop_discharge' || input.durationMinutes !== undefined,
+        { message: 'durationMinutes is required for discharge commands', path: ['durationMinutes'] }
+      ))
+      .mutation(async ({ input, ctx }) => {
         const { evId, ...command } = input;
-        return evChargingService.dispatchV2G(evId, command);
+        return evChargingService.dispatchV2G(evId, command, ctx.user.id);
       }),
 });

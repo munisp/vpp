@@ -16,6 +16,22 @@ import { mqttService } from '../_core/mqtt';
 
 const scryptAsync = promisify(scrypt);
 
+/**
+ * Commands that change what the hardware exports or imports. These belong to the
+ * bounded control path (`controlWindows`), which records a validity window, a
+ * fallback and a delivery state for every setpoint.
+ */
+const SETPOINT_COMMANDS = new Set([
+  'set_power',
+  'set_setpoint',
+  'setpoint',
+  'set_limit',
+  'charge',
+  'discharge',
+  'curtail',
+  'clear_setpoint',
+]);
+
 export const devicesRouter = router({
   /**
    * List all devices
@@ -148,6 +164,18 @@ export const devicesRouter = router({
       payload: z.record(z.string(), z.any()).optional(),
     }))
     .mutation(async ({ input }) => {
+      // Power-affecting commands must carry a validity window and a declared
+      // fallback, which this generic path cannot express. Sending one here would
+      // leave the device holding a setpoint no sweeper ever retires.
+      if (SETPOINT_COMMANDS.has(input.command)) {
+        throw new TRPCError({
+          code: 'BAD_REQUEST',
+          message:
+            `Command '${input.command}' changes power output and must be dispatched through ` +
+            'controlWindows so it carries a validity window and a fallback.',
+        });
+      }
+
       const device = await devicesDb.getDeviceById(input.deviceId);
       if (!device) {
         throw new TRPCError({
@@ -196,10 +224,12 @@ export const devicesRouter = router({
         await devicesDb.createDeviceLog({
           deviceId: input.deviceId,
           eventType: 'info',
-          message: `Command sent: ${input.command}`,
+          message: `Command published to broker: ${input.command}`,
         });
 
-        return { success: true, commandId };
+        // The broker took the message; these devices send no acknowledgement, so
+        // this is not evidence the command was executed.
+        return { published: true, delivery: 'broker_queued' as const, commandId };
       } catch (error) {
         await devicesDb.updateCommandStatus(commandId, 'failed');
         

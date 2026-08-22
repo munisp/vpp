@@ -268,6 +268,7 @@ export class EdgeOrchestrationService {
         ${command.commandType}, ${JSON.stringify(command.payload)},
         ${command.priority || 5}, ${validUntil}, 'queued', NOW(), NOW()
       )
+      RETURNING id
     `);
 
     // Update pending count

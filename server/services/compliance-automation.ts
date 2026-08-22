@@ -333,6 +333,7 @@ export class ComplianceAutomationService {
         ${JSON.stringify(evidenceReferences)}, 'system',
         ${nextCheckDue}, NOW()
       )
+      RETURNING id
     `);
 
     console.log(`[Compliance] Check ${rule.ruleCode}: ${status} (${findings.length} findings)`);

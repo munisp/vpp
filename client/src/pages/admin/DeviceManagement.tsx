@@ -242,7 +242,9 @@ export default function DeviceManagement() {
             deviceId={selectedDevice!}
             onSuccess={() => {
               setShowCommandDialog(false);
-              toast.success('Command sent successfully');
+              // The broker accepted the message; the device does not acknowledge
+              // commands, so execution is unconfirmed.
+              toast.success('Command published — delivery unconfirmed by the device');
             }}
           />
         </DialogContent>

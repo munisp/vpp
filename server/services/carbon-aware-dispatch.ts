@@ -494,6 +494,7 @@ export class CarbonAwareDispatchService {
         ${credit.generationPeriodStart || null}, ${credit.generationPeriodEnd || null},
         ${credit.registry || null}, 'issued', NOW(), NOW()
       )
+      RETURNING id
     `);
 
     console.log(`[CarbonDispatch] Issued ${credit.creditType} credit ${certificateId} for user ${userId}`);

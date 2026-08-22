@@ -15,6 +15,13 @@
       "when": 1786388523231,
       "tag": "0001_recent_schema_changes",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "5",
+      "when": 1787404800000,
+      "tag": "0002_settlement_chain_uniqueness",
+      "breakpoints": true
     }
   ]
 }

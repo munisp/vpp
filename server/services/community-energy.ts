@@ -539,6 +539,12 @@ export class CommunityEnergyService {
     let batteryCount = 0;
     let totalBatterySOC = 0;
 
+    // Grid quality is reported from real readings only; these stay null when no
+    // asset reported them in the window.
+    let latestFrequencyHz: number | null = null;
+    let latestVoltageV: number | null = null;
+    let telemetryRowsSeen = 0;
+
     for (const member of members.filter(m => m.status === 'active')) {
       const telemetryResult = await db.execute(sql`
         SELECT a.assetType, t.power, t.stateOfCharge, t.frequency, t.voltage
@@ -550,6 +556,15 @@ export class CommunityEnergyService {
       `);
 
       for (const t of (telemetryResult as any)[0] || []) {
+        telemetryRowsSeen++;
+        // Rows arrive newest-first, so the first non-null reading is the latest.
+        if (latestFrequencyHz === null && t.frequency != null) {
+          latestFrequencyHz = Number(t.frequency) / 1000; // millihertz -> Hz
+        }
+        if (latestVoltageV === null && t.voltage != null) {
+          latestVoltageV = Number(t.voltage) / 1000; // millivolts -> V
+        }
+
         const power = (t.power || 0) / 1000; // Convert to kW
         
         if (t.assetType === 'solar' || t.assetType === 'wind' || t.assetType === 'generator') {

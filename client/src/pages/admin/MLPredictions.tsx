@@ -52,9 +52,11 @@ export default function MLPredictions() {
               </CardTitle>
             </CardHeader>
             <CardContent>
-              <div className="text-2xl font-bold">{metrics.accuracy.toFixed(1)}%</div>
+              <div className="text-2xl font-bold">
+                {metrics.accuracy !== null ? `${metrics.accuracy.toFixed(1)}%` : "not measured"}
+              </div>
               <p className="text-xs text-muted-foreground mt-2">
-                R² Score: {metrics.r2Score.toFixed(2)}
+                R² Score: {metrics.r2Score !== null ? metrics.r2Score.toFixed(2) : "—"}
               </p>
             </CardContent>
           </Card>
@@ -64,9 +66,11 @@ export default function MLPredictions() {
               <CardTitle className="text-sm font-medium">Mean Absolute Error</CardTitle>
             </CardHeader>
             <CardContent>
-              <div className="text-2xl font-bold">{metrics.mae.toFixed(2)}¢</div>
+              <div className="text-2xl font-bold">
+                {metrics.mae !== null ? `${metrics.mae.toFixed(2)}¢` : "not measured"}
+              </div>
               <p className="text-xs text-muted-foreground mt-2">
-                MSE: {metrics.mse.toFixed(2)}
+                MSE: {metrics.mse !== null ? metrics.mse.toFixed(2) : "—"}
               </p>
             </CardContent>
           </Card>
@@ -88,9 +92,13 @@ export default function MLPredictions() {
               <CardTitle className="text-sm font-medium">Last Trained</CardTitle>
             </CardHeader>
             <CardContent>
-              <div className="text-2xl font-bold">{new Date(metrics.lastTrained).toLocaleDateString()}</div>
+              <div className="text-2xl font-bold">
+                {metrics.lastTrained ? new Date(metrics.lastTrained).toLocaleDateString() : "never"}
+              </div>
               <p className="text-xs text-muted-foreground mt-2">
-                {new Date(metrics.lastTrained).toLocaleTimeString()}
+                {metrics.lastTrained
+                  ? new Date(metrics.lastTrained).toLocaleTimeString()
+                  : "model has not been trained"}
               </p>
             </CardContent>
           </Card>

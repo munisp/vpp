@@ -422,6 +422,14 @@ class DRAutomationService {
    * Simulate grid stress for testing
    */
   async simulateGridStress(severity: 'low' | 'medium' | 'high'): Promise<GridStressConditions> {
+    // These conditions are invented, and checkAndTriggerEvents dispatches REAL
+    // demand-response events that pay real compensation. Never in production.
+    if (process.env.NODE_ENV === 'production') {
+      throw new Error(
+        'simulateGridStress is disabled in production: it would dispatch real DR events from fabricated grid conditions'
+      );
+    }
+
     const conditions: GridStressConditions = {
       loadLevel: severity === 'high' ? 90 : severity === 'medium' ? 80 : 70,
       frequency: severity === 'high' ? 49.5 : severity === 'medium' ? 49.8 : 50.0,

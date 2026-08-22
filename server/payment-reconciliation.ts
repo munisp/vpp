@@ -9,6 +9,24 @@ import {
 } from '../drizzle/schema';
 import { eq, and, gte, lte, desc, count, sum } from 'drizzle-orm';
 import { PaymentGatewayManager } from './payment-gateways';
+import { resolveGatewayEnvironment } from './payment-gateways/environment';
+
+/**
+ * Map a stored payment method to the gateway that can be queried for it.
+ * Methods without a status API (bank transfer, card) return null.
+ */
+function toGatewayId(paymentMethod: string): 'mpesa' | 'airtel_money' | 'tigo_pesa' | null {
+  switch (paymentMethod) {
+    case 'mpesa':
+      return 'mpesa';
+    case 'airtel_money':
+      return 'airtel_money';
+    case 'tigo_pesa':
+      return 'tigo_pesa';
+    default:
+      return null;
+  }
+}
 
 /**
  * Payment Reconciliation Engine
@@ -39,41 +57,81 @@ export class PaymentReconciliationEngine {
 
     const paymentRecord = payment[0];
 
-    // Determine reconciliation status based on payment data
-    // In production, this would query the actual gateway API
-    let gatewayData: any = null;
-    let reconciliationStatus: 'matched' | 'unmatched' | 'discrepancy' = 'matched';
+    // Reconciliation compares the local record against what the gateway says.
+    // Local data is never used as the gateway side of the comparison: doing so
+    // would report every locally-asserted payment as externally confirmed.
+    let gatewayData: { amount?: number; status: string; timestamp?: Date } | null = null;
+    let reconciliationStatus: 'matched' | 'unmatched' | 'discrepancy';
     let details = '';
 
-    // For now, assume completed payments are matched
-    if (paymentRecord.status === 'completed' && paymentRecord.transactionId) {
-      reconciliationStatus = 'matched';
-      details = 'Payment marked as completed with transaction ID';
-      gatewayData = {
-        amount: paymentRecord.amount,
-        status: paymentRecord.status,
-        timestamp: paymentRecord.createdAt,
-      };
-    } else if (!paymentRecord.transactionId) {
+    const gateway = toGatewayId(paymentRecord.paymentMethod);
+
+    if (!paymentRecord.transactionId) {
       reconciliationStatus = 'unmatched';
       details = 'No transaction ID from gateway';
-    } else if (paymentRecord.status === 'pending') {
+    } else if (!gateway) {
+      // Bank transfers and cards have no queryable status API here, so they
+      // stay unmatched until an operator reconciles them from a statement.
       reconciliationStatus = 'unmatched';
-      details = 'Payment still pending';
-    } else if (paymentRecord.status === 'failed') {
-      reconciliationStatus = 'matched';
-      details = 'Failed payment confirmed';
-      gatewayData = {
-        amount: paymentRecord.amount,
-        status: paymentRecord.status,
-        timestamp: paymentRecord.createdAt,
-      };
+      details = `${paymentRecord.paymentMethod} payments require manual reconciliation against the bank statement`;
+    } else {
+      try {
+        const statusResponse = await PaymentGatewayManager.queryPaymentStatus(
+          gateway,
+          paymentRecord.transactionId,
+          resolveGatewayEnvironment()
+        );
+
+        if (!statusResponse.success) {
+          reconciliationStatus = 'unmatched';
+          details = `Gateway could not confirm the transaction: ${statusResponse.message}`;
+        } else {
+          gatewayData = {
+            amount:
+              typeof statusResponse.amount === 'number'
+                ? Math.round(statusResponse.amount * 100)
+                : undefined,
+            status: statusResponse.status,
+            timestamp: statusResponse.completedAt,
+          };
+
+          const amountMismatch =
+            typeof gatewayData.amount === 'number' && gatewayData.amount !== paymentRecord.amount;
+          const statusDiffers =
+            this.normalizeStatus(gatewayData.status) !== paymentRecord.status;
+
+          if (amountMismatch || statusDiffers) {
+            reconciliationStatus = 'discrepancy';
+            details = [
+              amountMismatch
+                ? `amount differs (gateway ${gatewayData.amount} vs ledger ${paymentRecord.amount} cents)`
+                : null,
+              statusDiffers
+                ? `status differs (gateway ${gatewayData.status} vs ledger ${paymentRecord.status})`
+                : null,
+            ]
+              .filter(Boolean)
+              .join('; ');
+          } else {
+            reconciliationStatus = 'matched';
+            details = `Gateway confirmed ${gatewayData.status}`;
+          }
+        }
+      } catch (error: any) {
+        // An unreachable or unconfigured gateway means the payment is NOT
+        // reconciled; it is surfaced, never silently counted as matched.
+        reconciliationStatus = 'unmatched';
+        details = `Gateway query failed: ${error?.message || String(error)}`;
+      }
     }
 
     // Calculate differences
-    const amountDifference = gatewayData ? (gatewayData.amount - paymentRecord.amount) : 0;
-    const statusMismatch = gatewayData ? (this.normalizeStatus(gatewayData.status) !== paymentRecord.status) : false;
-    const timeDifference = gatewayData && gatewayData.timestamp
+    const amountDifference =
+      typeof gatewayData?.amount === 'number' ? gatewayData.amount - paymentRecord.amount : 0;
+    const statusMismatch = gatewayData
+      ? this.normalizeStatus(gatewayData.status) !== paymentRecord.status
+      : false;
+    const timeDifference = gatewayData?.timestamp
       ? Math.abs((new Date(gatewayData.timestamp).getTime() - paymentRecord.createdAt.getTime()) / 1000)
       : 0;
 
@@ -83,7 +141,7 @@ export class PaymentReconciliationEngine {
       reconciliationDate: new Date(),
       status: reconciliationStatus,
       gatewayTransactionId: paymentRecord.transactionId || null,
-      gatewayAmount: gatewayData?.amount || null,
+      gatewayAmount: gatewayData?.amount ?? null,
       gatewayStatus: gatewayData?.status || null,
       gatewayTimestamp: gatewayData?.timestamp ? new Date(gatewayData.timestamp) : null,
       dbAmount: paymentRecord.amount,

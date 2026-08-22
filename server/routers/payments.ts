@@ -19,7 +19,6 @@ const InitiatePaymentInputSchema = z.object({
 
 const VerifyPaymentInputSchema = z.object({
   paymentId: z.number().int().positive(),
-  transactionId: z.string(),
 });
 
 const GenerateTokenInputSchema = z.object({
@@ -40,6 +39,31 @@ export const paymentsRouter = router({
               message: 'Billing not found.',
             });
           }
+
+          if (billing.status === 'paid' || billing.status === 'cancelled') {
+            throw new TRPCError({
+              code: 'BAD_REQUEST',
+              message: `Invoice is already ${billing.status} and cannot be paid again.`,
+            });
+          }
+
+          // Never accept more than the invoiced consumer share: an overpayment
+          // would settle money the platform has no obligation to hold.
+          if (input.amount > billing.consumerShare) {
+            throw new TRPCError({
+              code: 'BAD_REQUEST',
+              message: `Amount exceeds the invoiced amount of ${billing.consumerShare} cents.`,
+            });
+          }
+        }
+
+        // A token purchase without an energy quantity cannot be vended, and the
+        // quantity must be known before money moves.
+        if (input.paymentType === 'token_purchase' && !input.energyKwh) {
+          throw new TRPCError({
+            code: 'BAD_REQUEST',
+            message: 'energyKwh is required for a token purchase.',
+          });
         }
 
         const payment = await db.createPayment({
@@ -81,15 +105,35 @@ export const paymentsRouter = router({
           });
         }
 
-        // Update payment with transaction ID if gateway returned one
-        if (gatewayResponse?.transactionId) {
+        // A gateway that rejected the request must not leave a pending payment
+        // behind that a later status query could resolve as completed.
+        if (gatewayResponse && !gatewayResponse.success) {
+          await db.updatePaymentStatus(payment.id, 'failed', undefined, 'pending');
+          throw new TRPCError({
+            code: 'BAD_REQUEST',
+            message: gatewayResponse.message || 'Payment gateway rejected the request.',
+          });
+        }
+
+        // Persist the gateway reference used to query status later. M-Pesa
+        // status queries key off CheckoutRequestID, not MerchantRequestID, so
+        // both are stored and the query reference is recorded in metadata.
+        if (gatewayResponse?.transactionId || gatewayResponse?.checkoutRequestId) {
+          const gatewayReference =
+            gatewayResponse.checkoutRequestId || gatewayResponse.transactionId!;
+
+          await db.updatePaymentMetadata(payment.id, {
+            ...(input.energyKwh ? { energyKwh: input.energyKwh } : {}),
+            gatewayReference,
+            merchantRequestId: gatewayResponse.transactionId,
+          });
+
           await db.updatePaymentStatus(
             payment.id,
             'pending',
-            gatewayResponse.transactionId
+            gatewayResponse.transactionId || gatewayReference
           );
-          // Store checkout request ID in metadata for status checking
-          payment.transactionId = gatewayResponse.transactionId;
+          payment.transactionId = gatewayResponse.transactionId || gatewayReference;
         }
 
         return {
@@ -135,13 +179,62 @@ export const paymentsRouter = router({
           });
         }
 
+        const paymentMetadata = payment.metadata ? JSON.parse(payment.metadata) : {};
+
+        // Already-settled payments return the existing outcome instead of
+        // re-running post-payment actions (double token issuance, duplicate
+        // notifications) on every retry.
+        if (payment.status === 'completed') {
+          const existingToken = await db.getTokenByPaymentId(payment.id);
+          return {
+            success: true,
+            message: 'Payment was already verified.',
+            token: existingToken ?? null,
+          };
+        }
+
+        if (payment.status !== 'pending') {
+          throw new TRPCError({
+            code: 'BAD_REQUEST',
+            message: `Payment is ${payment.status} and can no longer be verified.`,
+          });
+        }
+
+        // The gateway reference is the one recorded at initiation; a
+        // client-supplied transaction id must never decide which transaction is
+        // checked, or a caller could point at somebody else's payment.
+        const gatewayReference: string | undefined =
+          paymentMetadata.gatewayReference || payment.transactionId || undefined;
+
+        if (!gatewayReference) {
+          throw new TRPCError({
+            code: 'BAD_REQUEST',
+            message: 'This payment has no gateway reference to verify; it must be reconciled by an administrator.',
+          });
+        }
+
         const verificationResult = await paymentGateway.verifyPaymentStatus(
-          input.transactionId,
+          gatewayReference,
           provider
         );
 
         if (verificationResult.status === 'completed') {
-          await db.updatePaymentStatus(input.paymentId, 'completed', input.transactionId);
+          const transitioned = await db.updatePaymentStatus(
+            input.paymentId,
+            'completed',
+            gatewayReference,
+            'pending'
+          );
+
+          if (!transitioned) {
+            // Another verification or the gateway callback settled it first.
+            const existingToken = await db.getTokenByPaymentId(payment.id);
+            return {
+              success: true,
+              message: 'Payment was already verified.',
+              token: existingToken ?? null,
+            };
+          }
 
           // Update billing if associated
           if (payment.billingId) {
@@ -150,15 +243,14 @@ export const paymentsRouter = router({
               'paid',
               new Date(),
               payment.paymentMethod,
-              input.transactionId
+              gatewayReference
             );
           }
 
           // Auto-generate token for token purchases
           let token = null;
           if (payment.paymentType === 'token_purchase') {
-            const metadata = payment.metadata ? JSON.parse(payment.metadata) : {};
-            const energyKwh = Number(metadata.energyKwh);
+            const energyKwh = Number(paymentMetadata.energyKwh);
             if (!Number.isInteger(energyKwh) || energyKwh <= 0) {
               throw new TRPCError({
                 code: 'BAD_REQUEST',
@@ -217,7 +309,7 @@ export const paymentsRouter = router({
             const emailNotif = notifications.getPaymentSuccessEmail({
               userName: user.name || 'User',
               amount: payment.amount,
-              transactionId: input.transactionId,
+              transactionId: gatewayReference,
               paymentMethod: payment.paymentMethod,
             });
             emailNotif.to = user.email;
@@ -245,7 +337,7 @@ export const paymentsRouter = router({
               // Push notification for payment success
               const pushNotif = notifications.getPaymentSuccessPush({
                 amount: payment.amount,
-                transactionId: input.transactionId,
+                transactionId: gatewayReference,
               });
               pushNotif.userId = user.id;
               await notifications.sendPushNotification(pushNotif);
@@ -263,7 +355,7 @@ export const paymentsRouter = router({
             message: 'Payment is still pending. Please try again later.',
           };
         } else {
-          await db.updatePaymentStatus(input.paymentId, 'failed', input.transactionId);
+          await db.updatePaymentStatus(input.paymentId, 'failed', gatewayReference, 'pending');
           throw new TRPCError({
             code: 'BAD_REQUEST',
             message: 'Payment verification failed.',
@@ -306,14 +398,28 @@ export const paymentsRouter = router({
           });
         }
 
+        // A payment issues exactly one token; a second call returns the token
+        // that was already vended rather than issuing free energy.
+        const alreadyIssued = await db.getTokenByPaymentId(payment.id);
+        if (alreadyIssued) {
+          return {
+            success: true,
+            token: alreadyIssued,
+            message:
+              alreadyIssued.status === 'pending_issuance'
+                ? 'Token is pending issuance and will be delivered once vended by the STS provider.'
+                : 'Token already issued for this payment.',
+          };
+        }
+
         // Parse energy from metadata
         const metadata = payment.metadata ? JSON.parse(payment.metadata) : {};
-        const energyKwh = metadata.energyKwh || 0;
+        const energyKwh = Number(metadata.energyKwh);
 
-        if (!energyKwh) {
+        if (!Number.isInteger(energyKwh) || energyKwh <= 0) {
           throw new TRPCError({
             code: 'BAD_REQUEST',
-            message: 'Energy amount not found in payment.',
+            message: 'Energy amount (energyKwh) is missing or invalid on this payment.',
           });
         }
 

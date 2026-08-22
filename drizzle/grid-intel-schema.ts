@@ -145,6 +145,9 @@ export const walletBalanceSnapshots = mysqlTable("wallet_balance_snapshots", {
   paymentsCompletedCents: int("payments_completed_cents").notNull(),
   billingsIssuedCents: int("billings_issued_cents").notNull(),
   tokenPurchasesCents: int("token_purchases_cents").notNull(),
+  // Gateway-confirmed wallet top-ups; these never create a `payments` row, so
+  // they are a separate credit term in the derived balance.
+  topUpsCompletedCents: int("top_ups_completed_cents").default(0).notNull(),
 
   reason: varchar("reason", { length: 50 }).notNull(), // e.g. 'manual', 'top_up_check', 'reconciliation'
   computedAt: timestamp("computed_at").defaultNow().notNull(),

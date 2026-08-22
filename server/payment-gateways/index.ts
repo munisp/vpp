@@ -223,22 +223,29 @@ export class PaymentGatewayManager {
         status: 'pending',
       });
 
-      // Note: Mobile money refunds typically require B2C/disbursement APIs
-      // which need separate credentials and approval workflows.
-      // For now, we mark for manual processing and log the request.
-      console.log(`[PaymentGateway] ${gatewayId} refund requires disbursement API - marking for manual processing`);
+      // Mobile money refunds require the provider's B2C/disbursement API,
+      // which needs separate credentials and an approval workflow that is not
+      // integrated here. No money moves, so this is reported as a failed
+      // refund needing manual disbursement — never as a successful one.
+      console.error(
+        `[PaymentGateway] ${gatewayId} refund for payment ${paymentId} requires the disbursement API; queued for manual processing, funds NOT returned`
+      );
 
-      // Log successful refund initiation
       await credDb.logPaymentGatewayRequest({
         paymentId,
         gateway: gatewayId,
         requestType: 'REFUND',
         requestPayload: { transactionId, amount, reason },
-        responsePayload: { refundId, status: 'pending_manual_processing' },
-        status: 'success',
+        responsePayload: { refundId, status: 'manual_disbursement_required', environment },
+        status: 'failed',
+        errorMessage: 'refund_requires_manual_disbursement',
       });
 
-      return { success: true, refundId };
+      return {
+        success: false,
+        refundId,
+        error: `${gatewayId} refunds require manual disbursement: no automated reversal API is integrated, so payment ${paymentId} has NOT been refunded.`,
+      };
     } catch (error: any) {
       await credDb.logPaymentGatewayRequest({
         paymentId,

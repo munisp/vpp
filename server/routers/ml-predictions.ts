@@ -132,12 +132,20 @@ export const mlPredictionsRouter = router({
       const predictions = await pricePredictionService.predictPrices(input?.hoursAhead || 48);
 
       // Calculate confidence intervals
+      // A prediction without a measured confidence has no interval; the bounds
+      // are reported as null rather than computed from a missing value.
       const forecast = predictions.map(pred => ({
         timestamp: pred.timestamp,
         predictedPrice: pred.predictedPrice,
         confidence: pred.confidence,
-        lowerBound: Math.round(pred.predictedPrice * (1 - (100 - pred.confidence) / 200)),
-        upperBound: Math.round(pred.predictedPrice * (1 + (100 - pred.confidence) / 200)),
+        lowerBound:
+          pred.confidence === null
+            ? null
+            : Math.round(pred.predictedPrice * (1 - (100 - pred.confidence) / 200)),
+        upperBound:
+          pred.confidence === null
+            ? null
+            : Math.round(pred.predictedPrice * (1 + (100 - pred.confidence) / 200)),
         trend: pred.trend,
       }));
 

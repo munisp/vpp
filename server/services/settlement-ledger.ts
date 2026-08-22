@@ -79,12 +79,47 @@ interface SettlementPeriodSummary {
 // Genesis hash for the first event in the chain
 const GENESIS_HASH = '0000000000000000000000000000000000000000000000000000000000000000';
 
+/** Retries allowed when concurrent writers race for the same chain slot. */
+const CHAIN_APPEND_MAX_ATTEMPTS = 5;
+
 export class SettlementLedgerService {
   
   /**
    * Create a new settlement event with hash chaining
    */
   async createEvent(input: CreateSettlementEventInput): Promise<SettlementEvent> {
+    // The chain tip is read before the insert, so two concurrent writers can
+    // pick the same slot. `sequence_number`/`previous_hash` are unique in the
+    // schema, so the loser gets a duplicate-key error and re-reads the tip
+    // instead of silently forking the chain.
+    let lastError: unknown = null;
+
+    for (let attempt = 0; attempt < CHAIN_APPEND_MAX_ATTEMPTS; attempt++) {
+      try {
+        return await this.appendEvent(input);
+      } catch (error: any) {
+        const isChainConflict =
+          error?.code === 'ER_DUP_ENTRY' ||
+          error?.errno === 1062 ||
+          /duplicate entry/i.test(String(error?.message ?? ''));
+
+        if (!isChainConflict) throw error;
+
+        lastError = error;
+        console.warn(
+          `[SettlementLedger] Chain append conflict on attempt ${attempt + 1}, retrying`
+        );
+      }
+    }
+
+    throw new Error(
+      `Failed to append settlement event after ${CHAIN_APPEND_MAX_ATTEMPTS} attempts due to chain contention: ${
+        (lastError as any)?.message ?? String(lastError)
+      }`
+    );
+  }
+
+  private async appendEvent(input: CreateSettlementEventInput): Promise<SettlementEvent> {
     const db = await getDb();
     if (!db) throw new Error('Database not available');
 
@@ -98,7 +133,7 @@ export class SettlementLedgerService {
     
     const previousEvent = (previousEvents as any)[0]?.[0];
     const previousHash = previousEvent?.event_hash || GENESIS_HASH;
-    const sequenceNumber = (previousEvent?.sequence_number || 0) + 1;
+    const sequenceNumber = Number(previousEvent?.sequence_number || 0) + 1;
 
     // Prepare event data
     const eventData = JSON.stringify({
@@ -455,9 +490,10 @@ export class SettlementLedgerService {
         `);
         const setpoint = (setpointResult as any)[0]?.[0];
         if (setpoint && setpoint.target_power_watts !== null && setpoint.target_power_watts !== undefined) {
-          targetPowerWatts = setpoint.target_power_watts;
-          deviationPercent = targetPowerWatts !== 0
-            ? Math.round(((actualPowerWatts - targetPowerWatts) / Math.abs(targetPowerWatts)) * 10000) / 100
+          const target = Number(setpoint.target_power_watts);
+          targetPowerWatts = target;
+          deviationPercent = target !== 0
+            ? Math.round(((actualPowerWatts - target) / Math.abs(target)) * 10000) / 100
             : null;
         }
       }

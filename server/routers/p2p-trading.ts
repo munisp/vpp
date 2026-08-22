@@ -3,16 +3,20 @@ import { router, publicProcedure, protectedProcedure } from '../_core/trpc';
 import { TRPCError } from '@trpc/server';
 import { getDb } from '../db';
 import { trades, users } from '../../drizzle/schema';
-import { and, desc, eq, inArray, ne } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull, ne } from 'drizzle-orm';
 
 /**
  * Peer-to-peer energy trading router.
  *
- * Offers live on the real `trades` table: sellers publish `p2p_sell` rows
- * with status 'pending'; accepting an offer atomically transitions it to
- * 'executed' and records the buyer's counter `p2p_buy` trade. The trades
- * status enum has no 'accepted' value, so 'executed' is the real matched
- * state.
+ * Offers live on the real `trades` table: sellers publish `p2p_sell` rows with
+ * status 'pending'; accepting an offer atomically matches it to one buyer and
+ * records the buyer's counter `p2p_buy` trade.
+ *
+ * A match is NOT a settlement. 'executed' is consumed by revenue analytics and
+ * by the seller's earnings calculation, so a trade only reaches 'executed' once
+ * the buyer's payment has cleared and the energy transfer is confirmed. Until
+ * then both sides stay 'pending' with `metadata.settlement = 'awaiting_payment'`
+ * and the offer is withdrawn from the marketplace by its `counterpartyId`.
  */
 
 function affectedRows(result: unknown): number {
@@ -36,6 +40,9 @@ export const p2pTradingRouter = router({
       const conditions = [
         eq(trades.tradeType, 'p2p_sell'),
         eq(trades.status, 'pending'),
+        // Already matched offers are no longer available, even though the
+        // trade stays pending until settlement.
+        isNull(trades.counterpartyId),
       ];
       if (ctx.user) {
         conditions.push(ne(trades.userId, ctx.user.id));
@@ -132,21 +139,35 @@ export const p2pTradingRouter = router({
         if (offer.userId === ctx.user.id) {
           throw new TRPCError({ code: 'BAD_REQUEST', message: 'You cannot accept your own offer.' });
         }
-        if (offer.status !== 'pending') {
+        if (offer.status !== 'pending' || offer.counterpartyId !== null) {
           throw new TRPCError({ code: 'CONFLICT', message: 'This offer has already been taken or cancelled.' });
         }
 
-        // Status-conditional update: only one buyer can win the offer.
+        // Conditional update on both status and counterparty: only one buyer
+        // can win the offer, and the offer is not settled here.
         const updateResult = await tx
           .update(trades)
-          .set({ status: 'executed', counterpartyId: ctx.user.id })
-          .where(and(eq(trades.id, input.offerId), eq(trades.status, 'pending')));
+          .set({
+            counterpartyId: ctx.user.id,
+            metadata: JSON.stringify({
+              ...(offer.metadata ? JSON.parse(offer.metadata) : {}),
+              settlement: 'awaiting_payment',
+              matchedAt: new Date().toISOString(),
+            }),
+          })
+          .where(
+            and(
+              eq(trades.id, input.offerId),
+              eq(trades.status, 'pending'),
+              isNull(trades.counterpartyId)
+            )
+          );
 
         if (affectedRows(updateResult) === 0) {
           throw new TRPCError({ code: 'CONFLICT', message: 'This offer has already been taken.' });
         }
 
-        // Record the buyer's counter trade.
+        // Record the buyer's counter trade, also awaiting settlement.
         const buyInsert = await tx.insert(trades).values({
           userId: ctx.user.id,
           tradeType: 'p2p_buy',
@@ -155,15 +176,23 @@ export const p2pTradingRouter = router({
           price: offer.price,
           totalAmount: offer.totalAmount,
           timestamp: new Date(),
-          status: 'executed',
+          status: 'pending',
           counterpartyId: offer.userId,
+          metadata: JSON.stringify({
+            settlement: 'awaiting_payment',
+            sellOfferId: offer.id,
+            matchedAt: new Date().toISOString(),
+          }),
         });
 
         return {
           success: true,
           offerId: offer.id,
           buyTradeId: Number((buyInsert as any)[0]?.insertId ?? (buyInsert as any).insertId),
-          message: 'Offer accepted and trade executed.',
+          settlement: 'awaiting_payment' as const,
+          amountDueCents: offer.totalAmount,
+          message:
+            'Offer matched. The trade settles once your payment clears and the energy transfer is confirmed.',
         };
       });
     }),
@@ -183,19 +212,33 @@ export const p2pTradingRouter = router({
             eq(trades.id, input.offerId),
             eq(trades.userId, ctx.user.id),
             eq(trades.tradeType, 'p2p_sell'),
-            eq(trades.status, 'pending')
+            eq(trades.status, 'pending'),
+            // A matched offer has a buyer waiting on it; it cannot be pulled
+            // unilaterally by the seller.
+            isNull(trades.counterpartyId)
           )
         );
 
       if (affectedRows(result) === 0) {
         const [offer] = await db
-          .select({ id: trades.id, userId: trades.userId, status: trades.status })
+          .select({
+            id: trades.id,
+            userId: trades.userId,
+            status: trades.status,
+            counterpartyId: trades.counterpartyId,
+          })
           .from(trades)
           .where(eq(trades.id, input.offerId))
           .limit(1);
 
         if (!offer || offer.userId !== ctx.user.id) {
           throw new TRPCError({ code: 'NOT_FOUND', message: 'P2P offer not found.' });
+        }
+        if (offer.counterpartyId !== null) {
+          throw new TRPCError({
+            code: 'CONFLICT',
+            message: 'Offer has been matched with a buyer and can no longer be cancelled.',
+          });
         }
         throw new TRPCError({
           code: 'CONFLICT',

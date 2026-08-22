@@ -2,7 +2,8 @@
  * Energy Wallet + Auto Top-Up Service
  *
  * The wallet balance is DERIVED from the real ledger on every read:
- *   balance = Σ(payments completed) − Σ(billings issued) − Σ(token purchases)
+ *   balance = Σ(payments completed) + Σ(top-ups completed)
+ *             − Σ(billings issued) − Σ(token purchases)
  * and each computation is persisted as an append-only snapshot for audit.
  *
  * Auto top-up: when the derived balance falls below the user's threshold and
@@ -39,6 +40,7 @@ export interface WalletView {
   balanceCents: number;
   ledger: {
     paymentsCompletedCents: number;
+    topUpsCompletedCents: number;
     billingsIssuedCents: number;
     tokenPurchasesCents: number;
   };
@@ -84,10 +86,22 @@ export class EnergyWalletService {
     `);
     const billingRow = (billingsResult as any)[0]?.[0] || {};
 
+    // Wallet top-ups are charged through the gateway without creating a
+    // `payments` row, so they have to be credited explicitly — otherwise a
+    // confirmed top-up leaves the balance unchanged and auto top-up refires.
+    const topUpsResult = await db.execute(sql`
+      SELECT COALESCE(SUM(amount_cents), 0) as completed_cents
+      FROM wallet_top_up_attempts
+      WHERE user_id = ${userId} AND status = 'completed'
+    `);
+    const topUpRow = (topUpsResult as any)[0]?.[0] || {};
+
     const paymentsCompletedCents = Number(ledger.completed_cents || 0);
     const tokenPurchasesCents = Number(ledger.token_purchases_cents || 0);
     const billingsIssuedCents = Number(billingRow.issued_cents || 0);
-    const balanceCents = paymentsCompletedCents - billingsIssuedCents - tokenPurchasesCents;
+    const topUpsCompletedCents = Number(topUpRow.completed_cents || 0);
+    const balanceCents =
+      paymentsCompletedCents + topUpsCompletedCents - billingsIssuedCents - tokenPurchasesCents;
 
     const insertResult = await db.insert(walletBalanceSnapshots).values({
       userId,
@@ -95,6 +109,7 @@ export class EnergyWalletService {
       paymentsCompletedCents,
       billingsIssuedCents,
       tokenPurchasesCents,
+      topUpsCompletedCents,
       reason,
     });
     const snapshotId = Number((insertResult as any)[0]?.insertId);
@@ -124,6 +139,7 @@ export class EnergyWalletService {
       balanceCents: snapshot.balanceCents,
       ledger: {
         paymentsCompletedCents: snapshot.paymentsCompletedCents,
+        topUpsCompletedCents: snapshot.topUpsCompletedCents,
         billingsIssuedCents: snapshot.billingsIssuedCents,
         tokenPurchasesCents: snapshot.tokenPurchasesCents,
       },

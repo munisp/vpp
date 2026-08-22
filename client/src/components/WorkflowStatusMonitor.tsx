@@ -160,7 +160,7 @@ export function WorkflowStatusMonitor({ className }: WorkflowStatusMonitorProps)
                         {formatDate(workflow.startTime)}
                       </TableCell>
                       <TableCell className="text-sm text-muted-foreground">
-                        {workflow.endTime ? formatDate(workflow.endTime) : "-"}
+                        {workflow.closeTime ? formatDate(workflow.closeTime) : "-"}
                       </TableCell>
                       <TableCell>
                         <Button
@@ -211,10 +211,10 @@ export function WorkflowStatusMonitor({ className }: WorkflowStatusMonitorProps)
                   <p className="text-sm font-medium text-muted-foreground">Started</p>
                   <p className="text-sm">{formatDate(workflowStatus.startTime)}</p>
                 </div>
-                {workflowStatus.endTime && (
+                {workflowStatus.closeTime && (
                   <div>
                     <p className="text-sm font-medium text-muted-foreground">Completed</p>
-                    <p className="text-sm">{formatDate(workflowStatus.endTime)}</p>
+                    <p className="text-sm">{formatDate(workflowStatus.closeTime)}</p>
                   </div>
                 )}
               </div>

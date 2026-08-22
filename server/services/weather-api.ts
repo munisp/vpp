@@ -28,8 +28,15 @@ interface WeatherCache {
 // const CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
 
 // Mock data is allowed ONLY when explicitly opted in via ALLOW_MOCK_WEATHER=true,
-// regardless of NODE_ENV. Never silently fall back to mock data otherwise.
-const ALLOW_MOCK_WEATHER = process.env.ALLOW_MOCK_WEATHER === 'true';
+// and never in production: generated irradiance feeds solar-yield and DR
+// forecasts that drive compensation, so a production process must fail loudly
+// rather than forecast against invented weather.
+const ALLOW_MOCK_WEATHER =
+  process.env.ALLOW_MOCK_WEATHER === 'true' && process.env.NODE_ENV !== 'production';
+
+if (process.env.ALLOW_MOCK_WEATHER === 'true' && process.env.NODE_ENV === 'production') {
+  console.error('[Weather] ALLOW_MOCK_WEATHER is ignored in production; a real OPENWEATHER_API_KEY is required');
+}
 
 /**
  * Get weather forecast for a location

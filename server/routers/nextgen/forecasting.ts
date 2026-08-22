@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { TRPCError } from '@trpc/server';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { adminProcedure, protectedProcedure, router } from '../../_core/trpc';
 import { probabilisticForecasting } from '../../services/probabilistic-forecasting';
 import {
@@ -12,6 +12,7 @@ import {
 } from '../../services/forecast-accuracy';
 import { getDb } from '../../db';
 import { assets } from '../../../drizzle/schema';
+import { communityMembers } from '../../../drizzle/nextgen-vpp-schema';
 
 /**
  * Accuracy for an asset is only visible to its owner: a competitor could infer
@@ -39,6 +40,40 @@ async function requireAssetOwnership(
   }
   if (rows[0].userId !== ctx.user.id) {
     throw new TRPCError({ code: 'FORBIDDEN', message: 'You do not own this asset.' });
+  }
+}
+
+/**
+ * Community accuracy aggregates its members' forecasts, so it is visible to
+ * active members only for the same reason asset accuracy is owner-only.
+ */
+async function requireCommunityMembership(
+  ctx: { user: { id: number; role: string } },
+  communityId: number
+): Promise<void> {
+  if (ctx.user.role === 'admin') return;
+
+  const db = await getDb();
+  if (!db) {
+    throw new TRPCError({ code: 'SERVICE_UNAVAILABLE', message: 'Database not available' });
+  }
+
+  const rows = await db
+    .select({ status: communityMembers.status })
+    .from(communityMembers)
+    .where(
+      and(
+        eq(communityMembers.communityId, communityId),
+        eq(communityMembers.userId, ctx.user.id)
+      )
+    )
+    .limit(1);
+
+  if (!rows[0] || rows[0].status !== 'active') {
+    throw new TRPCError({
+      code: 'FORBIDDEN',
+      message: 'You are not an active member of this community.',
+    });
   }
 }
 
@@ -117,6 +152,16 @@ export const forecastingRouter = router({
           throw new TRPCError({ code: 'BAD_REQUEST', message: 'An asset scope needs an assetId' });
         }
         await requireAssetOwnership(ctx, input.scopeId);
+      }
+
+      if (input.scopeType === 'community') {
+        if (input.scopeId == null) {
+          throw new TRPCError({
+            code: 'BAD_REQUEST',
+            message: 'A community scope needs a communityId',
+          });
+        }
+        await requireCommunityMembership(ctx, input.scopeId);
       }
 
       const scopeType = input.scopeType ?? 'user';

@@ -16,6 +16,15 @@ import { probabilisticForecasting, ForecastResult, ForecastQuantiles } from './p
 import { settlementLedger } from './settlement-ledger';
 import { kafkaPublisher } from '../integration/kafka-publisher';
 import { mqttBrokerService } from '../integration/mqtt-broker';
+import {
+  MilpAsset,
+  MilpDispatchRequest,
+  MilpDispatchResponse,
+  MilpOptimizerError,
+  assertMilpOptimizerConfigured,
+  isMilpOptimizerConfigured,
+  solveMilpDispatch,
+} from './milp-dispatch';
 
 // Types for optimization
 export type ObjectiveFunction = 
@@ -82,6 +91,11 @@ export interface OptimizationResult {
   };
   status: 'optimized' | 'partial' | 'failed';
   warnings: string[];
+  // Which engine produced the setpoints. 'heuristic' results are rule-based
+  // per-asset decisions, not a proven-optimal schedule, and are refused in
+  // production; callers must not present them as optimized dispatch.
+  engine: 'milp' | 'heuristic';
+  solver?: string;
 }
 
 interface AssetState {
@@ -136,16 +150,38 @@ export class OptimizationEngine {
     const serviceRates = await this.getServiceRates(request.serviceEnrollments);
 
     // Run optimization algorithm
-    const setpoints = await this.runOptimization(
-      request,
-      assets,
-      forecasts,
-      serviceRates,
-      scheduleStart,
-      request.horizonHours,
-      request.intervalMinutes,
-      warnings
-    );
+    assertMilpOptimizerConfigured();
+    const useMilp = isMilpOptimizerConfigured();
+    let solver: string | undefined;
+    let setpoints: DispatchSetpoint[];
+
+    if (useMilp) {
+      const solved = await this.runMilpOptimization(
+        request,
+        assets,
+        forecasts,
+        scheduleStart,
+        request.horizonHours,
+        request.intervalMinutes,
+        warnings
+      );
+      setpoints = solved.setpoints;
+      solver = solved.solver;
+    } else {
+      warnings.push(
+        'OPTIMIZER_SERVICE_URL is not set: dispatch was produced by the rule-based heuristic engine and is not a proven-optimal schedule'
+      );
+      setpoints = await this.runOptimization(
+        request,
+        assets,
+        forecasts,
+        serviceRates,
+        scheduleStart,
+        request.horizonHours,
+        request.intervalMinutes,
+        warnings
+      );
+    }
 
     // Calculate summary
     const summary = this.calculateSummary(setpoints);
@@ -187,7 +223,166 @@ export class OptimizationEngine {
       forecasts,
       status: warnings.length > 0 ? 'partial' : 'optimized',
       warnings,
+      engine: useMilp ? 'milp' : 'heuristic',
+      solver,
     };
+  }
+
+  /**
+   * Solve the whole horizon and every asset as one mixed-integer program.
+   *
+   * Unlike `runOptimization`, this respects state of charge over time, grid
+   * import/export limits and charge/discharge exclusivity. Failures propagate:
+   * an unreachable solver or a non-optimal solve must not silently become a
+   * heuristic schedule labelled 'optimized'.
+   */
+  private async runMilpOptimization(
+    request: OptimizationRequest,
+    assets: AssetState[],
+    forecasts: { load?: ForecastResult; price?: ForecastResult; emissions?: ForecastResult; solar?: ForecastResult },
+    scheduleStart: Date,
+    horizonHours: number,
+    intervalMinutes: number,
+    warnings: string[]
+  ): Promise<{ setpoints: DispatchSetpoint[]; solver: string }> {
+    const intervalsCount = Math.round((horizonHours * 60) / intervalMinutes);
+    const contexts = Array.from({ length: intervalsCount }, (_, i) =>
+      this.getIntervalContext(new Date(scheduleStart.getTime() + i * intervalMinutes * 60000), forecasts, i)
+    );
+
+    if (!forecasts.price) {
+      warnings.push(
+        'No price forecast available: the MILP was solved against an estimated fallback price curve'
+      );
+    }
+
+    const needsEmissions = request.objective === 'minimize_emissions';
+    if (needsEmissions && !forecasts.emissions) {
+      throw new MilpOptimizerError(
+        'objective minimize_emissions requires an emissions forecast; refusing to optimize against an assumed carbon intensity'
+      );
+    }
+
+    const milpAssets: MilpAsset[] = [];
+    const eligible = assets.filter(asset => asset.eligibility.eligible);
+
+    for (const asset of eligible) {
+      const exportW = asset.eligibility.availablePowerExport;
+      const importW = asset.eligibility.availablePowerImport;
+
+      if (asset.assetType === 'battery') {
+        // `assets.capacity` is watt-hours for batteries (see drizzle/schema.ts).
+        if (asset.capacity <= 0 || (exportW <= 0 && importW <= 0)) continue;
+        milpAssets.push({
+          asset_id: String(asset.assetId),
+          asset_type: 'battery',
+          battery: {
+            capacity_wh: asset.capacity,
+            max_charge_w: Math.max(importW, 1),
+            max_discharge_w: Math.max(exportW, 1),
+            initial_soc_percent: asset.currentSoc ?? 50,
+            soc_min_percent: request.constraints?.minSocReserve ?? 10,
+            soc_max_percent: 95,
+          },
+        });
+        continue;
+      }
+
+      if (asset.assetType === 'solar' || asset.assetType === 'wind') {
+        const available = contexts.map(context =>
+          Math.min(asset.capacity, context.solarForecast?.p50 ?? asset.capacity)
+        );
+        milpAssets.push({
+          asset_id: String(asset.assetId),
+          asset_type: 'generation',
+          generation: { available_w: available, curtailable: true },
+        });
+      }
+    }
+
+    const milpRequest: MilpDispatchRequest = {
+      interval_minutes: intervalMinutes,
+      site: {
+        site_id: this.siteIdFor(request),
+        assets: milpAssets,
+        load_w: contexts.map(context => Math.max(0, context.loadForecast.p50)),
+        max_import_w: request.constraints?.maxGridImport ?? this.defaultGridLimit(eligible),
+        max_export_w: request.constraints?.maxGridExport ?? this.defaultGridLimit(eligible),
+      },
+      prices: {
+        import_cents_per_kwh: contexts.map(context => context.priceForecast.p50),
+        export_cents_per_kwh: contexts.map(context => context.priceForecast.p50),
+        grid_emissions_g_per_kwh: forecasts.emissions
+          ? contexts.map(context => context.emissionsForecast.p50)
+          : null,
+      },
+      objective: request.objective,
+      grid_target_w: request.objective === 'balance_grid' ? contexts.map(() => 0) : null,
+    };
+
+    const result = await solveMilpDispatch(milpRequest);
+    return {
+      setpoints: this.milpSetpoints(result, request, assets, contexts, scheduleStart, intervalMinutes),
+      solver: result.solver,
+    };
+  }
+
+  private siteIdFor(request: OptimizationRequest): string {
+    if (request.scope.communityId) return `community-${request.scope.communityId}`;
+    if (request.scope.userId) return `user-${request.scope.userId}`;
+    return 'assets';
+  }
+
+  private defaultGridLimit(assets: AssetState[]): number {
+    const total = assets.reduce(
+      (sum, asset) =>
+        sum + Math.max(asset.eligibility.availablePowerExport, asset.eligibility.availablePowerImport),
+      0
+    );
+    return Math.max(total, 1);
+  }
+
+  private milpSetpoints(
+    result: MilpDispatchResponse,
+    request: OptimizationRequest,
+    assets: AssetState[],
+    contexts: IntervalContext[],
+    scheduleStart: Date,
+    intervalMinutes: number
+  ): DispatchSetpoint[] {
+    const byId = new Map(assets.map(asset => [String(asset.assetId), asset]));
+    const setpoints: DispatchSetpoint[] = [];
+
+    for (const interval of result.intervals) {
+      const context = contexts[interval.index];
+      const intervalStart = new Date(scheduleStart.getTime() + interval.index * intervalMinutes * 60000);
+      const intervalEnd = new Date(intervalStart.getTime() + intervalMinutes * 60000);
+
+      for (const setpoint of interval.setpoints) {
+        const asset = byId.get(setpoint.asset_id);
+        if (!asset) continue;
+        const energyWh = (setpoint.power_w * intervalMinutes) / 60;
+        const priceCentsPerKwh = context?.priceForecast.p50 ?? 0;
+        const emissionsPerKwh = context?.emissionsForecast.p50 ?? 0;
+
+        setpoints.push({
+          assetId: asset.assetId,
+          intervalStart,
+          intervalEnd,
+          targetPowerWatts: Math.round(setpoint.power_w),
+          targetSocPercent: setpoint.soc_percent ?? undefined,
+          expectedRevenue: energyWh > 0 ? Math.round((energyWh / 1000) * priceCentsPerKwh) : 0,
+          expectedCost: energyWh < 0 ? Math.round((Math.abs(energyWh) / 1000) * priceCentsPerKwh) : 0,
+          expectedEmissionsSaved: energyWh > 0 ? Math.round((energyWh / 1000) * emissionsPerKwh) : 0,
+          confidence: Math.round(
+            ((context?.priceForecast.confidence ?? 0) + (context?.loadForecast.confidence ?? 0)) / 2
+          ),
+          economicsEstimated: context?.priceForecastEstimated === true,
+        });
+      }
+    }
+
+    return setpoints;
   }
 
   /**
@@ -787,6 +982,7 @@ export class OptimizationEngine {
       forecasts: {},
       status: 'failed',
       warnings,
+      engine: isMilpOptimizerConfigured() ? 'milp' : 'heuristic',
     };
   }
 

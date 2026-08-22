@@ -434,7 +434,7 @@ export async function handleMeterValues(
           recorded += 1;
           break;
         case 'SoC':
-          latestSoc = Math.round(value * 100);
+          latestSoc = toSocPercent(value);
           recorded += 1;
           break;
         default:
@@ -478,6 +478,14 @@ function toWattHours(value: number, unit: string | undefined): number {
     default:
       throw new GridProtocolError(400, `unsupported energy unit ${unit}`);
   }
+}
+
+/** charging_sessions.end_soc_percent is a plain 0-100 percentage. */
+function toSocPercent(value: number): number {
+  if (value < 0 || value > 100) {
+    throw new GridProtocolError(400, `state of charge ${value} is not a percentage`);
+  }
+  return Math.round(value);
 }
 
 function toWatts(value: number, unit: string | undefined): number {
@@ -817,4 +825,4 @@ function mapReadings(readings: ModbusReading[]): {
 }
 
 /** Exported for tests: the readings-to-telemetry mapping is settlement input. */
-export const __testables = { mapReadings, decideOpenADRParticipation };
+export const __testables = { mapReadings, decideOpenADRParticipation, toSocPercent };

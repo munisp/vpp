@@ -7,6 +7,7 @@ cannot mistake "no solution" for "do nothing".
 
 from __future__ import annotations
 
+import hmac
 import logging
 import os
 
@@ -61,7 +62,7 @@ def _authorise(token: str | None) -> None:
                 detail=f"{_TOKEN_ENV} must be set when running in production",
             )
         return
-    if token != expected:
+    if token is None or not hmac.compare_digest(token, expected):
         raise HTTPException(status_code=401, detail="invalid optimizer token")
 
 

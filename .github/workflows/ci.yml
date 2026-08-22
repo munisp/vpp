@@ -12,19 +12,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Version comes from package.json "packageManager"; specifying it here too
+      # makes the action fail with ERR_PNPM_BAD_PM_VERSION.
       - uses: pnpm/action-setup@v4
-        with:
-          version: 10.4.1
 
       - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: pnpm
 
-      # TODO: restore --frozen-lockfile once pnpm-lock.yaml is regenerated to
-      # include helmet and express-rate-limit (run: pnpm install --lockfile-only).
       - name: Install dependencies
-        run: pnpm install --no-frozen-lockfile
+        run: pnpm install --frozen-lockfile
 
       - name: Typecheck
         run: pnpm check

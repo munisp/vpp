@@ -1,6 +1,46 @@
 import { z } from 'zod';
-import { protectedProcedure, router } from '../../_core/trpc';
+import { TRPCError } from '@trpc/server';
+import { eq } from 'drizzle-orm';
+import { adminProcedure, protectedProcedure, router } from '../../_core/trpc';
 import { probabilisticForecasting } from '../../services/probabilistic-forecasting';
+import {
+  MIN_SCORING_SAMPLES,
+  TARGET_COVERAGE_BP,
+  getAccuracySummary,
+  scoreDueForecastRuns,
+  scoreForecastRun,
+} from '../../services/forecast-accuracy';
+import { getDb } from '../../db';
+import { assets } from '../../../drizzle/schema';
+
+/**
+ * Accuracy for an asset is only visible to its owner: a competitor could infer
+ * a site's generation profile from how well its forecasts score.
+ */
+async function requireAssetOwnership(
+  ctx: { user: { id: number; role: string } },
+  assetId: number
+): Promise<void> {
+  if (ctx.user.role === 'admin') return;
+
+  const db = await getDb();
+  if (!db) {
+    throw new TRPCError({ code: 'SERVICE_UNAVAILABLE', message: 'Database not available' });
+  }
+
+  const rows = await db
+    .select({ userId: assets.userId })
+    .from(assets)
+    .where(eq(assets.id, assetId))
+    .limit(1);
+
+  if (!rows[0]) {
+    throw new TRPCError({ code: 'NOT_FOUND', message: 'Asset not found' });
+  }
+  if (rows[0].userId !== ctx.user.id) {
+    throw new TRPCError({ code: 'FORBIDDEN', message: 'You do not own this asset.' });
+  }
+}
 
 export const forecastingRouter = router({
   forecastLoad: protectedProcedure
@@ -58,5 +98,62 @@ export const forecastingRouter = router({
     .input(z.object({ runId: z.string() }))
     .query(async ({ input }) => {
       return probabilisticForecasting.getForecast(input.runId);
+    }),
+
+  /**
+   * Measured accuracy of past forecasts. Defaults to the caller's own scope;
+   * `unmeasuredRuns` travels with the metrics so a thin score cannot be read as
+   * a good one.
+   */
+  accuracySummary: protectedProcedure
+    .input(z.object({
+      sinceDays: z.number().min(1).max(365).default(30),
+      scopeType: z.enum(['asset', 'user', 'community', 'region']).optional(),
+      scopeId: z.number().optional(),
+    }))
+    .query(async ({ input, ctx }) => {
+      if (input.scopeType === 'asset') {
+        if (input.scopeId == null) {
+          throw new TRPCError({ code: 'BAD_REQUEST', message: 'An asset scope needs an assetId' });
+        }
+        await requireAssetOwnership(ctx, input.scopeId);
+      }
+
+      const scopeType = input.scopeType ?? 'user';
+      const scopeId =
+        input.scopeType === undefined
+          ? ctx.user.id
+          : input.scopeType === 'user' && ctx.user.role !== 'admin'
+            ? ctx.user.id
+            : input.scopeId;
+
+      const rows = await getAccuracySummary({
+        sinceDays: input.sinceDays,
+        scopeType: scopeType === 'region' ? 'region' : scopeType,
+        scopeId: scopeType === 'region' ? undefined : scopeId,
+      });
+
+      return {
+        rows,
+        targetCoverageBp: TARGET_COVERAGE_BP,
+        minScoringSamples: MIN_SCORING_SAMPLES,
+      };
+    }),
+
+  scoreRun: adminProcedure
+    .input(z.object({ runId: z.string() }))
+    .mutation(async ({ input }) => {
+      return scoreForecastRun(input.runId);
+    }),
+
+  scoreDueRuns: adminProcedure
+    .input(z.object({ limit: z.number().min(1).max(200).default(25) }))
+    .mutation(async ({ input }) => {
+      const scores = await scoreDueForecastRuns(input.limit);
+      return {
+        scored: scores.filter((score) => score.status === 'scored').length,
+        unmeasured: scores.filter((score) => score.status === 'insufficient_actuals').length,
+        scores,
+      };
     }),
 });

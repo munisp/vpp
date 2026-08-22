@@ -25,7 +25,7 @@ export interface PaymentStatusResponse {
   success: boolean;
   status: 'pending' | 'completed' | 'failed' | 'cancelled';
   transactionId?: string;
-  amount?: number;
+  amount?: number; // Amount in cents
   phoneNumber?: string;
   completedAt?: Date;
   message: string;
@@ -35,7 +35,7 @@ export interface PaymentStatusResponse {
 export interface PaymentCallbackData {
   transactionId: string;
   checkoutRequestId?: string;
-  amount: number;
+  amount: number; // Amount in cents
   phoneNumber: string;
   status: 'completed' | 'failed' | 'cancelled';
   resultCode?: string;

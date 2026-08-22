@@ -196,8 +196,11 @@ async function updatePaymentFromCallback(
   // The callback amount is authoritative for how much the customer was
   // debited. If it does not match the amount owed, the payment is NOT settled:
   // completing it would credit an invoice or a token that was not paid for.
+  // Gateway adapters already normalise the provider's major-unit amount to
+  // cents (`PaymentCallbackData.amount`); scaling again here would make every
+  // genuine callback look like a 100x overpayment and settle nothing.
   const callbackAmountCents =
-    typeof callbackData.amount === 'number' ? Math.round(callbackData.amount * 100) : null;
+    typeof callbackData.amount === 'number' ? Math.round(callbackData.amount) : null;
 
   if (newStatus === 'completed' && callbackAmountCents !== null && callbackAmountCents !== pmt.amount) {
     console.error(

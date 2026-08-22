@@ -87,9 +87,11 @@ export class PaymentReconciliationEngine {
           details = `Gateway could not confirm the transaction: ${statusResponse.message}`;
         } else {
           gatewayData = {
+            // `PaymentStatusResponse.amount` is already in cents; scaling it
+            // again would report every matching payment as a discrepancy.
             amount:
               typeof statusResponse.amount === 'number'
-                ? Math.round(statusResponse.amount * 100)
+                ? Math.round(statusResponse.amount)
                 : undefined,
             status: statusResponse.status,
             timestamp: statusResponse.completedAt,

@@ -54,6 +54,7 @@ export const controlAssignmentsSourceEnum = pgEnum("control_assignments_source",
   "dr_event",
   "grid_instruction",
   "manual",
+  "p2p_trade",
 ]);
 export const controlAssignmentsFallbackPolicyEnum = pgEnum(
   "control_assignments_fallback_policy",

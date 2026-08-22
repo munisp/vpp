@@ -22,6 +22,13 @@
       "when": 1787435462457,
       "tag": "0002_mqtt_bounded_control",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1787476600000,
+      "tag": "0003_p2p_trade_control_source",
+      "breakpoints": true
     }
   ]
 }

@@ -22,6 +22,7 @@ import {
   claimForFallback,
   closeHoldLast,
   expiredAssignments,
+  liveAssignmentFor,
   recordControlAssignment,
   recordFallbackOutcome,
   resolveControlWindow,
@@ -169,6 +170,54 @@ export async function installFallbackProfile(input: {
     chargingProfileId: input.chargingProfileId ?? 1,
   });
   return { status: result.status, limitWatts };
+}
+
+export interface RevokeControlResult {
+  revoked: boolean;
+  status: string;
+  assignmentId: number | null;
+}
+
+/**
+ * Ends a platform control early: the profile is cleared on the charge point and
+ * the live assignment is closed out as operator-revoked.
+ *
+ * The record is only closed when the charge point confirmed the clear. A refused
+ * or unreachable charge point keeps the assignment open, because the setpoint is
+ * still installed on the hardware.
+ */
+export async function revokeControl(input: {
+  chargePointId: string;
+  connectorId: number;
+  chargingProfileId?: number;
+  reason: string;
+}): Promise<RevokeControlResult> {
+  const assignment = await liveAssignmentFor('ocpp16', input.chargePointId, input.connectorId);
+  const chargingProfileId =
+    input.chargingProfileId ??
+    (assignment?.commandRef !== undefined ? Number(assignment.commandRef) : undefined);
+  if (chargingProfileId === undefined || !Number.isInteger(chargingProfileId)) {
+    throw new GridCommandError(
+      409,
+      `no platform control is recorded for ${input.chargePointId} connector ${input.connectorId}; refusing to clear an unidentified profile`
+    );
+  }
+
+  const result = await clearChargingProfile({
+    chargePointId: input.chargePointId,
+    chargingProfileId,
+    connectorId: input.connectorId,
+  });
+
+  if (assignment) {
+    await recordFallbackOutcome(
+      assignment.id,
+      'operator_revoked',
+      'applied',
+      `profile ${chargingProfileId} cleared (${result.status}): ${input.reason}`
+    );
+  }
+  return { revoked: true, status: result.status, assignmentId: assignment?.id ?? null };
 }
 
 /** Maps a failed fallback delivery onto what the platform actually knows. */

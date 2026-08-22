@@ -225,19 +225,24 @@ export async function recordControlAssignment(
   // the target with no authoritative window, and a successor without the
   // supersession would leave two live windows fighting over the same device.
   return db.transaction(async tx => {
-    await tx
-      .update(controlAssignments)
-      .set({ supersededAt: new Date() })
-      .where(
-        and(
-          eq(controlAssignments.protocol, input.protocol),
-          eq(controlAssignments.targetRef, input.targetRef),
-          eq(controlAssignments.subTargetRef, subTargetRef),
-          eq(controlAssignments.delivery, 'accepted'),
-          isNull(controlAssignments.supersededAt),
-          isNull(controlAssignments.fallbackAppliedAt)
-        )
-      );
+    // Only an accepted replacement supersedes: a refused or unconfirmed plan did
+    // not replace anything on the device, and retiring the predecessor would drop
+    // a live setpoint out of the expiry sweep and the operator health counts.
+    if (input.delivery === 'accepted') {
+      await tx
+        .update(controlAssignments)
+        .set({ supersededAt: new Date() })
+        .where(
+          and(
+            eq(controlAssignments.protocol, input.protocol),
+            eq(controlAssignments.targetRef, input.targetRef),
+            eq(controlAssignments.subTargetRef, subTargetRef),
+            eq(controlAssignments.delivery, 'accepted'),
+            isNull(controlAssignments.supersededAt),
+            isNull(controlAssignments.fallbackAppliedAt)
+          )
+        );
+    }
 
     const [inserted] = await tx
       .insert(controlAssignments)
@@ -460,6 +465,33 @@ export async function assignmentsForUser(
     .orderBy(desc(controlAssignments.createdAt))
     .limit(limit);
   return withState(rows, new Date());
+}
+
+/**
+ * The assignment currently commanding a target, if any. Revoking a control has
+ * to close out the record that claims the device is under platform control, so
+ * the caller needs the live row rather than the newest one.
+ */
+export async function liveAssignmentFor(
+  protocol: ControlProtocol,
+  targetRef: string,
+  subTargetRef = 0
+): Promise<ControlAssignment | null> {
+  const db = await requireDb();
+  const rows = await db
+    .select()
+    .from(controlAssignments)
+    .where(
+      and(
+        liveControl(),
+        eq(controlAssignments.protocol, protocol),
+        eq(controlAssignments.targetRef, targetRef),
+        eq(controlAssignments.subTargetRef, subTargetRef)
+      )
+    )
+    .orderBy(desc(controlAssignments.createdAt))
+    .limit(1);
+  return rows[0] ?? null;
 }
 
 export interface ControlHealth {

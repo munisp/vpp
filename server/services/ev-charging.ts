@@ -14,7 +14,19 @@ import { kafkaPublisher } from '../integration/kafka-publisher';
 import { marketPrices } from '../../drizzle/schema';
 import { pricePredictionService } from '../ml/price-prediction';
 import type { SqlRow } from '../sql-row';
-import { jsonSetText } from '../sql-json';
+import { jsonSetText, type JsonSetValue } from '../sql-json';
+import { dispatchChargingPlan, revokeControl } from './control-delivery';
+import { GridCommandError } from './grid-commands';
+
+/**
+ * `electric_vehicles` stores percentages scaled by 100 and powers/capacities by
+ * 10. Everything above the row mappers works in real engineering units, so the
+ * conversion happens once, here: a mixed convention previously compared a scaled
+ * state of charge against a real one, so the V2G minimum-SoC guard never fired.
+ */
+function unscale(value: number | null | undefined, factor: number): number | null {
+  return value === null || value === undefined ? null : value / factor;
+}
 
 // Types for EV charging
 export interface ElectricVehicle {
@@ -78,6 +90,25 @@ export interface ChargingSession {
   totalCost: number | null;
   totalRevenue: number | null;
   status: 'starting' | 'charging' | 'discharging' | 'paused' | 'completed' | 'failed';
+}
+
+/**
+ * Stack level 1 profile id reserved for platform V2G dispatch, so a new V2G
+ * command replaces the previous one on the charge point instead of stacking.
+ */
+const V2G_CHARGING_PROFILE_ID = 2;
+
+export interface V2GDispatchResult {
+  success: boolean;
+  message: string;
+  /** The recorded control assignment, present whenever delivery was attempted. */
+  assignmentId?: number | null;
+  dischargeKw?: number;
+  validFrom?: Date;
+  validTo?: Date;
+  fallbackPolicy?: string;
+  /** `accepted`, `rejected` or `unconfirmed` as the charge point reported it. */
+  delivery?: string;
 }
 
 export interface SmartChargingSchedule {
@@ -477,7 +508,7 @@ export class EVChargingService {
     // Calculate energy needed
     const currentSoc = ev.currentSocPercent || 20;
     const targetSoc = session.targetSocPercent || ev.targetSocPercent;
-    const batteryCapacity = (ev.usableBatteryKwh || ev.batteryCapacityKwh || 60) / 10; // Convert from stored format
+    const batteryCapacity = ev.usableBatteryKwh || ev.batteryCapacityKwh || 60;
     const energyNeededKwh = ((targetSoc - currentSoc) / 100) * batteryCapacity;
 
     // Determine charging window
@@ -486,8 +517,8 @@ export class EVChargingService {
                      new Date(now.getTime() + 8 * 3600000); // Default 8 hours
 
     const maxPower = Math.min(
-      (ev.maxChargingPowerKw || 110) / 10,
-      station.maxPowerKw / 10,
+      ev.maxChargingPowerKw || 11,
+      station.maxPowerKw,
       options.constraints?.maxPowerKw || Infinity
     );
 
@@ -568,7 +599,7 @@ export class EVChargingService {
       // real price pattern for this scheduling window)
       const sortedPrices = [...pricePattern].sort((a, b) => a - b);
       const highPriceThreshold = sortedPrices[Math.floor((sortedPrices.length - 1) * 0.75)];
-      const maxDischarge = (ev.maxDischargingPowerKw || 0) / 10;
+      const maxDischarge = ev.maxDischargingPowerKw || 0;
       const minSoc = options.constraints?.minSocPercent || ev.minSocPercent;
 
       for (let i = 0; i < intervalsCount; i++) {
@@ -772,7 +803,14 @@ export class EVChargingService {
   }
 
   /**
-   * Dispatch V2G command to vehicle
+   * Commands V2G on the charge point holding the vehicle's active session.
+   *
+   * The command is an OCPP charging profile bounded by a validity window, sent
+   * through the control-delivery path, so it expires on the charge point's own
+   * clock and falls back to local control when it does. Session and station rows
+   * are only moved to a discharging state once the charge point accepted the
+   * profile: a refused or unreachable charge point reports failure and leaves the
+   * records showing that no discharge is running.
    */
   async dispatchV2G(
     evId: number,
@@ -782,7 +820,7 @@ export class EVChargingService {
       durationMinutes?: number;
       minSocPercent?: number;
     }
-  ): Promise<{ success: boolean; message: string }> {
+  ): Promise<V2GDispatchResult> {
     const db = await getDb();
     if (!db) throw new Error('Database not available');
 
@@ -800,41 +838,204 @@ export class EVChargingService {
     const session = sessionResult.rows[0];
     if (!session) return { success: false, message: 'No active session' };
 
-    // Check SoC constraints
-    const currentSoc = ev.currentSocPercent || 50;
-    const minSoc = command.minSocPercent || ev.minSocPercent;
-    if (command.action === 'start_discharge' && currentSoc <= minSoc) {
+    const station = await this.getStation(Number(session.station_id));
+    if (!station) return { success: false, message: 'Station not found' };
+    if (!station.v2gCapable) {
+      return { success: false, message: `Station ${station.stationId} is not V2G capable` };
+    }
+    // Only OCPP 1.6J charge points can be commanded today; claiming a dispatch on
+    // a station the platform cannot reach would be a fabricated success.
+    if (station.ocppVersion !== '1.6') {
+      return {
+        success: false,
+        message: `Station ${station.stationId} reports OCPP ${
+          station.ocppVersion ?? 'none'
+        }; bounded V2G control is implemented for OCPP 1.6 only`,
+      };
+    }
+    const connectorId = this.sessionConnectorId(session);
+    if (connectorId === null) {
+      return {
+        success: false,
+        message: `Session ${session.session_id} records no OCPP connector; the charge point cannot be commanded`,
+      };
+    }
+
+    if (command.action === 'stop_discharge') {
+      try {
+        const revoked = await revokeControl({
+          chargePointId: station.stationId,
+          connectorId,
+          reason: `V2G stop_discharge for EV ${evId}`,
+        });
+        await this.applyV2GState(Number(session.id), station.id, 'paused', 'occupied', {
+          v2gCommand: command.action,
+          v2gPowerKw: null,
+          v2gStoppedAt: new Date().toISOString(),
+        });
+        return {
+          success: true,
+          message: `V2G discharge stopped on ${station.stationId} (${revoked.status})`,
+          assignmentId: revoked.assignmentId,
+        };
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        return {
+          success: false,
+          message: `V2G discharge could not be stopped on ${station.stationId}: ${reason}`,
+        };
+      }
+    }
+
+    // Discharge power: explicit request, else the vehicle's rating, clamped by
+    // both the vehicle and the station.
+    const requestedKw = command.powerKw ?? ev.maxDischargingPowerKw;
+    if (requestedKw === null || !Number.isFinite(requestedKw) || requestedKw === 0) {
+      return {
+        success: false,
+        message:
+          'Discharge power is unknown: pass powerKw or record max_discharging_power_kw for the vehicle',
+      };
+    }
+    const limits = [Math.abs(requestedKw), station.maxPowerKw];
+    if (ev.maxDischargingPowerKw) limits.push(ev.maxDischargingPowerKw);
+    const dischargeKw = Math.min(...limits);
+    if (!(dischargeKw > 0)) {
+      return { success: false, message: 'Resolved discharge power is not positive' };
+    }
+
+    const durationMinutes = command.durationMinutes;
+    if (durationMinutes === undefined) {
+      return {
+        success: false,
+        message:
+          'durationMinutes is required: a V2G discharge must state when it stops applying',
+      };
+    }
+    if (!Number.isInteger(durationMinutes) || durationMinutes < 1) {
+      return { success: false, message: 'durationMinutes must be a whole number of minutes' };
+    }
+
+    // Check SoC constraints (both values are real percentages)
+    const currentSoc = ev.currentSocPercent;
+    if (currentSoc === null) {
+      return {
+        success: false,
+        message: 'Vehicle state of charge is unknown; a discharge floor cannot be enforced',
+      };
+    }
+    const minSoc = command.minSocPercent ?? ev.minSocPercent;
+    if (currentSoc <= minSoc) {
       return { success: false, message: `SoC (${currentSoc}%) at or below minimum (${minSoc}%)` };
     }
 
-    // Update session status
-    const newStatus = command.action === 'start_discharge' ? 'discharging' : 
-                      command.action === 'stop_discharge' ? 'paused' : session.status;
+    let dispatch;
+    try {
+      dispatch = await dispatchChargingPlan({
+        chargePointId: station.stationId,
+        connectorId,
+        chargingProfileId: V2G_CHARGING_PROFILE_ID,
+        transactionId: Number(session.id),
+        // Negative watts discharge the vehicle.
+        periods: [{ startPeriodSeconds: 0, limitWatts: -Math.round(dischargeKw * 1000) }],
+        validForSeconds: durationMinutes * 60,
+        // A closed window must hand the vehicle back to local charging control
+        // rather than leave an export limit standing.
+        fallbackPolicy: 'resume_local',
+        source: 'v2g_schedule',
+        sourceId: Number(session.id),
+        evId,
+        userId: Number(session.user_id),
+      });
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      const status = error instanceof GridCommandError ? error.status : undefined;
+      return {
+        success: false,
+        message: `V2G ${command.action} was not dispatched${
+          status ? ` (${status})` : ''
+        }: ${reason}`,
+      };
+    }
+
+    if (!dispatch.delivered) {
+      return {
+        success: false,
+        message: `Charge point ${station.stationId} did not take the V2G profile (${dispatch.status}): ${
+          dispatch.reason ?? 'no detail reported'
+        }`,
+        assignmentId: dispatch.assignmentId,
+        delivery: dispatch.status,
+      };
+    }
+
+    await this.applyV2GState(Number(session.id), station.id, 'discharging', 'discharging', {
+      v2gCommand: command.action,
+      v2gPowerKw: -dischargeKw,
+      v2gStartTime: dispatch.validFrom.toISOString(),
+      v2gValidTo: dispatch.validTo.toISOString(),
+      v2gAssignmentId: dispatch.assignmentId,
+      v2gFallbackPolicy: dispatch.fallbackPolicy,
+    });
+
+    console.log(
+      `[EVCharging] V2G ${command.action} accepted by ${station.stationId} connector ${connectorId}: ${dischargeKw}kW until ${dispatch.validTo.toISOString()}`
+    );
+
+    return {
+      success: true,
+      message: `V2G ${command.action} accepted: ${dischargeKw}kW until ${dispatch.validTo.toISOString()}`,
+      assignmentId: dispatch.assignmentId,
+      dischargeKw,
+      validFrom: dispatch.validFrom,
+      validTo: dispatch.validTo,
+      fallbackPolicy: dispatch.fallbackPolicy,
+      delivery: dispatch.status,
+    };
+  }
+
+  /**
+   * The OCPP connector a session runs on, recorded by the protocol service when
+   * the transaction started. Null when the session did not come from OCPP.
+   */
+  private sessionConnectorId(session: SqlRow): number | null {
+    const raw = session.metadata;
+    if (typeof raw !== 'string' || raw.length === 0) return null;
+    try {
+      const parsed = JSON.parse(raw) as { connectorId?: unknown };
+      const connectorId = Number(parsed.connectorId);
+      return Number.isInteger(connectorId) && connectorId > 0 ? connectorId : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Session and station state, written only after the hardware confirmed. */
+  private async applyV2GState(
+    sessionRowId: number,
+    stationRowId: number,
+    sessionStatus: 'discharging' | 'paused',
+    stationStatus: 'discharging' | 'occupied',
+    metadata: Record<string, JsonSetValue>
+  ): Promise<void> {
+    const db = await getDb();
+    if (!db) throw new Error('Database not available');
 
     await db.execute<SqlRow>(sql`
       UPDATE charging_sessions SET
-        status = ${newStatus},
+        status = ${sessionStatus},
         session_type = 'v2g',
-        metadata = ${jsonSetText(sql`metadata`, {
-          v2gCommand: command.action,
-          v2gPowerKw: command.powerKw ?? null,
-          v2gStartTime: new Date().toISOString(),
-        })},
+        metadata = ${jsonSetText(sql`metadata`, metadata)},
         updated_at = NOW()
-      WHERE id = ${session.id}
+      WHERE id = ${sessionRowId}
     `);
 
-    // Update station status
     await db.execute<SqlRow>(sql`
       UPDATE charging_stations SET
-        status = ${command.action === 'start_discharge' ? 'discharging' : 'occupied'},
+        status = ${stationStatus},
         updated_at = NOW()
-      WHERE id = ${session.station_id}
+      WHERE id = ${stationRowId}
     `);
-
-    console.log(`[EVCharging] V2G ${command.action} dispatched to EV ${evId}`);
-
-    return { success: true, message: `V2G ${command.action} initiated` };
   }
 
   private mapRowToEV(row: any): ElectricVehicle {
@@ -845,14 +1046,14 @@ export class EVChargingService {
       make: row.make,
       model: row.model,
       year: row.year,
-      batteryCapacityKwh: row.battery_capacity_kwh,
-      usableBatteryKwh: row.usable_battery_kwh,
-      maxChargingPowerKw: row.max_charging_power_kw,
-      maxDischargingPowerKw: row.max_discharging_power_kw,
+      batteryCapacityKwh: unscale(row.battery_capacity_kwh, 10),
+      usableBatteryKwh: unscale(row.usable_battery_kwh, 10),
+      maxChargingPowerKw: unscale(row.max_charging_power_kw, 10),
+      maxDischargingPowerKw: unscale(row.max_discharging_power_kw, 10),
       v2gCapable: row.v2g_capable,
       v2hCapable: row.v2h_capable,
       bidirectionalProtocol: row.bidirectional_protocol,
-      currentSocPercent: row.current_soc_percent,
+      currentSocPercent: unscale(row.current_soc_percent, 100),
       lastKnownLocation: row.last_known_location,
       isPluggedIn: row.is_plugged_in,
       isCharging: row.is_charging,

@@ -174,6 +174,67 @@ describe('assignmentState', () => {
   });
 });
 
+describe('recordControlAssignment', () => {
+  /**
+   * Captures whether the insert retired the target's previous accepted control.
+   * A refused replacement must leave the predecessor live, or the setpoint the
+   * device is still executing drops out of the expiry sweep and never gets its
+   * fallback.
+   */
+  async function insertHarness() {
+    const state = { supersedes: 0 };
+    const tx = {
+      update: () => ({
+        set: () => ({
+          where: async () => {
+            state.supersedes += 1;
+          },
+        }),
+      }),
+      insert: () => ({
+        values: () => ({ returning: async () => [{ id: 99 }] }),
+      }),
+    };
+    vi.doMock('./db', () => ({
+      getDb: vi.fn(async () => ({
+        transaction: async (cb: (t: typeof tx) => Promise<number | null>) => cb(tx),
+      })),
+    }));
+    return state;
+  }
+
+  const assignment = {
+    protocol: 'ocpp16' as const,
+    targetRef: 'CP-1',
+    subTargetRef: 1,
+    source: 'v2g_schedule' as const,
+    window: { validFrom: NOW, validTo: at(900), seconds: 900 },
+    fallbackPolicy: 'safe_limit' as const,
+    fallbackLimitWatts: 1400,
+  };
+
+  afterEach(() => {
+    vi.doUnmock('./db');
+  });
+
+  it('retires the previous control only when the replacement was accepted', async () => {
+    const state = await insertHarness();
+    const { recordControlAssignment } = await import('./services/control-validity');
+    await expect(
+      recordControlAssignment({ ...assignment, delivery: 'accepted' })
+    ).resolves.toBe(99);
+    expect(state.supersedes).toBe(1);
+  });
+
+  it('leaves the live control in place when the charge point refused the replacement', async () => {
+    const state = await insertHarness();
+    const { recordControlAssignment } = await import('./services/control-validity');
+    await recordControlAssignment({ ...assignment, delivery: 'rejected' });
+    await recordControlAssignment({ ...assignment, delivery: 'unconfirmed' });
+    expect(state.supersedes).toBe(0);
+  });
+});
+
 describe('setChargingProfile', () => {
   beforeEach(() => {
     process.env.GRID_PROTOCOL_SERVICE_URL = 'http://127.0.0.1:9999';

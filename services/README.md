@@ -87,7 +87,7 @@ cd services/mqtt-fluvio-bridge
 go mod download
 
 # Build
-go build -o mqtt-fluvio-bridge ./cmd/main.go
+go build -o mqtt-fluvio-bridge ./cmd
 
 # Run
 ./mqtt-fluvio-bridge -config config/config.yaml
@@ -125,8 +125,19 @@ mqtt:
     - "vpp/telemetry/+"
   use_tls: true
 
+stream:
+  transport: "kafka"          # or "fluvio"
+  default_topic: "telemetry.raw"
+
+kafka:
+  brokers: ["localhost:9092"]
+  required_acks: "all"
+  topics:
+    "vpp/telemetry/+": "telemetry.raw"
+
 fluvio:
   endpoint: "localhost:9003"
+  cli_path: "fluvio"
   topics:
     "vpp/telemetry/+": "telemetry"
 
@@ -135,6 +146,21 @@ bridge:
   buffer_size: 1000
   enable_validation: true
 ```
+
+#### Stream transports
+
+The bridge publishes through one of two transports, selected by
+`stream.transport` (or the `STREAM_TRANSPORT` env var):
+
+| Transport | Client | Notes |
+| --- | --- | --- |
+| `kafka` | `segmentio/kafka-go` (pure Go) | Publishes to the same brokers/topics as the Node services (`server/integration/kafka-config.ts`). Writes are synchronous and acknowledged; `required_acks: none` is rejected. Supports TLS and SASL PLAIN/SCRAM. |
+| `fluvio` | the `fluvio` CLI | InfinyOn publishes no Go SDK, so records are produced via `fluvio produce`. The CLI must be installed in the runtime image and its active profile must match `fluvio.profile` (the CLI has no per-command profile flag). |
+
+Both transports fail loudly: an invalid transport or an unreachable/missing
+topic stops the bridge at startup, and a publish that is not acknowledged returns
+an error instead of being silently dropped. Set `create_missing_topics: true` to
+let the bridge create mapped topics itself.
 
 ### Python Consumers Configuration
 

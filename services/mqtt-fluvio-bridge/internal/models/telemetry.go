@@ -11,12 +11,12 @@ type TelemetryData struct {
 	DeviceID     string    `json:"device_id"`
 	AssetID      int       `json:"asset_id"`
 	Timestamp    time.Time `json:"timestamp"`
-	Power        float64   `json:"power"`         // W
-	Energy       float64   `json:"energy"`        // Wh
-	Voltage      float64   `json:"voltage"`       // V
-	Current      float64   `json:"current"`       // A
-	Frequency    float64   `json:"frequency"`     // Hz
-	PowerFactor  float64   `json:"power_factor"`  // 0-1
+	Power        float64   `json:"power"`                   // W
+	Energy       float64   `json:"energy"`                  // Wh
+	Voltage      float64   `json:"voltage"`                 // V
+	Current      float64   `json:"current"`                 // A
+	Frequency    float64   `json:"frequency"`               // Hz
+	PowerFactor  float64   `json:"power_factor"`            // 0-1
 	BatteryLevel *float64  `json:"battery_level,omitempty"` // % (optional)
 }
 

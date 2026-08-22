@@ -13,17 +13,24 @@ import (
 	mqtt_client "github.com/eclipse/paho.mqtt.golang"
 	"github.com/sirupsen/logrus"
 	"github.com/vpp/mqtt-fluvio-bridge/config"
-	"github.com/vpp/mqtt-fluvio-bridge/internal/fluvio"
 	"github.com/vpp/mqtt-fluvio-bridge/internal/models"
 	"github.com/vpp/mqtt-fluvio-bridge/internal/mqtt"
+	"github.com/vpp/mqtt-fluvio-bridge/internal/stream"
 )
+
+// message pairs telemetry with the MQTT topic it arrived on, which selects the
+// destination stream topic.
+type message struct {
+	sourceTopic string
+	telemetry   *models.TelemetryData
+}
 
 type Bridge struct {
 	mqtt      *mqtt.Client
-	fluvio    *fluvio.Producer
+	stream    stream.Producer
 	config    *config.Config
 	logger    *logrus.Logger
-	messageCh chan *models.TelemetryData
+	messageCh chan message
 	wg        sync.WaitGroup
 	ctx       context.Context
 	cancel    context.CancelFunc
@@ -83,19 +90,19 @@ func NewBridge(cfg *config.Config, logger *logrus.Logger) (*Bridge, error) {
 		return nil, fmt.Errorf("failed to create MQTT client: %w", err)
 	}
 
-	// Create Fluvio producer
-	fluvioProducer, err := fluvio.NewProducer(&cfg.Fluvio, logger)
+	// Create the stream producer for the configured transport
+	streamProducer, err := stream.NewProducer(cfg, logger)
 	if err != nil {
 		cancel()
-		return nil, fmt.Errorf("failed to create Fluvio producer: %w", err)
+		return nil, fmt.Errorf("failed to create %s producer: %w", cfg.Stream.Transport, err)
 	}
 
 	return &Bridge{
 		mqtt:      mqttClient,
-		fluvio:    fluvioProducer,
+		stream:    streamProducer,
 		config:    cfg,
 		logger:    logger,
-		messageCh: make(chan *models.TelemetryData, cfg.Bridge.BufferSize),
+		messageCh: make(chan message, cfg.Bridge.BufferSize),
 		ctx:       ctx,
 		cancel:    cancel,
 	}, nil
@@ -107,9 +114,9 @@ func (b *Bridge) Start() error {
 		return fmt.Errorf("failed to connect to MQTT: %w", err)
 	}
 
-	// Ensure Fluvio topics exist
-	if err := b.fluvio.EnsureTopics(b.ctx); err != nil {
-		return fmt.Errorf("failed to ensure Fluvio topics: %w", err)
+	// Ensure destination topics exist before accepting any telemetry
+	if err := b.stream.EnsureTopics(b.ctx, stream.TopicsFor(b.config)); err != nil {
+		return fmt.Errorf("failed to ensure %s topics: %w", b.config.Stream.Transport, err)
 	}
 
 	// Start worker pool
@@ -143,9 +150,9 @@ func (b *Bridge) Stop() {
 	// Disconnect MQTT
 	b.mqtt.Disconnect()
 
-	// Close Fluvio producer
-	if err := b.fluvio.Close(); err != nil {
-		b.logger.Errorf("Error closing Fluvio producer: %v", err)
+	// Close the stream producer
+	if err := b.stream.Close(); err != nil {
+		b.logger.Errorf("Error closing %s producer: %v", b.config.Stream.Transport, err)
 	}
 
 	b.logger.Info("Bridge stopped")
@@ -172,7 +179,7 @@ func (b *Bridge) createMessageHandler() mqtt_client.MessageHandler {
 
 		// Send to worker pool
 		select {
-		case b.messageCh <- telemetry:
+		case b.messageCh <- message{sourceTopic: msg.Topic(), telemetry: telemetry}:
 		case <-b.ctx.Done():
 			return
 		default:
@@ -192,40 +199,56 @@ func (b *Bridge) worker(id int) {
 			b.logger.Infof("Worker %d stopping", id)
 			return
 
-		case telemetry, ok := <-b.messageCh:
+		case msg, ok := <-b.messageCh:
 			if !ok {
 				b.logger.Infof("Worker %d: message channel closed", id)
 				return
 			}
 
-			if err := b.processTelemetry(telemetry); err != nil {
+			if err := b.processTelemetry(msg); err != nil {
 				b.logger.Errorf("Worker %d: failed to process telemetry: %v", id, err)
 			}
 		}
 	}
 }
 
-func (b *Bridge) processTelemetry(telemetry *models.TelemetryData) error {
-	// Determine Fluvio topic based on MQTT topic mapping
-	fluvioTopic := "telemetry" // Default topic
+func (b *Bridge) processTelemetry(msg message) error {
+	// Resolve the destination topic from the MQTT topic the record arrived on
+	topic := resolveTopic(b.config, msg.sourceTopic)
 
 	// Convert to JSON
-	payload, err := telemetry.ToJSON()
+	payload, err := msg.telemetry.ToJSON()
 	if err != nil {
 		return fmt.Errorf("failed to serialize telemetry: %w", err)
 	}
 
 	// Use device_id as partition key for ordered processing per device
-	key := telemetry.DeviceID
+	key := msg.telemetry.DeviceID
 
-	// Send to Fluvio with timeout
+	// Publish with timeout
 	ctx, cancel := context.WithTimeout(b.ctx, 5*time.Second)
 	defer cancel()
 
-	if err := b.fluvio.Send(ctx, fluvioTopic, key, payload); err != nil {
-		return fmt.Errorf("failed to send to Fluvio: %w", err)
+	if err := b.stream.Send(ctx, topic, key, payload); err != nil {
+		return fmt.Errorf("failed to publish to %s topic %s: %w", b.stream.Transport(), topic, err)
 	}
 
-	b.logger.Debugf("Processed telemetry from device %s", telemetry.DeviceID)
+	b.logger.Debugf("Published telemetry from device %s to %s topic %s",
+		msg.telemetry.DeviceID, b.stream.Transport(), topic)
 	return nil
+}
+
+// resolveTopic maps an MQTT topic to its configured stream topic, honouring MQTT
+// wildcards, and falls back to the configured default topic.
+func resolveTopic(cfg *config.Config, sourceTopic string) string {
+	mapping := cfg.StreamTopics()
+	if topic, ok := mapping[sourceTopic]; ok && topic != "" {
+		return topic
+	}
+	for pattern, topic := range mapping {
+		if topic != "" && mqtt.TopicMatches(pattern, sourceTopic) {
+			return topic
+		}
+	}
+	return cfg.Stream.DefaultTopic
 }

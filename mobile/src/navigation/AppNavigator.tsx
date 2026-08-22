@@ -35,6 +35,7 @@ import OrderBookScreen from '../screens/OrderBookScreen';
 import ControlWindowsScreen from '../screens/ControlWindowsScreen';
 import ForecastAccuracyScreen from '../screens/ForecastAccuracyScreen';
 import PriceSignalsScreen from '../screens/PriceSignalsScreen';
+import CommunityTelemetryScreen from '../screens/CommunityTelemetryScreen';
 
 const Stack = createNativeStackNavigator();
 const Tab = createBottomTabNavigator();
@@ -166,6 +167,7 @@ export default function AppNavigator() {
       <Stack.Screen name="ControlWindows" component={ControlWindowsScreen} />
       <Stack.Screen name="ForecastAccuracy" component={ForecastAccuracyScreen} />
       <Stack.Screen name="PriceSignals" component={PriceSignalsScreen} />
+      <Stack.Screen name="CommunityTelemetry" component={CommunityTelemetryScreen} />
           </>
         )}
       </Stack.Navigator>

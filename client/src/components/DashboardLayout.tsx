@@ -112,6 +112,7 @@ const getMenuSections = (userRole?: string): MenuSection[] => [
       { icon: Coins, label: "Price Signals", path: "/grid/price-signals" },
       ...(userRole === 'admin'
         ? [
+            { icon: Activity, label: "Fleet Telemetry", path: "/grid/fleet-telemetry" },
             { icon: ShieldAlert, label: "NTL Detection", path: "/grid/ntl" },
             { icon: FileCheck, label: "Compliance Reports", path: "/grid/compliance-reports" },
           ]

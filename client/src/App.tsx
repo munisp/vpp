@@ -61,6 +61,7 @@ import GridAnomalies from "@/pages/GridAnomalies";
 import ControlWindows from "@/pages/ControlWindows";
 import ForecastAccuracy from "@/pages/ForecastAccuracy";
 import PriceSignals from "@/pages/PriceSignals";
+import FleetTelemetry from "@/pages/FleetTelemetry";
 import V2G from "@/pages/V2G";
 import Wallet from "@/pages/Wallet";
 import CommunityPools from "@/pages/CommunityPools";
@@ -129,6 +130,7 @@ function Router() {
       <Route path="/grid/control-windows" component={ControlWindows} />
       <Route path="/grid/forecast-accuracy" component={ForecastAccuracy} />
       <Route path="/grid/price-signals" component={PriceSignals} />
+      <Route path="/grid/fleet-telemetry" component={FleetTelemetry} />
       <Route path="/grid/dr-forecast" component={DRForecast} />
       <Route path="/grid/ntl" component={NtlDashboard} />
       <Route path="/grid/compliance-reports" component={ComplianceReports} />

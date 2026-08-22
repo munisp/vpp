@@ -142,7 +142,7 @@ None of those can be honestly scored from code inspection alone.
 | 8 | No integration tests against a real MySQL/Redis/Kafka/Temporal stack; money paths are only unit-tested | Medium | Needs CI service containers |
 | 9 | Blockchain anchoring, optimization, edge orchestration and analytics services still contain simulation-grade logic (honest about it, but not production evidence) | Medium | Product decision on what must be real |
 | 10 | Operational gaps: secret management/rotation, alert routing (`performance-alerting` TODO), migration rollback story | Medium | Deployment work |
-| 11 | `services/mqtt-fluvio-bridge` has never compiled: it imports `github.com/infinyon/fluvio-client-go v0.14.0`, which does not exist (proxy.golang.org 404; GitHub prompts for credentials), and `internal/fluvio/producer.go` is written against an API of that phantom module | High | Needs a real streaming client (or removal); the telemetry→Fluvio path in this repo is source code that cannot run |
+| 11 | `services/mqtt-fluvio-bridge` publishes nothing: it was written against `github.com/infinyon/fluvio-client-go v0.14.0`, a module that does not exist (proxy.golang.org 404; GitHub prompts for credentials), so the service had never compiled. It now builds, but `internal/fluvio.Producer` returns `ErrNoClient` from every operation and the bridge refuses to start | High | There is no official Fluvio SDK for Go; a real transport (Fluvio connector/CLI, or the platform's Kafka topics) must be chosen and wired in |
 
 The Go orchestrator also did not compile before this PR (unused `context`/`fmt` imports, `dapr` `SaveState` arity,
 `workflow.RetryPolicy` / `workflow.NewApplicationError` which live in `go.temporal.io/sdk/temporal`), so its Temporal

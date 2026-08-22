@@ -32,6 +32,7 @@ import BatteryHealthScreen from '../screens/BatteryHealthScreen';
 import SolarYieldScreen from '../screens/SolarYieldScreen';
 import PriceAlertsScreen from '../screens/PriceAlertsScreen';
 import OrderBookScreen from '../screens/OrderBookScreen';
+import ControlWindowsScreen from '../screens/ControlWindowsScreen';
 
 const Stack = createNativeStackNavigator();
 const Tab = createBottomTabNavigator();
@@ -160,6 +161,7 @@ export default function AppNavigator() {
       <Stack.Screen name="SolarYield" component={SolarYieldScreen} />
       <Stack.Screen name="PriceAlerts" component={PriceAlertsScreen} />
       <Stack.Screen name="OrderBook" component={OrderBookScreen} />
+      <Stack.Screen name="ControlWindows" component={ControlWindowsScreen} />
           </>
         )}
       </Stack.Navigator>

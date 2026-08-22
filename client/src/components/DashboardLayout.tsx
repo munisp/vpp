@@ -43,6 +43,7 @@ import {
   CalendarClock,
   AlertTriangle,
   CloudSun,
+  SlidersHorizontal,
   ShieldAlert,
   FileCheck,
   Users,
@@ -102,6 +103,7 @@ const getMenuSections = (userRole?: string): MenuSection[] => [
   {
     label: "Grid Ops",
     items: [
+      { icon: SlidersHorizontal, label: "Control Windows", path: "/grid/control-windows" },
       { icon: AlertTriangle, label: "Anomalies", path: "/grid/anomalies" },
       { icon: CloudSun, label: "DR Forecast", path: "/grid/dr-forecast" },
       ...(userRole === 'admin'

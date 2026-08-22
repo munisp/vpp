@@ -273,6 +273,11 @@ export default function DashboardScreen({ navigation }: any) {
             onPress={() => navigation.navigate('PriceAlerts')}
           />
           <ActionButton
+            icon="🎛️"
+            label="Controls"
+            onPress={() => navigation.navigate('ControlWindows')}
+          />
+          <ActionButton
             icon="📖"
             label="Order Book"
             onPress={() => navigation.navigate('OrderBook')}

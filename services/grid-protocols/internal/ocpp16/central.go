@@ -44,7 +44,11 @@ type Options struct {
 	CallTimeout time.Duration
 	// ReadLimit caps inbound frame size.
 	ReadLimit int64
-	Logger    *logrus.Logger
+	// OnSessionOpen is called after a charge point session is registered. The
+	// control supervisor uses it to re-assert the safe fallback profile, because a
+	// charge point that rebooted may have dropped every profile it held.
+	OnSessionOpen func(chargePointID string)
+	Logger        *logrus.Logger
 }
 
 func (o Options) withDefaults() Options {
@@ -162,6 +166,11 @@ func (cs *CentralSystem) register(s *session) {
 	cs.sessions[s.chargePointID] = s
 	cs.mu.Unlock()
 	s.logger.Info("OCPP session opened")
+	if cs.opts.OnSessionOpen != nil {
+		// Asynchronous: the hook commands the charge point over this very session,
+		// which cannot be served until readLoop starts.
+		go cs.opts.OnSessionOpen(s.chargePointID)
+	}
 }
 
 func (cs *CentralSystem) unregister(s *session) {
@@ -209,6 +218,13 @@ func (cs *CentralSystem) RemoteStopTransaction(ctx context.Context, chargePointI
 // optimizer dispatch reaches EV chargers, including negative limits for V2G.
 func (cs *CentralSystem) SetChargingProfile(ctx context.Context, chargePointID string, req SetChargingProfileRequest) (StatusResponse, error) {
 	return callStatus(ctx, cs, chargePointID, ActionSetChargingProfile, req)
+}
+
+// ClearChargingProfile revokes previously installed profiles. `Unknown` means
+// the charge point holds no matching profile, which is a valid end state for a
+// revocation and is returned to the caller rather than treated as an error.
+func (cs *CentralSystem) ClearChargingProfile(ctx context.Context, chargePointID string, req ClearChargingProfileRequest) (StatusResponse, error) {
+	return callStatus(ctx, cs, chargePointID, ActionClearChargingProfile, req)
 }
 
 // TriggerMessage requests an unsolicited message (e.g. MeterValues) from the

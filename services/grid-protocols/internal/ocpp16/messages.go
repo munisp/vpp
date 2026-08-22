@@ -14,6 +14,7 @@ const (
 	ActionRemoteStartTransaction = "RemoteStartTransaction"
 	ActionRemoteStopTransaction  = "RemoteStopTransaction"
 	ActionSetChargingProfile     = "SetChargingProfile"
+	ActionClearChargingProfile   = "ClearChargingProfile"
 	ActionTriggerMessage         = "TriggerMessage"
 	ActionReset                  = "Reset"
 )
@@ -168,6 +169,16 @@ type ChargingProfile struct {
 type SetChargingProfileRequest struct {
 	ConnectorID        int             `json:"connectorId"`
 	CsChargingProfiles ChargingProfile `json:"csChargingProfiles"`
+}
+
+// ClearChargingProfileRequest revokes profiles. Every field is a filter; an
+// entirely empty request would clear every profile on the charge point, so
+// callers must supply at least one selector (enforced in internal/admin).
+type ClearChargingProfileRequest struct {
+	ID                     *int   `json:"id,omitempty"`
+	ConnectorID            *int   `json:"connectorId,omitempty"`
+	ChargingProfilePurpose string `json:"chargingProfilePurpose,omitempty"`
+	StackLevel             *int   `json:"stackLevel,omitempty"`
 }
 
 type StatusResponse struct {

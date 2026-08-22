@@ -17,6 +17,7 @@ type Config struct {
 	Listen   string         `yaml:"listen"`
 	Platform PlatformConfig `yaml:"platform"`
 	OCPP     OCPPConfig     `yaml:"ocpp"`
+	Control  ControlConfig  `yaml:"control"`
 	OpenADR  OpenADRConfig  `yaml:"openadr"`
 	SEP2     SEP2Config     `yaml:"sep2"`
 	LogLevel string         `yaml:"log_level"`
@@ -36,6 +37,15 @@ type OCPPConfig struct {
 	ChargePoints      map[string]string `yaml:"charge_points"`
 	HeartbeatInterval time.Duration     `yaml:"heartbeat_interval"`
 	CallTimeout       time.Duration     `yaml:"call_timeout"`
+}
+
+// ControlConfig bounds how long a dispatched setpoint may apply and how often
+// closed windows are swept. These are safety limits, not tuning knobs: a long
+// max_validity is how a charge point ends up holding a stale setpoint through an
+// outage.
+type ControlConfig struct {
+	MaxValidity   time.Duration `yaml:"max_validity"`
+	SweepInterval time.Duration `yaml:"sweep_interval"`
 }
 
 type OpenADRConfig struct {
@@ -146,6 +156,19 @@ func (c *Config) Validate() error {
 		if c.OCPP.CallTimeout <= 0 {
 			c.OCPP.CallTimeout = 30 * time.Second
 		}
+	}
+
+	if c.Control.MaxValidity <= 0 {
+		c.Control.MaxValidity = time.Hour
+	}
+	if c.Control.MaxValidity > 24*time.Hour {
+		return fmt.Errorf("control.max_validity %s exceeds 24h: a setpoint nobody refreshes for a day is not a control window", c.Control.MaxValidity)
+	}
+	if c.Control.SweepInterval <= 0 {
+		c.Control.SweepInterval = 30 * time.Second
+	}
+	if c.Control.SweepInterval >= c.Control.MaxValidity {
+		return fmt.Errorf("control.sweep_interval %s must be shorter than control.max_validity %s", c.Control.SweepInterval, c.Control.MaxValidity)
 	}
 
 	if c.OpenADR.Enabled {

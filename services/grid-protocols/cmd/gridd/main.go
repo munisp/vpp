@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 
 	"github.com/vpp/grid-protocols/config"
 	"github.com/vpp/grid-protocols/internal/admin"
+	"github.com/vpp/grid-protocols/internal/control"
 	"github.com/vpp/grid-protocols/internal/ocpp16"
 	"github.com/vpp/grid-protocols/internal/openadr"
 	"github.com/vpp/grid-protocols/internal/platform"
@@ -64,26 +66,52 @@ func run(configPath string, logger *logrus.Logger) error {
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	})
 
+	errs := make(chan error, 3)
+
 	if cfg.OCPP.Enabled {
+		// The supervisor needs the central system and the central system needs the
+		// supervisor's session hook. The hook is published atomically because charge
+		// point sessions are handled on other goroutines: a reconnect that races
+		// startup finds no supervisor yet rather than a torn pointer, and the sweep
+		// re-asserts its fallback on the next pass.
+		var supervisorRef atomic.Pointer[control.Supervisor]
 		central, err := ocpp16.NewCentralSystem(client, ocpp16.Options{
 			Authenticate:      basicAuthenticator(cfg.OCPP.ChargePoints),
 			HeartbeatInterval: cfg.OCPP.HeartbeatInterval,
 			CallTimeout:       cfg.OCPP.CallTimeout,
-			Logger:            logger,
+			OnSessionOpen: func(chargePointID string) {
+				if s := supervisorRef.Load(); s != nil {
+					s.OnSessionOpen(chargePointID)
+				}
+			},
+			Logger: logger,
 		})
 		if err != nil {
 			return err
 		}
-		commands, err := admin.New(central, cfg.Platform.SharedSecret)
+		supervisor, err := control.New(central, control.Options{
+			MaxValidity:    cfg.Control.MaxValidity,
+			SweepInterval:  cfg.Control.SweepInterval,
+			CommandTimeout: cfg.OCPP.CallTimeout,
+			Logger:         logger,
+		})
+		if err != nil {
+			return err
+		}
+		supervisorRef.Store(supervisor)
+		commands, err := admin.New(central, cfg.Platform.SharedSecret, supervisor)
 		if err != nil {
 			return err
 		}
 		mux.Handle("/ocpp/", central)
 		commands.Routes(mux)
-		logger.WithField("charge_points", len(cfg.OCPP.ChargePoints)).Info("OCPP 1.6J central system enabled")
+		go supervisor.Run(ctx)
+		logger.WithFields(logrus.Fields{
+			"charge_points":  len(cfg.OCPP.ChargePoints),
+			"max_validity":   cfg.Control.MaxValidity,
+			"sweep_interval": cfg.Control.SweepInterval,
+		}).Info("OCPP 1.6J central system enabled with bounded control windows")
 	}
-
-	errs := make(chan error, 2)
 
 	if cfg.OpenADR.Enabled {
 		ven, err := openadr.NewVEN(openadr.Config{

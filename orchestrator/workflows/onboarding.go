@@ -2,6 +2,7 @@ package workflows
 
 import (
 "time"
+"go.temporal.io/sdk/temporal"
 "go.temporal.io/sdk/workflow"
 )
 
@@ -12,7 +13,7 @@ logger.Info("Starting user onboarding workflow", "userID", userID)
 
 ao := workflow.ActivityOptions{
 StartToCloseTimeout: 10 * time.Minute,
-RetryPolicy: &workflow.RetryPolicy{
+RetryPolicy: &temporal.RetryPolicy{
 MaximumAttempts: 3,
 },
 }

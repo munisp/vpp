@@ -5,6 +5,7 @@ import {
   PaymentStatusResponse,
   PaymentCallbackData,
 } from './base';
+import { toGatewayMajorUnits } from '../_core/paymentGateway';
 
 interface MpesaCredentials {
   consumerKey: string;
@@ -97,7 +98,7 @@ export class MpesaGateway extends BasePaymentGateway {
       Password: password,
       Timestamp: timestamp,
       TransactionType: 'CustomerPayBillOnline',
-      Amount: Math.round(request.amount / 100), // Convert cents to shillings
+      Amount: toGatewayMajorUnits(request.amount),
       PartyA: phone,
       PartyB: this.creds.shortcode,
       PhoneNumber: phone,

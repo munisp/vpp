@@ -16,6 +16,7 @@ import { initScheduledReportJobs } from "./scheduledReports";
 import { handleMpesaCallback, handleAirtelCallback, handleTigoCallback } from "../webhooks/payment-callbacks";
 import { verifyWebhookSignature } from "../webhooks/verify-signature";
 import { smsInboundRouter } from "../webhooks/sms-inbound";
+import { gridProtocolRouter } from "../webhooks/grid-protocols";
 import { webSocketService } from "../integration/websocket-service";
 
 function isPortAvailable(port: number): Promise<boolean> {
@@ -54,6 +55,9 @@ async function startServer() {
   app.use(helmet({ contentSecurityPolicy: false }));
 
   // Global rate limit: 300 requests per 15 minutes per IP.
+  // /api/grid is excluded and limited separately: it carries machine traffic
+  // (charge point heartbeats, meter values, Modbus polls) from a small number
+  // of protocol services, and every request is HMAC-authenticated.
   const globalLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
     limit: 300,
@@ -61,7 +65,18 @@ async function startServer() {
     legacyHeaders: false,
     message: { error: "RATE_LIMITED", message: "Too many requests, please try again later." },
   });
-  app.use("/api", globalLimiter);
+  app.use("/api", (req, res, next) =>
+    req.path.startsWith("/grid/") ? next() : globalLimiter(req, res, next)
+  );
+
+  const gridLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    limit: 6000,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: "RATE_LIMITED", message: "Too many grid protocol requests." },
+  });
+  app.use("/api/grid", gridLimiter);
 
   // Stricter limit for payment webhooks and payment tRPC procedures:
   // 30 requests per 15 minutes per IP. For webhooks it is chained after
@@ -118,6 +133,10 @@ async function startServer() {
   // Africa's Talking inbound SMS (feature-phone command channel). The AT
   // callback is authenticated by the shared AT webhook secret when configured.
   app.use("/api/webhooks/sms/inbound", verifyWebhookSignature("africas_talking"), smsInboundRouter);
+  // Grid protocol ingest (OCPP 1.6J, OpenADR 2.0b, IEEE 2030.5, Modbus).
+  // Each route verifies its own HMAC signature over the raw body captured by
+  // the JSON body parser above.
+  app.use("/api/grid", gridProtocolRouter);
   // tRPC API
   app.use(
     "/api/trpc",

@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { router, protectedProcedure } from '../_core/trpc';
 import { TRPCError } from '@trpc/server';
 import * as db from '../db';
+import { authenticateDeviceForAsset } from '../_core/deviceAuth';
 
 const InsertTelemetryInputSchema = z.object({
   assetId: z.number().int().positive(),
@@ -26,6 +27,11 @@ const GetHistoricalInputSchema = z.object({
 });
 
 export const telemetryRouter = router({
+  /**
+   * Ingest a measurement. Telemetry is a settlement input, so the caller must
+   * present the credential of a device registered to the asset; an asset owner
+   * cannot self-report the energy they are paid for.
+   */
   insert: protectedProcedure
     .input(InsertTelemetryInputSchema)
     .mutation(async ({ ctx, input }) => {
@@ -36,6 +42,14 @@ export const telemetryRouter = router({
           throw new TRPCError({
             code: 'NOT_FOUND',
             message: 'Asset not found.',
+          });
+        }
+
+        const deviceAuth = await authenticateDeviceForAsset(ctx.req, input.assetId);
+        if (!deviceAuth.ok) {
+          throw new TRPCError({
+            code: 'FORBIDDEN',
+            message: deviceAuth.reason,
           });
         }
 

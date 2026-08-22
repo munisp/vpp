@@ -4,9 +4,10 @@ import { TRPCError } from "@trpc/server";
 import { PaymentGatewayManager } from "../payment-gateways";
 import { getDb } from "../db";
 import { payments, billings } from "../../drizzle/schema";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { kafkaPublisher } from "../integration/kafka-publisher";
 import { temporalClient } from "../integration/temporal-client";
+import { resolveGatewayEnvironment } from "../payment-gateways/environment";
 
 /**
  * Payment Processing Router
@@ -22,7 +23,6 @@ export const paymentProcessingRouter = router({
         invoiceId: z.number().int().positive(),
         gateway: z.enum(["mpesa", "airtel_money", "tigo_pesa"]),
         phoneNumber: z.string().min(10, "Invalid phone number"),
-        environment: z.enum(["sandbox", "production"]).optional().default("sandbox"),
       })
     )
     .mutation(async ({ ctx, input }) => {
@@ -69,7 +69,7 @@ export const paymentProcessingRouter = router({
               invoiceId: inv.id,
             },
           },
-          input.environment
+          resolveGatewayEnvironment()
         );
 
         if (!response.success) {
@@ -147,7 +147,6 @@ export const paymentProcessingRouter = router({
     .input(
       z.object({
         paymentId: z.number().int().positive(),
-        environment: z.enum(["sandbox", "production"]).optional().default("sandbox"),
       })
     )
     .query(async ({ ctx, input }) => {
@@ -185,30 +184,48 @@ export const paymentProcessingRouter = router({
         const response = await PaymentGatewayManager.queryPaymentStatus(
           pmt.paymentMethod as "mpesa" | "airtel_money" | "tigo_pesa",
           checkoutRequestId,
-          input.environment
+          resolveGatewayEnvironment()
         );
 
-        // Update payment status if completed
-        if (response.status === "completed" && pmt.status !== "completed") {
-          await db
-            .update(payments)
-            .set({
-              status: "completed",
-            })
-            .where(eq(payments.id, pmt.id));
+        // A gateway-reported amount that disagrees with the recorded amount is
+        // a discrepancy for reconciliation, not a settled payment.
+        if (
+          response.status === "completed" &&
+          typeof response.amount === "number" &&
+          Math.round(response.amount * 100) !== pmt.amount
+        ) {
+          console.error(
+            `[Payment] Amount mismatch on payment ${pmt.id}: gateway ${response.amount} vs recorded ${pmt.amount} cents`
+          );
+          return {
+            success: false,
+            status: "discrepancy" as const,
+            message:
+              "Gateway reported a different amount than the recorded payment; held for reconciliation.",
+            transactionId: response.transactionId,
+          };
+        }
 
-          // Update billing status
-          if (pmt.billingId) {
+        // Status transitions are conditional on the payment still being
+        // pending so a concurrent callback cannot be applied twice.
+        if (response.status === "completed") {
+          const settled = await db
+            .update(payments)
+            .set({ status: "completed" })
+            .where(and(eq(payments.id, pmt.id), eq(payments.status, "pending")));
+
+          // Only the transition that actually happened settles the invoice.
+          if (Number(settled[0].affectedRows) > 0 && pmt.billingId) {
             await db
               .update(billings)
-              .set({ status: "paid" })
+              .set({ status: "paid", paidAt: new Date(), transactionId: pmt.transactionId })
               .where(eq(billings.id, pmt.billingId));
           }
-        } else if (response.status === "failed" && pmt.status !== "failed") {
+        } else if (response.status === "failed") {
           await db
             .update(payments)
             .set({ status: "failed" })
-            .where(eq(payments.id, pmt.id));
+            .where(and(eq(payments.id, pmt.id), eq(payments.status, "pending")));
         }
 
         return {

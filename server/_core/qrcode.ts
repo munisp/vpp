@@ -21,6 +21,50 @@ export interface QRPaymentData {
   reference?: string;
   description?: string;
   expiresAt?: Date;
+  /** User the QR code was issued to; the signature only attests this issuer. */
+  issuedByUserId?: number;
+}
+
+/** Signed envelope actually encoded in the QR image. */
+interface SignedQRPayload {
+  v: 1;
+  data: QRPaymentData;
+  signature: string;
+}
+
+/**
+ * HMAC key for QR payloads. Absence is fatal: an unsigned payment QR code is
+ * fully attacker-controllable (amount, recipient, bill), so there is no safe
+ * fallback to emit or accept one.
+ */
+function getQRSigningSecret(): string {
+  const secret = process.env.QR_SIGNING_SECRET;
+  if (!secret || secret.length < 32) {
+    throw new Error(
+      "QR_SIGNING_SECRET must be set to at least 32 characters to sign and verify payment QR codes"
+    );
+  }
+  return secret;
+}
+
+function canonicalize(data: QRPaymentData): string {
+  const normalized: Record<string, unknown> = {
+    ...data,
+    expiresAt: data.expiresAt ? new Date(data.expiresAt).toISOString() : undefined,
+  };
+  const keys = Object.keys(normalized)
+    .filter((key) => normalized[key] !== undefined)
+    .sort();
+  return JSON.stringify(keys.map((key) => [key, normalized[key]]));
+}
+
+function signPaymentData(data: QRPaymentData): string {
+  return crypto.createHmac("sha256", getQRSigningSecret()).update(canonicalize(data)).digest("hex");
+}
+
+function buildSignedPayload(data: QRPaymentData): string {
+  const payload: SignedQRPayload = { v: 1, data, signature: signPaymentData(data) };
+  return JSON.stringify(payload);
 }
 
 export interface QRCodeOptions {
@@ -52,8 +96,7 @@ export async function generatePaymentQRCode(
       expiresAt: paymentData.expiresAt || new Date(Date.now() + 15 * 60 * 1000), // 15 minutes default
     };
 
-    // Encode payment data as JSON
-    const payload = JSON.stringify(data);
+    const payload = buildSignedPayload(data);
 
     // Generate QR code with options
     const qrOptions = {
@@ -96,7 +139,7 @@ export async function generatePaymentQRCodeBuffer(
       expiresAt: paymentData.expiresAt || new Date(Date.now() + 15 * 60 * 1000),
     };
 
-    const payload = JSON.stringify(data);
+    const payload = buildSignedPayload(data);
 
     const qrOptions = {
       errorCorrectionLevel: options.errorCorrectionLevel || "M",
@@ -125,7 +168,19 @@ export async function generatePaymentQRCodeBuffer(
  */
 export function parsePaymentQRCode(qrData: string): QRPaymentData {
   try {
-    const data = JSON.parse(qrData) as QRPaymentData;
+    const envelope = JSON.parse(qrData) as Partial<SignedQRPayload>;
+
+    if (envelope?.v !== 1 || !envelope.data || typeof envelope.signature !== "string") {
+      throw new Error("Invalid QR code: not a signed payment payload");
+    }
+
+    const data = envelope.data;
+    const expected = Buffer.from(signPaymentData(data), "hex");
+    const provided = Buffer.from(envelope.signature, "hex");
+
+    if (expected.length !== provided.length || !crypto.timingSafeEqual(expected, provided)) {
+      throw new Error("Invalid QR code: signature verification failed");
+    }
 
     // Validate required fields
     if (!data.type || !data.amount || !data.currency) {

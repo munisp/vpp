@@ -5,6 +5,7 @@ import {
   PaymentStatusResponse,
   PaymentCallbackData,
 } from './base';
+import { toGatewayMajorUnits } from '../_core/paymentGateway';
 
 interface AirtelCredentials {
   clientId: string;
@@ -89,7 +90,7 @@ export class AirtelMoneyGateway extends BasePaymentGateway {
         msisdn: phone,
       },
       transaction: {
-        amount: Math.round(request.amount / 100), // Convert cents to shillings
+        amount: toGatewayMajorUnits(request.amount),
         country: 'TZ',
         currency: 'TZS',
         id: transactionId,

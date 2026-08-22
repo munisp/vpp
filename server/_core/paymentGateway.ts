@@ -69,6 +69,26 @@ function requireTigoConfig(): void {
   }
 }
 
+/**
+ * Convert an internal cents amount to the major currency unit the mobile-money
+ * APIs charge in. TZS/NGN mobile money has no sub-unit, so a fractional amount
+ * cannot be charged exactly: rounding it would debit the customer a different
+ * amount than the one recorded in `payments.amount` and would surface later as
+ * a reconciliation discrepancy. Such amounts are rejected instead.
+ */
+export function toGatewayMajorUnits(amountCents: number): number {
+  if (!Number.isInteger(amountCents) || amountCents <= 0) {
+    throw new Error(`GATEWAY_AMOUNT_INVALID: ${amountCents} is not a positive integer amount in cents`);
+  }
+  if (amountCents % 100 !== 0) {
+    throw new Error(
+      `GATEWAY_AMOUNT_NOT_REPRESENTABLE: ${amountCents} cents cannot be charged exactly; ` +
+        'mobile money settles in whole currency units'
+    );
+  }
+  return amountCents / 100;
+}
+
 /** M-Pesa Daraja timestamp format: YYYYMMDDHHmmss */
 function mpesaTimestamp(date: Date = new Date()): string {
   const pad = (n: number) => String(n).padStart(2, '0');
@@ -124,7 +144,7 @@ export async function initiateMpesaPayment(request: PaymentRequest): Promise<Pay
         Password: password,
         Timestamp: timestamp,
         TransactionType: 'CustomerPayBillOnline',
-        Amount: Math.max(1, Math.round(request.amount / 100)),
+        Amount: toGatewayMajorUnits(request.amount),
         PartyA: request.phoneNumber,
         PartyB: MPESA_SHORTCODE,
         PhoneNumber: request.phoneNumber,
@@ -180,7 +200,7 @@ export async function initiateAirtelPayment(request: PaymentRequest): Promise<Pa
           msisdn: request.phoneNumber.replace(/^\+/, ''),
         },
         transaction: {
-          amount: Math.round(request.amount / 100),
+          amount: toGatewayMajorUnits(request.amount),
           country: AIRTEL_COUNTRY,
           currency: AIRTEL_CURRENCY,
           id: request.accountReference,
@@ -234,7 +254,7 @@ export async function initiateTigoPesaPayment(request: PaymentRequest): Promise<
       {
         MerchantCode: TIGO_MERCHANT_CODE,
         MerchantReference: request.accountReference,
-        Amount: Math.round(request.amount / 100),
+        Amount: toGatewayMajorUnits(request.amount),
         Currency: 'TZS',
         CustomerMSISDN: request.phoneNumber.replace(/^\+/, ''),
         Description: request.description,
@@ -249,9 +269,26 @@ export async function initiateTigoPesaPayment(request: PaymentRequest): Promise<
     );
 
     const data = paymentResponse.data;
+
+    // A 2xx response is not an accepted payment: Tigo reports rejection in the
+    // body. Only an explicit accepted/success status counts as initiated.
+    const status = String(data?.Status || data?.status || '').toUpperCase();
+    const transactionId = data?.TransactionID || data?.transactionId || data?.id;
+    const accepted =
+      ['SUCCESS', 'COMPLETED', 'PENDING', 'ACCEPTED', 'INITIATED'].includes(status) ||
+      (status === '' && Boolean(transactionId));
+
+    if (!accepted || !transactionId) {
+      return {
+        success: false,
+        message: data?.Message || data?.message || 'Tigo Pesa rejected the payment request',
+        error: data?.Message || data?.message || `Unexpected Tigo Pesa status: ${status || 'none'}`,
+      };
+    }
+
     return {
       success: true,
-      transactionId: data?.TransactionID || data?.transactionId || data?.id,
+      transactionId,
       message: data?.Message || 'Payment initiated successfully',
     };
   } catch (error: any) {

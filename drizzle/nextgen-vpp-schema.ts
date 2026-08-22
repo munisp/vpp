@@ -312,8 +312,10 @@ export const settlementEvents = mysqlTable("settlement_events", {
   
   // Hash chain for tamper evidence
   eventHash: varchar("event_hash", { length: 64 }).notNull().unique(), // SHA-256
-  previousHash: varchar("previous_hash", { length: 64 }).notNull(),
-  sequenceNumber: bigint("sequence_number", { mode: "number" }).notNull(),
+  // Unique: two concurrent writers must not both claim the same slot, which
+  // would fork the hash chain into two branches that each verify in isolation.
+  previousHash: varchar("previous_hash", { length: 64 }).notNull().unique(),
+  sequenceNumber: bigint("sequence_number", { mode: "number" }).notNull().unique(),
   
   // Event identification
   eventType: mysqlEnum("event_type", [

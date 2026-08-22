@@ -1,0 +1,48 @@
+# Example configuration for the grid protocol service (cmd/gridd).
+#
+# Every protocol is opt-in and each enabled protocol must be fully configured;
+# the service refuses to start otherwise rather than reporting a connection it
+# cannot make. Secrets belong in the environment (see the override names in
+# config/config.go), not in a committed file.
+
+listen: ":9100"
+log_level: "info"
+
+platform:
+  # The VPP server. Protocol messages are POSTed to /api/grid/* with an
+  # HMAC-SHA256 signature over "<unix timestamp>.<body>".
+  base_url: "http://vpp-server:3000"
+  shared_secret: "" # GRID_PROTOCOL_SHARED_SECRET, >= 32 characters
+  timeout: 15s
+
+ocpp:
+  enabled: true
+  # OCPP 1.6 security profile 1: HTTP basic auth over TLS. An empty map means
+  # no charge point can connect, which is the safe default.
+  charge_points:
+    CP-0001: "" # >= 16 characters
+  heartbeat_interval: 300s
+  call_timeout: 30s
+
+openadr:
+  enabled: false
+  vtn_base_url: "https://vtn.utility.example/OpenADR2/Simple/2.0b"
+  ven_name: "vpp-ven"
+  ven_id: "" # assigned by the VTN at registration
+  registration_id: "" # assigned by the VTN at registration
+  username: ""
+  password: ""
+  client_cert_file: ""
+  client_key_file: ""
+  ca_file: ""
+  poll_interval: 60s
+
+sep2:
+  enabled: false
+  # IEEE 2030.5 requires HTTPS with a client certificate; the LFDI is derived
+  # from the SHA-256 of the DER certificate.
+  base_url: "https://sep2.utility.example"
+  client_cert_file: "/etc/vpp/sep2-client.pem"
+  client_key_file: "/etc/vpp/sep2-client.key"
+  ca_file: "/etc/vpp/sep2-ca.pem"
+  poll_interval: 300s

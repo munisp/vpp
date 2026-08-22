@@ -1,5 +1,5 @@
 # Build stage
-FROM golang:1.21-alpine AS builder
+FROM golang:1.22-alpine AS builder
 
 WORKDIR /app
 
@@ -14,11 +14,14 @@ RUN go mod download
 COPY . .
 
 # Build binary
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o mqtt-fluvio-bridge ./cmd/main.go
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o mqtt-fluvio-bridge ./cmd
 
 # Runtime stage
 FROM alpine:latest
 
+# The fluvio transport shells out to the `fluvio` CLI (there is no Go SDK), so
+# that binary must be present in this image when stream.transport=fluvio.
+# The kafka transport needs nothing beyond the CA bundle.
 RUN apk --no-cache add ca-certificates
 
 WORKDIR /root/

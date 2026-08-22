@@ -2,6 +2,7 @@ package workflows
 
 import (
 "time"
+"go.temporal.io/sdk/temporal"
 "go.temporal.io/sdk/workflow"
 )
 
@@ -12,7 +13,7 @@ logger.Info("Starting auto-trading workflow", "userID", userID, "assetID", asset
 
 ao := workflow.ActivityOptions{
 StartToCloseTimeout: 5 * time.Minute,
-RetryPolicy: &workflow.RetryPolicy{
+RetryPolicy: &temporal.RetryPolicy{
 MaximumAttempts: 3,
 },
 }
@@ -141,7 +142,7 @@ return err
 // Validate sufficient balance
 totalCost := amount * offer["price"].(float64)
 if balance < totalCost {
-return workflow.NewApplicationError("Insufficient balance", "INSUFFICIENT_BALANCE", nil)
+return temporal.NewApplicationError("Insufficient balance", "INSUFFICIENT_BALANCE", nil)
 }
 
 // Create buy order
@@ -188,14 +189,14 @@ ctx = workflow.WithActivityOptions(ctx, ao)
 var available float64
 err := workflow.ExecuteActivity(ctx, "VerifyEnergyAvailableActivity", sellerID, amount).Get(ctx, &available)
 if err != nil || available < amount {
-return workflow.NewApplicationError("Insufficient energy", "INSUFFICIENT_ENERGY", nil)
+return temporal.NewApplicationError("Insufficient energy", "INSUFFICIENT_ENERGY", nil)
 }
 
 // Verify buyer has sufficient balance
 var balance float64
 err = workflow.ExecuteActivity(ctx, "GetWalletBalanceActivity", buyerID).Get(ctx, &balance)
 if err != nil || balance < (amount * price) {
-return workflow.NewApplicationError("Insufficient balance", "INSUFFICIENT_BALANCE", nil)
+return temporal.NewApplicationError("Insufficient balance", "INSUFFICIENT_BALANCE", nil)
 }
 
 // Create P2P trade agreement

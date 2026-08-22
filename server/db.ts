@@ -298,14 +298,29 @@ export async function getUserTrades(userId: number, limit: number = 50): Promise
     .limit(limit);
 }
 
+/**
+ * Transition a trade to a new status. When `expectedCurrentStatus` is given the
+ * update only applies to a trade still in that status, so concurrent callers
+ * cannot both observe the transition. Returns true when this call performed it.
+ */
 export async function updateTradeStatus(
   id: number,
-  status: "pending" | "executed" | "cancelled" | "failed"
-): Promise<void> {
+  status: "pending" | "executed" | "cancelled" | "failed",
+  expectedCurrentStatus?: "pending" | "executed" | "cancelled" | "failed"
+): Promise<boolean> {
   const db = await getDb();
-  if (!db) return;
+  if (!db) throw new Error("Database not available");
 
-  await db.update(trades).set({ status }).where(eq(trades.id, id));
+  const result = await db
+    .update(trades)
+    .set({ status })
+    .where(
+      expectedCurrentStatus
+        ? and(eq(trades.id, id), eq(trades.status, expectedCurrentStatus))
+        : eq(trades.id, id)
+    );
+
+  return Number(result[0].affectedRows) > 0;
 }
 
 // ============= Market Price Functions =============
@@ -383,7 +398,7 @@ export async function updateBillingStatus(
   transactionId?: string
 ): Promise<void> {
   const db = await getDb();
-  if (!db) return;
+  if (!db) throw new Error("Database not available");
 
   const updates: Partial<InsertBilling> = { status };
   if (paidAt) updates.paidAt = paidAt;
@@ -414,18 +429,55 @@ export async function getPaymentById(id: number): Promise<Payment | undefined> {
   return result.length > 0 ? result[0] : undefined;
 }
 
+/**
+ * Merge keys into a payment's JSON metadata, preserving anything already there.
+ */
+export async function updatePaymentMetadata(
+  id: number,
+  patch: Record<string, unknown>
+): Promise<void> {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+
+  const existing = await getPaymentById(id);
+  if (!existing) throw new Error(`Payment ${id} not found`);
+
+  const current = existing.metadata ? JSON.parse(existing.metadata) : {};
+
+  await db
+    .update(payments)
+    .set({ metadata: JSON.stringify({ ...current, ...patch }) })
+    .where(eq(payments.id, id));
+}
+
+/**
+ * Transition a payment to a new status. When `expectedCurrentStatus` is given
+ * the update only applies while the payment is still in that status, which
+ * makes repeated verifications and duplicate gateway callbacks idempotent.
+ * Returns true when this call performed the transition.
+ */
 export async function updatePaymentStatus(
   id: number,
   status: "pending" | "completed" | "failed" | "refunded",
-  transactionId?: string
-): Promise<void> {
+  transactionId?: string,
+  expectedCurrentStatus?: "pending" | "completed" | "failed" | "refunded"
+): Promise<boolean> {
   const db = await getDb();
-  if (!db) return;
+  if (!db) throw new Error("Database not available");
 
   const updates: Partial<InsertPayment> = { status };
   if (transactionId) updates.transactionId = transactionId;
 
-  await db.update(payments).set(updates).where(eq(payments.id, id));
+  const result = await db
+    .update(payments)
+    .set(updates)
+    .where(
+      expectedCurrentStatus
+        ? and(eq(payments.id, id), eq(payments.status, expectedCurrentStatus))
+        : eq(payments.id, id)
+    );
+
+  return Number(result[0].affectedRows) > 0;
 }
 
 // ============= Token Functions =============
@@ -446,6 +498,22 @@ export async function getTokenById(id: number): Promise<Token | undefined> {
   if (!db) return undefined;
 
   const result = await db.select().from(tokens).where(eq(tokens.id, id)).limit(1);
+  return result.length > 0 ? result[0] : undefined;
+}
+
+/**
+ * Token already issued for a payment, if any. Used to keep token issuance
+ * idempotent across retried verifications and duplicate gateway callbacks.
+ */
+export async function getTokenByPaymentId(paymentId: number): Promise<Token | undefined> {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+
+  const result = await db
+    .select()
+    .from(tokens)
+    .where(eq(tokens.paymentId, paymentId))
+    .limit(1);
   return result.length > 0 ? result[0] : undefined;
 }
 
@@ -492,14 +560,14 @@ export async function getUserAlerts(userId: number, limit: number = 50): Promise
 
 export async function markAlertAsRead(id: number): Promise<void> {
   const db = await getDb();
-  if (!db) return;
+  if (!db) throw new Error("Database not available");
 
   await db.update(alerts).set({ isRead: true, readAt: new Date() }).where(eq(alerts.id, id));
 }
 
 export async function deleteAlert(id: number): Promise<void> {
   const db = await getDb();
-  if (!db) return;
+  if (!db) throw new Error("Database not available");
 
   await db.delete(alerts).where(eq(alerts.id, id));
 }

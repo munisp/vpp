@@ -6,15 +6,15 @@
  */
 
 import { Request, Response } from 'express';
-import { randomBytes } from 'crypto';
 import { PaymentGatewayManager } from '../payment-gateways';
 import { getDb } from '../db';
 import { payments, billings, paymentGatewayLogs, tokens, users } from '../../drizzle/schema';
 import { eq, and } from 'drizzle-orm';
 import { sendPushNotification } from '../_core/sendNotification';
+import { resolveGatewayEnvironment } from '../payment-gateways/environment';
 
-// Environment configuration - derive from single authoritative env var
-const PAYMENTS_ENV = (process.env.PAYMENTS_ENV || 'sandbox') as 'sandbox' | 'production';
+// Environment configuration - single authoritative source, never a request value
+const PAYMENTS_ENV = resolveGatewayEnvironment();
 
 /**
  * Log gateway event for audit trail and debugging
@@ -183,7 +183,8 @@ async function updatePaymentFromCallback(
 
   const pmt = payment[0];
   const previousStatus = pmt.status;
-  const newStatus = callbackData.status === 'completed' ? 'completed' : 'failed';
+  let newStatus: 'completed' | 'failed' =
+    callbackData.status === 'completed' ? 'completed' : 'failed';
 
   // IDEMPOTENCY CHECK: Only process if status is transitioning from pending
   // Prevent duplicate processing of callbacks
@@ -192,8 +193,35 @@ async function updatePaymentFromCallback(
     return false;
   }
 
-  // Update payment status atomically
-  await db
+  // The callback amount is authoritative for how much the customer was
+  // debited. If it does not match the amount owed, the payment is NOT settled:
+  // completing it would credit an invoice or a token that was not paid for.
+  const callbackAmountCents =
+    typeof callbackData.amount === 'number' ? Math.round(callbackData.amount * 100) : null;
+
+  if (newStatus === 'completed' && callbackAmountCents !== null && callbackAmountCents !== pmt.amount) {
+    console.error(
+      `[PaymentCallback] Amount mismatch on payment ${pmt.id}: callback ${callbackAmountCents} vs expected ${pmt.amount} cents; holding for reconciliation`
+    );
+    await db
+      .update(payments)
+      .set({
+        metadata: JSON.stringify({
+          ...(pmt.metadata ? JSON.parse(pmt.metadata) : {}),
+          callback: callbackData,
+          amountMismatch: { expected: pmt.amount, received: callbackAmountCents },
+          gateway,
+          environment: PAYMENTS_ENV,
+        }),
+      })
+      .where(eq(payments.id, pmt.id));
+    return false;
+  }
+
+  // Update payment status atomically. affectedRows tells us whether THIS call
+  // performed the transition; concurrent duplicate callbacks see 0 rows and
+  // must not run the post-payment actions again.
+  const result = await db
     .update(payments)
     .set({
       status: newStatus,
@@ -209,6 +237,11 @@ async function updatePaymentFromCallback(
       eq(payments.id, pmt.id),
       eq(payments.status, 'pending') // Optimistic lock - only update if still pending
     ));
+
+  if (Number(result[0].affectedRows) === 0) {
+    console.log(`[PaymentCallback] Payment ${pmt.id} was settled concurrently, skipping post-payment actions`);
+    return false;
+  }
 
   // Execute post-payment actions only if we just transitioned state
   if (newStatus === 'completed') {
@@ -233,7 +266,9 @@ async function executePostPaymentActions(
   if (!db) return;
 
   const metadata = payment.metadata ? JSON.parse(payment.metadata) : {};
-  const paymentType = metadata.paymentType || 'invoice';
+  // The payment type is a column on the payment row; metadata is only a
+  // fallback for records written by older callers.
+  const paymentType = payment.paymentType || metadata.paymentType || 'invoice';
 
   try {
     switch (paymentType) {
@@ -258,24 +293,46 @@ async function executePostPaymentActions(
         break;
 
       case 'prepaid_token':
-        // Generate prepaid token for the user
-        const tokenAmount = payment.amount;
-        const tokenCode = generatePrepaidToken();
-        // Calculate energy based on average price (45 cents/kWh)
-        const energyKwh = Math.round(tokenAmount / 45);
-        
+      case 'token_purchase': {
+        // The energy quantity is the one the customer bought and paid for; it is
+        // never re-derived from a hardcoded tariff. A token code can only come
+        // from a certified STS vending system, so the paid-for token is recorded
+        // as pending issuance instead of inventing a code that no meter accepts.
+        const purchasedKwh = Number(metadata.energyKwh);
+
+        if (!Number.isInteger(purchasedKwh) || purchasedKwh <= 0) {
+          console.error(
+            `[PostPayment] Payment ${payment.id} is a token purchase without a valid energyKwh; token NOT issued, manual review required`
+          );
+          break;
+        }
+
+        const existing = await db
+          .select({ id: tokens.id })
+          .from(tokens)
+          .where(eq(tokens.paymentId, payment.id))
+          .limit(1);
+
+        if (existing.length > 0) {
+          console.log(`[PostPayment] Token already recorded for payment ${payment.id}`);
+          break;
+        }
+
         await db.insert(tokens).values({
           userId: payment.userId,
           paymentId: payment.id,
-          tokenCode,
-          energyKwh,
-          amount: tokenAmount,
+          tokenCode: `PENDING_ISSUANCE_${payment.id}`,
+          energyKwh: purchasedKwh,
+          amount: payment.amount,
           validUntil: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000), // 1 year expiry
-          status: 'active',
+          status: 'pending_issuance',
           createdAt: new Date(),
         });
-        console.log(`[PostPayment] Prepaid token ${tokenCode} created for user ${payment.userId}`);
+        console.log(
+          `[PostPayment] Recorded ${purchasedKwh} kWh as pending issuance for payment ${payment.id}`
+        );
         break;
+      }
 
       case 'subscription':
         // Update user's last activity (subscription tracking via metadata)
@@ -334,27 +391,4 @@ async function handlePaymentFailure(
   } catch (error) {
     console.error('[PaymentCallback] Error sending failure notification:', error);
   }
-}
-
-/**
- * Generate a cryptographically secure prepaid token code.
- * Format: XXXX-XXXX-XXXX-XXXX (16 alphanumeric chars from a 36-char alphabet).
- */
-function generatePrepaidToken(): string {
-  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-  // Use rejection sampling to avoid modulo bias.
-  // Array.from() is used to iterate the Buffer for ES2015+ compatibility.
-  let result = '';
-  while (result.replace(/-/g, '').length < 16) {
-    const bytes = Array.from(randomBytes(32));
-    for (const value of bytes) {
-      if (result.replace(/-/g, '').length >= 16) break;
-      if (value < 216) { // floor(256 / 36) * 36 = 216 — rejection threshold avoids modulo bias
-        const pos = result.replace(/-/g, '').length;
-        if (pos > 0 && pos % 4 === 0) result += '-';
-        result += chars[value % 36];
-      }
-    }
-  }
-  return result;
 }

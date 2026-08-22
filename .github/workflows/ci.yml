@@ -12,19 +12,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Version comes from package.json "packageManager"; specifying it here too
+      # makes the action fail with ERR_PNPM_BAD_PM_VERSION.
       - uses: pnpm/action-setup@v4
-        with:
-          version: 10.4.1
 
       - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: pnpm
 
-      # TODO: restore --frozen-lockfile once pnpm-lock.yaml is regenerated to
-      # include helmet and express-rate-limit (run: pnpm install --lockfile-only).
       - name: Install dependencies
-        run: pnpm install --no-frozen-lockfile
+        run: pnpm install --frozen-lockfile
 
       - name: Typecheck
         run: pnpm check
@@ -75,6 +73,36 @@ jobs:
             echo "No pytest test files in ${{ matrix.worker }}, skipping."
           fi
 
+  optimizer:
+    name: Dispatch optimizer (compileall + pytest + benchmark)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: services/optimizer/requirements.txt
+
+      - name: Install dependencies
+        working-directory: services/optimizer
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: py_compile all sources
+        working-directory: services/optimizer
+        run: python -m compileall -q optimizer tests benchmarks
+
+      - name: pytest
+        working-directory: services/optimizer
+        run: python -m pytest -v
+
+      - name: Benchmark (reproducible, fixed seed)
+        working-directory: services/optimizer
+        run: python -m benchmarks.run --quick
+
   go-orchestrator:
     name: Go orchestrator (build + vet)
     runs-on: ubuntu-latest
@@ -122,9 +150,7 @@ jobs:
 
       - name: Resolve modules
         working-directory: services/mqtt-fluvio-bridge
-        run: |
-          go mod download
-          go mod tidy
+        run: go mod download
 
       - name: Build
         working-directory: services/mqtt-fluvio-bridge
@@ -133,3 +159,60 @@ jobs:
       - name: Vet
         working-directory: services/mqtt-fluvio-bridge
         run: go vet ./...
+
+      - name: Test
+        working-directory: services/mqtt-fluvio-bridge
+        run: go test ./...
+
+  go-grid-protocols:
+    name: Go grid protocols (build + vet + test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache: true
+          cache-dependency-path: services/grid-protocols/go.mod
+
+      - name: Resolve modules
+        working-directory: services/grid-protocols
+        run: go mod download
+
+      - name: Build
+        working-directory: services/grid-protocols
+        run: go build ./...
+
+      - name: Vet
+        working-directory: services/grid-protocols
+        run: go vet ./...
+
+      - name: Test
+        working-directory: services/grid-protocols
+        run: go test ./...
+
+  rust-modbus-poller:
+    name: Rust modbus poller (fmt + clippy + test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install stable --profile minimal --component clippy,rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: services/modbus-poller
+
+      - name: Format check
+        working-directory: services/modbus-poller
+        run: cargo fmt --check
+
+      - name: Clippy
+        working-directory: services/modbus-poller
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Test
+        working-directory: services/modbus-poller
+        run: cargo test

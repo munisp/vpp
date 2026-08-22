@@ -13,11 +13,37 @@ mqtt:
   cert_file: "/path/to/client.crt"
   key_file: "/path/to/client.key"
 
+stream:
+  # "fluvio" publishes through the `fluvio` CLI (there is no Go SDK);
+  # "kafka" publishes to the same brokers the Node services use.
+  transport: "kafka"
+  default_topic: "telemetry.raw"
+
 fluvio:
   endpoint: "localhost:9003"
+  cli_path: "fluvio"
+  # Must match `fluvio profile current`; the CLI has no per-command profile flag.
+  profile: ""
+  partitions: 1
+  create_missing_topics: false
   topics:
     "vpp/telemetry/+": "telemetry"
     "vpp/devices/+/status": "device-status"
+
+kafka:
+  brokers:
+    - "localhost:9092"
+  tls: false
+  sasl_mechanism: ""
+  sasl_username: ""
+  sasl_password: ""
+  required_acks: "all"
+  create_missing_topics: false
+  partitions: 3
+  replication_factor: 1
+  topics:
+    "vpp/telemetry/+": "telemetry.raw"
+    "vpp/devices/+/status": "edge.connectivity"
 
 bridge:
   worker_count: 4

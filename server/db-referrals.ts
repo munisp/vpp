@@ -1,4 +1,4 @@
-import { eq, and, or, desc, sql } from "drizzle-orm";
+import { eq, and, ne, or, desc, sql } from "drizzle-orm";
 import { getDb } from "./db";
 import { referrals, referralRewards, users } from "../drizzle/schema";
 import crypto from "crypto";
@@ -167,44 +167,46 @@ export async function processReferralReward(referralId: number) {
 
   const referral = result[0];
 
-  // Check if already rewarded
   if (referral.status === "rewarded") {
     throw new Error("Reward already processed");
   }
 
-  // Create reward record
-  await db.insert(referralRewards).values({
-    referralId: referral.id,
-    userId: referral.referrerId,
-    rewardType: referral.rewardType,
-    amount: referral.rewardAmount,
-    currency: referral.rewardCurrency,
-    status: "pending",
-    description: `Referral reward for inviting user ${referral.refereeId}`,
+  return await db.transaction(async (tx) => {
+    // Claim the referral before crediting: the conditional update is the lock
+    // that stops concurrent callers from both inserting a reward row.
+    const claim = await tx
+      .update(referrals)
+      .set({
+        status: "rewarded",
+        rewardedAt: new Date(),
+      })
+      .where(and(eq(referrals.id, referral.id), ne(referrals.status, "rewarded")));
+
+    if (Number(claim[0].affectedRows) === 0) {
+      throw new Error("Reward already processed");
+    }
+
+    const insert = await tx.insert(referralRewards).values({
+      referralId: referral.id,
+      userId: referral.referrerId,
+      rewardType: referral.rewardType,
+      amount: referral.rewardAmount,
+      currency: referral.rewardCurrency,
+      status: "pending",
+      description: `Referral reward for inviting user ${referral.refereeId}`,
+    });
+
+    const rewardId = Number(insert[0].insertId);
+    if (!Number.isInteger(rewardId) || rewardId <= 0) {
+      throw new Error("Failed to persist referral reward");
+    }
+
+    return {
+      id: rewardId,
+      amount: referral.rewardAmount,
+      currency: referral.rewardCurrency,
+    };
   });
-
-  // Update referral status
-  await db
-    .update(referrals)
-    .set({
-      status: "rewarded",
-      rewardedAt: new Date(),
-    })
-    .where(eq(referrals.id, referral.id));
-
-  // Get the created reward
-  const createdReward = await db
-    .select()
-    .from(referralRewards)
-    .where(eq(referralRewards.referralId, referral.id))
-    .orderBy(desc(referralRewards.createdAt))
-    .limit(1);
-
-  return {
-    id: createdReward[0]?.id || 0,
-    amount: referral.rewardAmount,
-    currency: referral.rewardCurrency,
-  };
 }
 
 /**

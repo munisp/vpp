@@ -5,6 +5,7 @@ import {
   PaymentStatusResponse,
   PaymentCallbackData,
 } from './base';
+import { toGatewayMajorUnits } from '../_core/paymentGateway';
 
 interface TigoCredentials {
   apiKey: string;
@@ -55,7 +56,7 @@ export class TigoPesaGateway extends BasePaymentGateway {
     const payload = {
       MerchantNumber: this.creds.merchantNumber,
       CustomerMSISDN: phone,
-      Amount: Math.round(request.amount / 100), // Convert cents to shillings
+      Amount: toGatewayMajorUnits(request.amount),
       TransactionRefNumber: transactionId,
       Remarks: request.transactionDesc,
       CallBackUrl: this.creds.callbackUrl,

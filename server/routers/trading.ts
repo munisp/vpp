@@ -126,22 +126,53 @@ export const tradingRouter = router({
     .input(UpdateTradeStatusInputSchema)
     .mutation(async ({ ctx, input }) => {
       try {
-        // Get the trade first to check ownership
+        const isAdmin = ctx.user.role === 'admin';
+
+        // Get the trade first to check ownership. Admins act on any trade as
+        // part of settlement operations; owners may only cancel their own.
         const trade = await db.getTradeById(input.tradeId);
-        if (!trade || trade.userId !== ctx.user.id) {
+        if (!trade || (!isAdmin && trade.userId !== ctx.user.id)) {
           throw new TRPCError({
             code: 'NOT_FOUND',
             message: 'Trade not found.',
           });
         }
 
-        await db.updateTradeStatus(input.tradeId, input.status);
+        // Settlement states are financial outcomes and must come from the
+        // settlement pipeline (workflow/admin), never from the trade owner.
+        if (!isAdmin && input.status !== 'cancelled') {
+          throw new TRPCError({
+            code: 'FORBIDDEN',
+            message:
+              'Only cancellation is self-service; execution and failure are set by settlement after delivery is verified.',
+          });
+        }
+
+        if (!isAdmin && trade.status !== 'pending') {
+          throw new TRPCError({
+            code: 'BAD_REQUEST',
+            message: `Trade cannot be cancelled once it is ${trade.status}.`,
+          });
+        }
+
+        const transitioned = await db.updateTradeStatus(
+          input.tradeId,
+          input.status,
+          trade.status
+        );
+
+        if (!transitioned) {
+          throw new TRPCError({
+            code: 'CONFLICT',
+            message: 'Trade status changed concurrently; retry with the current state.',
+          });
+        }
 
         // Send notification and publish events based on status
         if (input.status === 'executed') {
           // Create alert
           await createAlert({
-            userId: ctx.user.id,
+            userId: trade.userId,
             alertType: 'trading',
             severity: 'info',
             title: 'Trade Executed',
@@ -151,7 +182,7 @@ export const tradingRouter = router({
 
           // Send push notification
           await sendPushNotification(
-            ctx.user.id,
+            trade.userId,
             {
               title: '💰 Trade Executed',
               body: `Your ${trade.tradeType} trade of ${(trade.energy / 1000).toFixed(2)} kWh has been completed.`,
@@ -164,10 +195,11 @@ export const tradingRouter = router({
             'pushTradeExecuted'
           );
 
-          // Send email notification
-          if (ctx.user.email) {
+          // Send email notification to the trade owner
+          const executedOwner = await db.getUserById(trade.userId);
+          if (executedOwner?.email) {
             const emailHtml = tradeConfirmationTemplate({
-              userName: ctx.user.name || 'User',
+              userName: executedOwner.name || 'User',
               tradeType: trade.tradeType,
               energy: trade.energy,
               price: (trade.price / 100).toFixed(2),
@@ -176,7 +208,7 @@ export const tradingRouter = router({
               date: new Date().toLocaleString(),
             });
             await sendEmail({
-              to: ctx.user.email,
+              to: executedOwner.email,
               subject: '✅ Trade Executed Successfully',
               html: emailHtml,
             });
@@ -205,7 +237,7 @@ export const tradingRouter = router({
             entityId: String(input.tradeId),
             entityName: `${trade.tradeType} trade`,
             changes: {
-              status: { from: 'pending', to: 'executed' },
+              status: { from: trade.status, to: 'executed' },
               energy: trade.energy,
               price: trade.price,
             },
@@ -217,7 +249,7 @@ export const tradingRouter = router({
         } else if (input.status === 'failed') {
           // Create alert for failed trade
           await createAlert({
-            userId: ctx.user.id,
+            userId: trade.userId,
             alertType: 'trading',
             severity: 'error',
             title: 'Trade Failed',
@@ -227,7 +259,7 @@ export const tradingRouter = router({
 
           // Send push notification
           await sendPushNotification(
-            ctx.user.id,
+            trade.userId,
             {
               title: '❌ Trade Failed',
               body: `Your ${trade.tradeType} trade could not be completed.`,
@@ -240,10 +272,11 @@ export const tradingRouter = router({
             'pushTradeFailed'
           );
 
-          // Send email notification
-          if (ctx.user.email) {
+          // Send email notification to the trade owner
+          const failedOwner = await db.getUserById(trade.userId);
+          if (failedOwner?.email) {
             const emailHtml = tradeConfirmationTemplate({
-              userName: ctx.user.name || 'User',
+              userName: failedOwner.name || 'User',
               tradeType: trade.tradeType,
               energy: trade.energy,
               price: (trade.price / 100).toFixed(2),
@@ -252,7 +285,7 @@ export const tradingRouter = router({
               date: new Date().toLocaleString(),
             });
             await sendEmail({
-              to: ctx.user.email,
+              to: failedOwner.email,
               subject: '❌ Trade Failed',
               html: emailHtml,
             });
@@ -268,7 +301,7 @@ export const tradingRouter = router({
             entityId: String(input.tradeId),
             entityName: `${trade.tradeType} trade`,
             changes: {
-              status: { from: 'pending', to: 'failed' },
+              status: { from: trade.status, to: 'failed' },
               energy: trade.energy,
               price: trade.price,
             },

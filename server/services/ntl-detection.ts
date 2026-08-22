@@ -362,9 +362,23 @@ export async function getAssetRiskScore(assetId: number): Promise<{
   source: "open_flag" | "fresh_analysis";
   openFlagId: number | null;
   insufficientHistory: boolean;
+  analyzedPeriods: number;
+  latestRatio: number | null;
+  divergenceDetected: boolean;
+  bypassSignature: NtlAnalysisResult["bypassSignature"];
 }> {
   const db = await getDb();
   if (!db) throw new Error("Database not available");
+
+  // Signals default to "not evaluated" rather than to a benign-looking value,
+  // so a caller can never read an unevaluated check as a clean result.
+  const unevaluatedBypass: NtlAnalysisResult["bypassSignature"] = {
+    evaluated: false,
+    samples: 0,
+    nearZeroPowerPct: null,
+    normalVoltagePct: null,
+    detected: false,
+  };
 
   const open = await db
     .select()
@@ -374,7 +388,26 @@ export async function getAssetRiskScore(assetId: number): Promise<{
     .limit(1);
 
   if (open.length > 0) {
-    return { assetId, riskScore: open[0].riskScore, source: "open_flag", openFlagId: open[0].id, insufficientHistory: false };
+    // Report the evidence recorded when the flag was raised; a missing or
+    // unparseable evidence blob is surfaced as unevaluated, not as clean.
+    let evidence: any = null;
+    try {
+      evidence = open[0].evidence ? JSON.parse(open[0].evidence) : null;
+    } catch (error) {
+      console.error(`[NtlDetection] Flag ${open[0].id} has unparseable evidence:`, error);
+    }
+
+    return {
+      assetId,
+      riskScore: open[0].riskScore,
+      source: "open_flag",
+      openFlagId: open[0].id,
+      insufficientHistory: evidence?.periods == null,
+      analyzedPeriods: Array.isArray(evidence?.periods) ? evidence.periods.length : 0,
+      latestRatio: typeof evidence?.latestRatio === "number" ? evidence.latestRatio : null,
+      divergenceDetected: evidence?.divergenceDetected === true,
+      bypassSignature: evidence?.bypassSignature ?? unevaluatedBypass,
+    };
   }
 
   const analysis = await runNtlAnalysis(assetId);
@@ -384,6 +417,10 @@ export async function getAssetRiskScore(assetId: number): Promise<{
     source: "fresh_analysis",
     openFlagId: analysis.flag?.id ?? null,
     insufficientHistory: analysis.insufficientHistory,
+    analyzedPeriods: analysis.analyzedPeriods,
+    latestRatio: analysis.latestRatio,
+    divergenceDetected: analysis.divergenceDetected,
+    bypassSignature: analysis.bypassSignature,
   };
 }
 

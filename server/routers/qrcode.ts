@@ -22,8 +22,11 @@ export const qrcodeRouter = router({
         expiresIn: z.number().optional(), // seconds
       })
     )
-    .mutation(async ({ input }) => {
-      const qrData = await generatePaymentQRCode(input);
+    .mutation(async ({ ctx, input }) => {
+      // The signature attests who asked for the code, not that the encoded
+      // merchant/recipient belongs to them: consumers must still authorize the
+      // payee against issuedByUserId before moving money.
+      const qrData = await generatePaymentQRCode({ ...input, issuedByUserId: ctx.user.id });
       return qrData;
     }),
 

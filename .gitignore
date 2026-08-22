@@ -109,3 +109,8 @@ temp/
 # Python
 __pycache__/
 *.pyc
+.venv/
+.pytest_cache/
+
+# Rust build output
+services/*/target

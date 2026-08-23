@@ -51,7 +51,8 @@ import {
   MessageSquare,
   Globe,
   Coins,
-  MapPin
+  MapPin,
+  House
 } from "lucide-react";
 import { CSSProperties, useEffect, useRef, useState } from "react";
 import { useLocation } from "wouter";
@@ -115,6 +116,7 @@ const getMenuSections = (userRole?: string): MenuSection[] => [
       ...(userRole === 'admin'
         ? [
             { icon: Activity, label: "Fleet Telemetry", path: "/grid/fleet-telemetry" },
+            { icon: House, label: "Smart-Home Loads", path: "/grid/matter-loads" },
             { icon: ShieldAlert, label: "NTL Detection", path: "/grid/ntl" },
             { icon: FileCheck, label: "Compliance Reports", path: "/grid/compliance-reports" },
           ]

@@ -27,6 +27,11 @@ import {
   verifyGridSignature,
 } from '../services/grid-protocol-ingest';
 import {
+  handleMatterAttribute,
+  handleMatterNodeRemoved,
+  handleMatterNodes,
+} from '../services/matter-ingest';
+import {
   authorizeIdToken201,
   handleBootNotification201,
   handleHeartbeat201,
@@ -266,6 +271,35 @@ const modbusSchema = z.object({
     .min(1),
 });
 
+// ------------------------------ Matter ------------------------------
+// Node and fabric ids are decimal strings, not numbers: they are 64-bit Matter
+// identifiers and this runtime would round two distinct ids onto one node row.
+
+const matterIdentifier = z.string().regex(/^\d{1,20}$/);
+
+const matterNodesSchema = z.object({
+  fabric_id: matterIdentifier,
+  nodes: z.array(
+    z.object({
+      node_id: matterIdentifier,
+      available: z.boolean(),
+      is_bridge: z.boolean(),
+      is_test_node: z.boolean(),
+      attributes: z.record(z.string(), z.unknown()).nullable(),
+    })
+  ),
+});
+
+const matterAttributeSchema = z.object({
+  node_id: matterIdentifier,
+  attribute_path: z.string().min(5).max(64),
+  // A reported `null` is a value: the node has nothing to report, which is not
+  // zero, so the field is required and nullable rather than optional.
+  value: z.unknown(),
+});
+
+const matterNodeRemovedSchema = z.object({ node_id: matterIdentifier });
+
 function rawBody(req: Request): Buffer {
   const captured = (req as Request & { rawBody?: Buffer }).rawBody;
   if (!captured) {
@@ -391,6 +425,18 @@ gridProtocolRouter.post(
 gridProtocolRouter.post(
   '/sep2/controls',
   handler(sep2Schema, input => handleSep2Controls(input.controls))
+);
+gridProtocolRouter.post(
+  '/matter/nodes',
+  handler(matterNodesSchema, input => handleMatterNodes(input))
+);
+gridProtocolRouter.post(
+  '/matter/attribute',
+  handler(matterAttributeSchema, input => handleMatterAttribute(input))
+);
+gridProtocolRouter.post(
+  '/matter/node-removed',
+  handler(matterNodeRemovedSchema, input => handleMatterNodeRemoved(input))
 );
 gridProtocolRouter.post(
   '/modbus/readings',

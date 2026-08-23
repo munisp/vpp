@@ -4,25 +4,17 @@ package admin
 
 import (
 	"context"
-	"crypto/hmac"
-	"crypto/sha256"
-	"crypto/subtle"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
-	"strconv"
 	"time"
 
 	"github.com/vpp/grid-protocols/internal/control"
 	"github.com/vpp/grid-protocols/internal/ocpp16"
+	"github.com/vpp/grid-protocols/internal/signed"
 )
-
-// maxClockSkew bounds how old a signed command may be, so a captured request
-// cannot be replayed indefinitely.
-const maxClockSkew = 5 * time.Minute
 
 // ControlSupervisor tracks control windows and re-asserts safe fallbacks.
 type ControlSupervisor interface {
@@ -323,31 +315,8 @@ func chargePointIDOf(raw []byte) string {
 
 // authorized verifies the HMAC the VPP server attaches to every command.
 func (a *API) authorized(w http.ResponseWriter, r *http.Request, body []byte) bool {
-	timestamp := r.Header.Get("x-grid-timestamp")
-	signature := r.Header.Get("x-grid-signature")
-	if timestamp == "" || signature == "" {
-		http.Error(w, "missing signature", http.StatusUnauthorized)
-		return false
-	}
-	seconds, err := strconv.ParseInt(timestamp, 10, 64)
-	if err != nil {
-		http.Error(w, "invalid timestamp", http.StatusUnauthorized)
-		return false
-	}
-	age := time.Since(time.Unix(seconds, 0))
-	if age > maxClockSkew || age < -maxClockSkew {
-		http.Error(w, "stale signature", http.StatusUnauthorized)
-		return false
-	}
-
-	mac := hmac.New(sha256.New, a.secret)
-	mac.Write([]byte(timestamp))
-	mac.Write([]byte("."))
-	mac.Write(body)
-	expected := hex.EncodeToString(mac.Sum(nil))
-
-	if subtle.ConstantTimeCompare([]byte(expected), []byte(signature)) != 1 {
-		http.Error(w, "invalid signature", http.StatusUnauthorized)
+	if err := signed.Verify(a.secret, r, body); err != nil {
+		http.Error(w, err.Error(), signed.Status(err))
 		return false
 	}
 	return true

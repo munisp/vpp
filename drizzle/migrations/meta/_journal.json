@@ -57,6 +57,13 @@
       "when": 1787498000000,
       "tag": "0007_locational_flexibility",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1787504000000,
+      "tag": "0008_matter_loads",
+      "breakpoints": true
     }
   ]
 }

@@ -70,6 +70,7 @@ import DegradedOperation from "@/pages/DegradedOperation";
 import LedgerReconciliation from "@/pages/LedgerReconciliation";
 import EventStream from "@/pages/EventStream";
 import Lakehouse from "@/pages/Lakehouse";
+import ModelHealth from "@/pages/ModelHealth";
 import Diagnostics from "@/pages/Diagnostics";
 import LocationalFlexibility from "@/pages/LocationalFlexibility";
 import V2G from "@/pages/V2G";
@@ -229,6 +230,11 @@ function Router() {
       <Route path="/admin/lakehouse">
         <RouteShell adminOnly chrome={false}>
           <Lakehouse />
+        </RouteShell>
+      </Route>
+      <Route path="/admin/model-health">
+        <RouteShell adminOnly chrome={false}>
+          <ModelHealth />
         </RouteShell>
       </Route>
       <Route path="/admin/diagnostics">

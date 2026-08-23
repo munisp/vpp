@@ -102,6 +102,13 @@ export const MOBILE_NAV_GROUPS: MobileNavGroup[] = [
         keywords: ['etl', 'ingestion', 'parquet', 'analytics', 'watermark'],
       },
       {
+        screen: 'ModelHealth',
+        label: 'Model Health',
+        icon: '🧠',
+        adminOnly: true,
+        keywords: ['ml', 'pytorch', 'gnn', 'training', 'drift', 'provenance', 'checkpoint'],
+      },
+      {
         screen: 'Diagnostics',
         label: 'Diagnostics',
         icon: '🩺',

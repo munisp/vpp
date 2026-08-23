@@ -1,0 +1,6 @@
+-r requirements.txt
+# Ray is optional at runtime: with RAY_ADDRESS unset the service trains in-process
+# and records compute='local'. It is installed here so the unavailable/refusal path
+# and the local dispatch path are both covered by tests.
+ray==2.58.0
+pytest==8.3.4

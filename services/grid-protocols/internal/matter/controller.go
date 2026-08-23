@@ -50,8 +50,12 @@ func (e *ControllerError) Error() string {
 // state comes from its attribute reports.
 type Platform interface {
 	// MatterNodesReported publishes the controller's full node inventory, which
-	// is also the only statement of which nodes are reachable.
+	// is also the only statement of which nodes are reachable. The platform
+	// reconciles against it, so it is only ever called with a complete list.
 	MatterNodesReported(ctx context.Context, fabricID uint64, nodes []NodeData) error
+	// MatterNodeReported publishes one node the controller announced or updated.
+	// It carries no statement about the other nodes on the fabric.
+	MatterNodeReported(ctx context.Context, fabricID uint64, node NodeData) error
 	// MatterAttributeReported publishes one attribute report. value is the raw
 	// JSON the controller sent, so a value this service cannot interpret is
 	// stored rather than coerced.
@@ -373,7 +377,7 @@ func (c *Controller) handleEvent(ctx context.Context, f *frame) {
 		if info != nil {
 			fabric = info.FabricID
 		}
-		if err := c.platform.MatterNodesReported(ctx, fabric, []NodeData{node}); err != nil {
+		if err := c.platform.MatterNodeReported(ctx, fabric, node); err != nil {
 			c.logger.WithError(err).WithField("node_id", node.NodeID).Error("matter: node event not persisted")
 		}
 

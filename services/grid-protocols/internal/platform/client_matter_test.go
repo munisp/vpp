@@ -88,6 +88,46 @@ func TestMatterNodesReportedFlagsSyntheticNodes(t *testing.T) {
 	}
 }
 
+// One announced node goes to its own endpoint. On the inventory endpoint the
+// platform reconciles, so a one-node body would retire every other load.
+func TestMatterNodeReportedUsesTheSingleNodeEndpoint(t *testing.T) {
+	path, body := captureBody(t, func(c *Client) error {
+		return c.MatterNodeReported(context.Background(), 7, matter.NodeData{
+			NodeID:     matter.TestNodeIDStart + 1,
+			Available:  true,
+			Attributes: map[string]any{"1/6/0": true},
+		})
+	})
+	if path != "/api/grid/matter/node" {
+		t.Fatalf("unexpected path %s", path)
+	}
+
+	var payload struct {
+		FabricID string `json:"fabric_id"`
+		Node     struct {
+			NodeID     string         `json:"node_id"`
+			Available  bool           `json:"available"`
+			IsTestNode bool           `json:"is_test_node"`
+			Attributes map[string]any `json:"attributes"`
+		} `json:"node"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatalf("decoding body: %v", err)
+	}
+	if payload.FabricID != "7" || payload.Node.NodeID != "900001" {
+		t.Fatalf("unexpected identifiers: %s", body)
+	}
+	if !payload.Node.Available || !payload.Node.IsTestNode {
+		t.Fatalf("node state was not carried: %s", body)
+	}
+	if payload.Node.Attributes["1/6/0"] != true {
+		t.Fatalf("reported attributes were not carried: %s", body)
+	}
+	if strings.Contains(string(body), `"nodes"`) {
+		t.Fatalf("a single node event must not be shaped as an inventory: %s", body)
+	}
+}
+
 // An attribute this service cannot interpret still has to reach the platform
 // intact, and a null must stay null: stored as 0 it would read as a load drawing
 // no power rather than a load that said nothing.

@@ -119,6 +119,7 @@ type recordingPlatform struct {
 	mu sync.Mutex
 
 	nodes      [][]NodeData
+	singleNode []NodeData
 	attributes []struct {
 		NodeID int64
 		Path   string
@@ -135,6 +136,16 @@ func (p *recordingPlatform) MatterNodesReported(_ context.Context, _ uint64, nod
 		return p.err
 	}
 	p.nodes = append(p.nodes, nodes)
+	return nil
+}
+
+func (p *recordingPlatform) MatterNodeReported(_ context.Context, _ uint64, node NodeData) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.err != nil {
+		return p.err
+	}
+	p.singleNode = append(p.singleNode, node)
 	return nil
 }
 
@@ -632,6 +643,51 @@ func TestNodeRemovalReachesThePlatform(t *testing.T) {
 	}
 	if _, err := controller.ApplyLoad(context.Background(), LoadCommand{NodeID: 4, Endpoint: 1, Action: ActionTurnOff}); err == nil {
 		t.Fatal("expected a removed node to be uncommandable")
+	}
+}
+
+// A node event is about one node. Sending it as an inventory would tell the
+// platform the fabric now contains only that node, retiring every other
+// commissioned load until the controller reconnects.
+func TestANodeEventIsNotSentAsAnInventory(t *testing.T) {
+	fake := newFakeController(t)
+	fake.answer = func(cmd command) any {
+		if cmd.Command == cmdStartListening {
+			return success(cmd, []NodeData{waterHeater(4, true), waterHeater(5, true)})
+		}
+		return success(cmd, nil)
+	}
+	platform := &recordingPlatform{}
+	_, cancel := startController(t, fake, platform, nil)
+	defer cancel()
+
+	fake.push(eventNodeUpdated, waterHeater(6, true))
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		platform.mu.Lock()
+		single := len(platform.singleNode)
+		inventories := len(platform.nodes)
+		platform.mu.Unlock()
+		if single == 1 {
+			if inventories != 1 {
+				t.Fatalf("a node event published %d inventories; only start_listening may publish one", inventories-1)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the node event never reached the platform")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	platform.mu.Lock()
+	defer platform.mu.Unlock()
+	if platform.singleNode[0].NodeID != 6 {
+		t.Fatalf("expected node 6 to be reported on its own, got %d", platform.singleNode[0].NodeID)
+	}
+	if len(platform.nodes[0]) != 2 {
+		t.Fatalf("expected the start_listening inventory to carry both nodes, got %d", len(platform.nodes[0]))
 	}
 }
 

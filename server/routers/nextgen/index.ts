@@ -17,3 +17,4 @@ export { matterLoadsRouter } from './matter-loads';
 export { degradedOperationRouter } from './degraded-operation';
 export { digitalTwinRouter } from './digital-twin';
 export { ledgerRouter } from './ledger';
+export { eventStreamRouter } from './event-stream';

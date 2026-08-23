@@ -68,6 +68,7 @@ import OperationsWall from "@/pages/OperationsWall";
 import MatterLoads from "@/pages/MatterLoads";
 import DegradedOperation from "@/pages/DegradedOperation";
 import LedgerReconciliation from "@/pages/LedgerReconciliation";
+import EventStream from "@/pages/EventStream";
 import LocationalFlexibility from "@/pages/LocationalFlexibility";
 import V2G from "@/pages/V2G";
 import Wallet from "@/pages/Wallet";
@@ -216,6 +217,11 @@ function Router() {
       <Route path="/admin/ledger">
         <RouteShell adminOnly chrome={false}>
           <LedgerReconciliation />
+        </RouteShell>
+      </Route>
+      <Route path="/admin/event-stream">
+        <RouteShell adminOnly chrome={false}>
+          <EventStream />
         </RouteShell>
       </Route>
       <Route path="/admin/cache-monitoring">

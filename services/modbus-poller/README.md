@@ -29,6 +29,12 @@ counted: `dropped`/`dropped_total` on an error log is a hole in the meter
 history, not a quiet device. A spool smaller than one batch is rejected at
 startup.
 
+A batch overshoots `publish_batch_size` rather than cut through an instant. The
+platform builds one telemetry sample per device per instant from the registers
+in a single request, so sending an instant's `active_power` in one request and
+its `total_energy` in the next stores that instant as two rows, each with the
+other's column empty.
+
 ## Running
 
 ```sh

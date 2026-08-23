@@ -114,3 +114,6 @@ __pycache__/
 
 # Rust build output
 services/*/target
+
+# Expo local caches
+**/.expo

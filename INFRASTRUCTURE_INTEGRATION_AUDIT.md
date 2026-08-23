@@ -65,9 +65,12 @@ audit chain, and a reconciliation job comparing the two. This is the single high
 ### 3. Redis — wired, but not for anything that needs it
 Real `ioredis` client, used as a cache (`user:profile`, `asset:details`, market price, DR events) and
 for the Keycloak token cache. Gaps:
-- **Rate limiting is in-memory** (`express-rate-limit` default store in `server/_core/index.ts`), so
-  in the multi-replica deployment the manifests describe, the limits are per-pod and the payment
-  limiter is effectively `replicas × 20`. Redis store is the fix.
+- ~~**Rate limiting is in-memory**~~ **Fixed.** Counters now live in Redis
+  (`server/services/rate-limit-store.ts`), so a limit means the same thing behind any number of
+  replicas. Production refuses to boot without `REDIS_HOST` unless `RATE_LIMIT_STORE=memory` accepts
+  per-replica limits deliberately; a Redis outage refuses money requests (`503`
+  `RATE_LIMIT_COUNTER_UNAVAILABLE`) and downgrades the general API to per-replica counting with a log
+  line, rather than admitting either unmetered.
 - **No distributed lock / idempotency key store.** Concurrency safety currently rests entirely on
   Postgres unique constraints — which is *correct* and stronger, so this is a note, not a defect.
 - Cache errors are swallowed and return `null`, i.e. a Redis outage looks like a cache miss. Fine for
@@ -100,10 +103,12 @@ only thing enforcing a limit or a JWT audience, direct pod access bypasses it en
 `keycloak-client.ts` (admin API, users, roles) and `keycloak-auth.ts` (`keycloakProtect` middleware)
 are real, but **no route mounts them**; authentication is the platform's own `app_session_id` JWT.
 Two defects that would ship the moment it is wired:
-- `verifyToken` caches the decoded token in Redis for a **fixed 300 s ignoring the token's `exp`**, so
-  an expired or revoked token keeps working for up to five minutes.
-- The cache key is `keycloak:token:<raw access token>`, i.e. **bearer tokens stored in plaintext** in
-  Redis. Key on a hash, not the credential.
+- ~~`verifyToken` caches for a fixed 300 s ignoring `exp`~~ **Fixed.** The cache TTL is the shorter of
+  five minutes and the token's own remaining life less a safety margin, an expired cache entry is
+  dropped rather than honoured, and a token that expired between issue and verification is rejected
+  instead of cached.
+- ~~The cache key is `keycloak:token:<raw access token>`~~ **Fixed.** The key is a SHA-256 of the
+  token, so Redis keyspace output no longer carries usable bearer tokens.
 
 ### 8. open-appsec — deployment_only
 One manifest (`openappsec-ha.yaml`). WAF at the ingress; no application coupling expected, so this is

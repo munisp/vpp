@@ -71,7 +71,11 @@ export const ledgerRouter = router({
         });
       }
       try {
-        return await sweepPendingPostings({ olderThanMs: input?.olderThanMs, limit: input?.limit });
+        // An operator asking for a retry means every unconfirmed entry, including
+        // the one that failed a second ago: the age floor exists to keep an
+        // automated sweep off entries still being written, not to hide rows the
+        // operator is looking at.
+        return await sweepPendingPostings({ olderThanMs: input?.olderThanMs ?? 0, limit: input?.limit });
       } catch (error) {
         throw new TRPCError({
           code: 'INTERNAL_SERVER_ERROR',

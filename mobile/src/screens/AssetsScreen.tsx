@@ -12,7 +12,8 @@ import {
 import { trpc } from '../services/trpc';
 
 export default function AssetsScreen() {
-  const { data: assets, isLoading, refetch } = trpc.assets.list.useQuery();
+  const { data: assetList, isLoading, refetch } = trpc.assets.list.useQuery();
+  const assets = assetList?.assets;
   const [modalVisible, setModalVisible] = useState(false);
   const [selectedAsset, setSelectedAsset] = useState<any>(null);
 

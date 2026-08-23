@@ -305,10 +305,10 @@ export default function WalletScreen({ navigation }: any) {
         <TouchableOpacity
           style={styles.saveButton}
           onPress={handleSaveSettings}
-          disabled={updateSettingsMutation.isLoading}
+          disabled={updateSettingsMutation.isPending}
         >
           <Text style={styles.saveButtonText}>
-            {updateSettingsMutation.isLoading ? 'Saving…' : 'Save Settings'}
+            {updateSettingsMutation.isPending ? 'Saving…' : 'Save Settings'}
           </Text>
         </TouchableOpacity>
       </View>
@@ -406,10 +406,10 @@ export default function WalletScreen({ navigation }: any) {
             <TouchableOpacity
               style={styles.saveButton}
               onPress={handleRequestTopUp}
-              disabled={requestTopUpMutation.isLoading}
+              disabled={requestTopUpMutation.isPending}
             >
               <Text style={styles.saveButtonText}>
-                {requestTopUpMutation.isLoading ? 'Initiating…' : 'Request Top-Up'}
+                {requestTopUpMutation.isPending ? 'Initiating…' : 'Request Top-Up'}
               </Text>
             </TouchableOpacity>
             <TouchableOpacity

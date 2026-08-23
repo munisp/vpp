@@ -342,10 +342,10 @@ export default function PriceAlertsScreen({ navigation }: any) {
               <TouchableOpacity
                 style={styles.saveButton}
                 onPress={handleSubscribe}
-                disabled={subscribeMutation.isLoading}
+                disabled={subscribeMutation.isPending}
               >
                 <Text style={styles.saveButtonText}>
-                  {subscribeMutation.isLoading ? 'Subscribing…' : 'Subscribe'}
+                  {subscribeMutation.isPending ? 'Subscribing…' : 'Subscribe'}
                 </Text>
               </TouchableOpacity>
               <TouchableOpacity

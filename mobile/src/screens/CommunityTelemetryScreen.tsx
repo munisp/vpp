@@ -27,7 +27,7 @@ const BUCKET_MINUTES = 15;
 const BUCKETS = 24;
 
 interface Bucket {
-  bucketStartsAt: string;
+  bucketStartsAt: Date;
   bucketMinutes: number;
   state: 'open' | 'closed';
   meanNetPowerWatts: number;
@@ -261,9 +261,9 @@ export default function CommunityTelemetryScreen({ navigation }: any) {
                 .map(bucket => {
                   const seen = coverage(bucket);
                   return (
-                    <View key={bucket.bucketStartsAt} style={styles.detailRow}>
+                    <View key={bucket.bucketStartsAt.toISOString()} style={styles.detailRow}>
                       <Text style={styles.detailLabel}>
-                        {new Date(bucket.bucketStartsAt).toLocaleTimeString([], {
+                        {bucket.bucketStartsAt.toLocaleTimeString([], {
                           hour: '2-digit',
                           minute: '2-digit',
                         })}

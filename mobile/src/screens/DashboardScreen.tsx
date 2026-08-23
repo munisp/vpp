@@ -20,7 +20,8 @@ import { Dimensions } from 'react-native';
 const screenWidth = Dimensions.get('window').width;
 
 export default function DashboardScreen({ navigation }: any) {
-  const { data: assets, isLoading: assetsLoading, refetch } = trpc.assets.list.useQuery();
+  const { data: assetList, isLoading: assetsLoading, refetch } = trpc.assets.list.useQuery();
+  const assets = assetList?.assets;
   const { data: earnings } = trpc.trading.getEarnings.useQuery();
   const { data: drEnrollment } = trpc.demandResponse.getEnrollment.useQuery();
   const { data: upcomingDrEvents } = trpc.demandResponse.getUpcomingEvents.useQuery();

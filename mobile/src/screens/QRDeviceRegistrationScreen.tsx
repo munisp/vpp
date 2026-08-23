@@ -194,10 +194,10 @@ export default function QRDeviceRegistrationScreen({ navigation }: any) {
             <TouchableOpacity
               style={styles.confirmButton}
               onPress={handleConfirmRegistration}
-              disabled={registerAssetMutation.isLoading}
+              disabled={registerAssetMutation.isPending}
             >
               <Text style={styles.confirmButtonText}>
-                {registerAssetMutation.isLoading ? 'Registering...' : 'Register Device'}
+                {registerAssetMutation.isPending ? 'Registering...' : 'Register Device'}
               </Text>
             </TouchableOpacity>
 

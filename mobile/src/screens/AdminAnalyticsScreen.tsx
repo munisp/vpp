@@ -17,19 +17,45 @@ const screenWidth = Dimensions.get('window').width;
 
 type DateRange = 'today' | 'week' | 'month' | 'year';
 
+// The analytics router groups by calendar day and returns ISO dates.
+const dayLabel = (date: string) => date.slice(5);
+
 export default function AdminAnalyticsScreen() {
   const [dateRange, setDateRange] = useState<DateRange>('month');
   const [refreshing, setRefreshing] = useState(false);
 
+  const dateRangeParams = React.useMemo(() => {
+    const end = new Date();
+    const start = new Date();
+    switch (dateRange) {
+      case 'today':
+        start.setHours(0, 0, 0, 0);
+        break;
+      case 'week':
+        start.setDate(start.getDate() - 7);
+        break;
+      case 'month':
+        start.setMonth(start.getMonth() - 1);
+        break;
+      case 'year':
+        start.setFullYear(start.getFullYear() - 1);
+        break;
+    }
+    return { startDate: start.toISOString(), endDate: end.toISOString() };
+  }, [dateRange]);
+
   const { data: userGrowth, isLoading: loadingUserGrowth, refetch: refetchUserGrowth } =
-    trpc.adminAnalytics.getUserGrowth.useQuery({ period: dateRange });
-  
+    trpc.adminAnalytics.getUserGrowth.useQuery(dateRangeParams);
+
   const { data: tradingMetrics, isLoading: loadingTrading, refetch: refetchTrading } =
-    trpc.adminAnalytics.getTradingMetrics.useQuery({ period: dateRange });
-  
+    trpc.adminAnalytics.getTradingMetrics.useQuery(dateRangeParams);
+
   const { data: revenueMetrics, isLoading: loadingRevenue, refetch: refetchRevenue } =
-    trpc.adminAnalytics.getRevenueMetrics.useQuery({ period: dateRange });
-  
+    trpc.adminAnalytics.getRevenueMetrics.useQuery(dateRangeParams);
+
+  const { data: topPerformers, isLoading: loadingPerformers, refetch: refetchPerformers } =
+    trpc.adminAnalytics.getTopPerformers.useQuery({ ...dateRangeParams, limit: 5 });
+
   const { data: systemHealth, isLoading: loadingHealth, refetch: refetchHealth } =
     trpc.adminAnalytics.getSystemHealth.useQuery();
 
@@ -39,12 +65,14 @@ export default function AdminAnalyticsScreen() {
       refetchUserGrowth(),
       refetchTrading(),
       refetchRevenue(),
+      refetchPerformers(),
       refetchHealth(),
     ]);
     setRefreshing(false);
   };
 
-  const isLoading = loadingUserGrowth || loadingTrading || loadingRevenue || loadingHealth;
+  const isLoading =
+    loadingUserGrowth || loadingTrading || loadingRevenue || loadingPerformers || loadingHealth;
 
   if (isLoading && !refreshing) {
     return (
@@ -54,12 +82,16 @@ export default function AdminAnalyticsScreen() {
     );
   }
 
-  // Prepare chart data
+  const usersByDate = userGrowth?.usersByDate ?? [];
+  const tradesByDate = tradingMetrics?.tradesByDate ?? [];
+  const revenueByDate = revenueMetrics?.revenueByDate ?? [];
+  const tradesByType = tradingMetrics?.tradesByType ?? [];
+
   const userGrowthChartData = {
-    labels: userGrowth?.data.map((d) => d.label) || [],
+    labels: usersByDate.map((row) => dayLabel(row.date)),
     datasets: [
       {
-        data: userGrowth?.data.map((d) => d.value) || [0],
+        data: usersByDate.map((row) => row.count),
         color: (opacity = 1) => `rgba(16, 185, 129, ${opacity})`,
         strokeWidth: 2,
       },
@@ -67,32 +99,29 @@ export default function AdminAnalyticsScreen() {
   };
 
   const tradingVolumeChartData = {
-    labels: tradingMetrics?.volumeByPeriod.map((d) => d.label) || [],
-    datasets: [
-      {
-        data: tradingMetrics?.volumeByPeriod.map((d) => d.value) || [0],
-      },
-    ],
+    labels: tradesByDate.map((row) => dayLabel(row.date)),
+    datasets: [{ data: tradesByDate.map((row) => row.energy) }],
   };
 
+  // Payment amounts are stored in minor units (cents).
   const revenueChartData = {
-    labels: revenueMetrics?.revenueByPeriod.map((d) => d.label) || [],
+    labels: revenueByDate.map((row) => dayLabel(row.date)),
     datasets: [
       {
-        data: revenueMetrics?.revenueByPeriod.map((d) => d.value) || [0],
+        data: revenueByDate.map((row) => Number(row.revenue) / 100),
         color: (opacity = 1) => `rgba(59, 130, 246, ${opacity})`,
         strokeWidth: 2,
       },
     ],
   };
 
-  const tradeTypesPieData = tradingMetrics?.tradeTypes.map((t, index) => ({
-    name: t.type,
-    population: t.count,
+  const tradeTypesPieData = tradesByType.map((row, index) => ({
+    name: row.type,
+    population: row.count,
     color: ['#10b981', '#3b82f6', '#f59e0b'][index % 3],
     legendFontColor: '#374151',
     legendFontSize: 12,
-  })) || [];
+  }));
 
   const chartConfig = {
     backgroundColor: '#ffffff',
@@ -152,15 +181,13 @@ export default function AdminAnalyticsScreen() {
         <View style={styles.kpiContainer}>
           <View style={styles.kpiCard}>
             <Ionicons name="people" size={24} color="#10b981" />
-            <Text style={styles.kpiValue}>{userGrowth?.totalUsers || 0}</Text>
+            <Text style={styles.kpiValue}>{userGrowth?.totalUsers ?? 0}</Text>
             <Text style={styles.kpiLabel}>Total Users</Text>
           </View>
           <View style={styles.kpiCard}>
             <Ionicons name="flash" size={24} color="#3b82f6" />
-            <Text style={styles.kpiValue}>
-              {((tradingMetrics?.totalEnergyTraded || 0) / 1000).toFixed(1)}k
-            </Text>
-            <Text style={styles.kpiLabel}>kWh Traded</Text>
+            <Text style={styles.kpiValue}>{tradingMetrics?.totalEnergy ?? 0}</Text>
+            <Text style={styles.kpiLabel}>kWh Traded (executed)</Text>
           </View>
         </View>
 
@@ -168,66 +195,81 @@ export default function AdminAnalyticsScreen() {
           <View style={styles.kpiCard}>
             <Ionicons name="cash" size={24} color="#f59e0b" />
             <Text style={styles.kpiValue}>
-              {((revenueMetrics?.totalRevenue || 0) / 1000).toFixed(0)}k
+              {(Number(revenueMetrics?.totalRevenue ?? 0) / 100).toFixed(0)}
             </Text>
-            <Text style={styles.kpiLabel}>Revenue (TZS)</Text>
+            <Text style={styles.kpiLabel}>
+              Completed payments ({revenueMetrics?.totalPayments ?? 0}), currencies not separated
+            </Text>
           </View>
           <View style={styles.kpiCard}>
             <Ionicons name="trending-up" size={24} color="#8b5cf6" />
-            <Text style={styles.kpiValue}>{tradingMetrics?.activeTraders || 0}</Text>
-            <Text style={styles.kpiLabel}>Active Traders</Text>
+            <Text style={styles.kpiValue}>{userGrowth?.activeUsers ?? 0}</Text>
+            <Text style={styles.kpiLabel}>Users who traded</Text>
           </View>
         </View>
 
         {/* User Growth Chart */}
         <View style={styles.chartCard}>
-          <Text style={styles.chartTitle}>User Growth</Text>
-          <LineChart
-            data={userGrowthChartData}
-            width={screenWidth - 48}
-            height={220}
-            chartConfig={chartConfig}
-            bezier
-            style={styles.chart}
-          />
+          <Text style={styles.chartTitle}>New Users per Day</Text>
+          {usersByDate.length > 0 ? (
+            <LineChart
+              data={userGrowthChartData}
+              width={screenWidth - 48}
+              height={220}
+              chartConfig={chartConfig}
+              bezier
+              style={styles.chart}
+            />
+          ) : (
+            <Text style={styles.emptyText}>No users signed up in this range</Text>
+          )}
         </View>
 
         {/* Trading Volume Chart */}
         <View style={styles.chartCard}>
-          <Text style={styles.chartTitle}>Trading Volume (kWh)</Text>
-          <BarChart
-            data={tradingVolumeChartData}
-            width={screenWidth - 48}
-            height={220}
-            chartConfig={{
-              ...chartConfig,
-              color: (opacity = 1) => `rgba(59, 130, 246, ${opacity})`,
-            }}
-            style={styles.chart}
-            yAxisSuffix=""
-          />
+          <Text style={styles.chartTitle}>Traded Energy per Day (kWh)</Text>
+          {tradesByDate.length > 0 ? (
+            <BarChart
+              data={tradingVolumeChartData}
+              width={screenWidth - 48}
+              height={220}
+              chartConfig={{
+                ...chartConfig,
+                color: (opacity = 1) => `rgba(59, 130, 246, ${opacity})`,
+              }}
+              style={styles.chart}
+              yAxisLabel=""
+              yAxisSuffix=""
+            />
+          ) : (
+            <Text style={styles.emptyText}>No executed trades in this range</Text>
+          )}
         </View>
 
         {/* Revenue Trends Chart */}
         <View style={styles.chartCard}>
-          <Text style={styles.chartTitle}>Revenue Trends (TZS)</Text>
-          <LineChart
-            data={revenueChartData}
-            width={screenWidth - 48}
-            height={220}
-            chartConfig={{
-              ...chartConfig,
-              color: (opacity = 1) => `rgba(59, 130, 246, ${opacity})`,
-            }}
-            bezier
-            style={styles.chart}
-          />
+          <Text style={styles.chartTitle}>Completed Payments per Day</Text>
+          {revenueByDate.length > 0 ? (
+            <LineChart
+              data={revenueChartData}
+              width={screenWidth - 48}
+              height={220}
+              chartConfig={{
+                ...chartConfig,
+                color: (opacity = 1) => `rgba(59, 130, 246, ${opacity})`,
+              }}
+              bezier
+              style={styles.chart}
+            />
+          ) : (
+            <Text style={styles.emptyText}>No completed payments in this range</Text>
+          )}
         </View>
 
         {/* Trade Types Distribution */}
-        {tradeTypesPieData.length > 0 && (
-          <View style={styles.chartCard}>
-            <Text style={styles.chartTitle}>Trade Types Distribution</Text>
+        <View style={styles.chartCard}>
+          <Text style={styles.chartTitle}>Trade Types Distribution</Text>
+          {tradeTypesPieData.length > 0 ? (
             <PieChart
               data={tradeTypesPieData}
               width={screenWidth - 48}
@@ -238,30 +280,32 @@ export default function AdminAnalyticsScreen() {
               paddingLeft="15"
               style={styles.chart}
             />
-          </View>
-        )}
+          ) : (
+            <Text style={styles.emptyText}>No executed trades in this range</Text>
+          )}
+        </View>
 
         {/* System Health */}
         <View style={styles.chartCard}>
           <Text style={styles.chartTitle}>System Health</Text>
           <View style={styles.healthGrid}>
             <View style={styles.healthItem}>
-              <Text style={styles.healthLabel}>Active Users (24h)</Text>
-              <Text style={styles.healthValue}>{systemHealth?.activeUsers24h || 0}</Text>
+              <Text style={styles.healthLabel}>Registered Assets</Text>
+              <Text style={styles.healthValue}>{systemHealth?.totalAssets ?? 0}</Text>
+            </View>
+            <View style={styles.healthItem}>
+              <Text style={styles.healthLabel}>Active Assets</Text>
+              <Text style={styles.healthValue}>
+                {systemHealth?.activeAssets ?? 0} ({systemHealth?.assetHealthRate ?? '0'}%)
+              </Text>
+            </View>
+            <View style={styles.healthItem}>
+              <Text style={styles.healthLabel}>Telemetry Rows (24h)</Text>
+              <Text style={styles.healthValue}>{systemHealth?.recentTelemetry ?? 0}</Text>
             </View>
             <View style={styles.healthItem}>
               <Text style={styles.healthLabel}>Pending Trades</Text>
-              <Text style={styles.healthValue}>{systemHealth?.pendingTrades || 0}</Text>
-            </View>
-            <View style={styles.healthItem}>
-              <Text style={styles.healthLabel}>Failed Trades (24h)</Text>
-              <Text style={styles.healthValue}>{systemHealth?.failedTrades24h || 0}</Text>
-            </View>
-            <View style={styles.healthItem}>
-              <Text style={styles.healthLabel}>Avg Response Time</Text>
-              <Text style={styles.healthValue}>
-                {systemHealth?.avgResponseTime || 0}ms
-              </Text>
+              <Text style={styles.healthValue}>{systemHealth?.pendingTrades ?? 0}</Text>
             </View>
           </View>
         </View>
@@ -269,22 +313,22 @@ export default function AdminAnalyticsScreen() {
         {/* Top Performers */}
         <View style={styles.chartCard}>
           <Text style={styles.chartTitle}>Top Performers</Text>
-          {tradingMetrics?.topTraders?.slice(0, 5).map((trader, index) => (
-            <View key={trader.userId} style={styles.traderItem}>
-              <View style={styles.traderRank}>
-                <Text style={styles.traderRankText}>#{index + 1}</Text>
+          {(topPerformers?.topTraders ?? []).length > 0 ? (
+            (topPerformers?.topTraders ?? []).map((trader, index) => (
+              <View key={trader.userId} style={styles.traderItem}>
+                <View style={styles.traderRank}>
+                  <Text style={styles.traderRankText}>#{index + 1}</Text>
+                </View>
+                <View style={styles.traderInfo}>
+                  <Text style={styles.traderName}>{trader.userName}</Text>
+                  <Text style={styles.traderStats}>{trader.totalTrades} trades</Text>
+                </View>
+                <Text style={styles.traderRevenue}>{trader.totalEnergy} kWh</Text>
               </View>
-              <View style={styles.traderInfo}>
-                <Text style={styles.traderName}>{trader.userName}</Text>
-                <Text style={styles.traderStats}>
-                  {trader.totalTrades} trades • {(trader.totalEnergy / 1000).toFixed(1)}k kWh
-                </Text>
-              </View>
-              <Text style={styles.traderRevenue}>
-                {(trader.totalRevenue / 1000).toFixed(1)}k TZS
-              </Text>
-            </View>
-          ))}
+            ))
+          ) : (
+            <Text style={styles.emptyText}>No executed trades in this range</Text>
+          )}
         </View>
       </ScrollView>
     </View>
@@ -386,6 +430,12 @@ const styles = StyleSheet.create({
   chart: {
     marginVertical: 8,
     borderRadius: 16,
+  },
+  emptyText: {
+    fontSize: 13,
+    color: '#6b7280',
+    paddingVertical: 24,
+    textAlign: 'center',
   },
   healthGrid: {
     flexDirection: 'row',

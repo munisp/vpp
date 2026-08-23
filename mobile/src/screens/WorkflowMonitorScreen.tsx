@@ -9,6 +9,7 @@ import {
   Modal,
   ScrollView,
   Alert,
+  Platform,
 } from 'react-native';
 import { trpc } from '../services/trpc';
 import { Ionicons } from '@expo/vector-icons';
@@ -287,7 +288,7 @@ export default function WorkflowMonitorScreen() {
                   <TouchableOpacity
                     style={styles.cancelButton}
                     onPress={() => handleCancelWorkflow(selectedWorkflow.workflowId)}
-                    disabled={cancelWorkflow.isLoading}
+                    disabled={cancelWorkflow.isPending}
                   >
                     <Ionicons name="stop-circle" size={20} color="#fff" />
                     <Text style={styles.cancelButtonText}>Cancel Workflow</Text>
@@ -332,7 +333,7 @@ function DetailRow({
         <Ionicons name={icon as any} size={16} color="#6b7280" />
         <Text style={styles.detailLabel}>{label}</Text>
       </View>
-      <Text style={[styles.detailValue, valueColor && { color: valueColor }]}>{value}</Text>
+      <Text style={[styles.detailValue, valueColor ? { color: valueColor } : null]}>{value}</Text>
     </View>
   );
 }

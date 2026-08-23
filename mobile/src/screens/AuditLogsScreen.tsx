@@ -34,7 +34,13 @@ export default function AuditLogsScreen() {
     limit: 50,
   });
 
-  const { data: stats } = trpc.auditLogs.getStats.useQuery();
+  const { data: stats } = trpc.auditLogs.getStats.useQuery({});
+
+  // getStats returns counts per status; the screen shows the derived shares.
+  const failedActions = stats?.byStatus.find((row) => row.status === 'failure')?.count ?? 0;
+  const successfulActions = stats?.byStatus.find((row) => row.status === 'success')?.count ?? 0;
+  const successRate =
+    stats && stats.total > 0 ? (successfulActions / stats.total) * 100 : null;
 
   const onRefresh = async () => {
     setRefreshing(true);
@@ -214,15 +220,17 @@ export default function AuditLogsScreen() {
       {stats && (
         <View style={styles.statsContainer}>
           <View style={styles.statItem}>
-            <Text style={styles.statValue}>{stats.totalLogs}</Text>
+            <Text style={styles.statValue}>{stats.total}</Text>
             <Text style={styles.statLabel}>Total Logs</Text>
           </View>
           <View style={styles.statItem}>
-            <Text style={styles.statValue}>{stats.successRate.toFixed(1)}%</Text>
+            <Text style={styles.statValue}>
+              {successRate === null ? '—' : `${successRate.toFixed(1)}%`}
+            </Text>
             <Text style={styles.statLabel}>Success Rate</Text>
           </View>
           <View style={styles.statItem}>
-            <Text style={styles.statValue}>{stats.failedActions}</Text>
+            <Text style={styles.statValue}>{failedActions}</Text>
             <Text style={styles.statLabel}>Failed</Text>
           </View>
         </View>

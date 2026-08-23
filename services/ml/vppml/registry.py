@@ -395,14 +395,17 @@ def promote(connection: Any, model_name: str, version: str, *, actor: str) -> Mo
     target = get_version(connection, model_name, version)
     if target is None:
         raise RegistryError(f"{model_name} {version} is not in the registry")
-    if target.status == "production":
-        return target
     if target.status in ("failed", "deprecated"):
         raise RegistryError(
             f"{model_name} {version} is {target.status}; promote a staged version or roll back to "
             "a previously deployed one instead"
         )
+    # Verified before the already-production shortcut: a promote that reports success on
+    # a version whose weights no longer hash to what was recorded would be an all-clear
+    # for an artifact nothing can serve.
     verify_artifact(target)
+    if target.status == "production":
+        return target
 
     with connection.cursor() as cursor:
         cursor.execute(

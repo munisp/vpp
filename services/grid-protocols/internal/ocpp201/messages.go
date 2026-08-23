@@ -138,6 +138,21 @@ type StatusNotificationRequest struct {
 	CustomData      *Custom `json:"customData,omitempty"`
 }
 
+// connectorStatuses is ConnectorStatusEnumType. 2.0.1 has five statuses, not
+// 1.6's nine: a station sending "Charging" or "Preparing" here is not speaking
+// 2.0.1, and forwarding it would leave the platform mapping a value the standard
+// does not define.
+var connectorStatuses = [5]string{"Available", "Occupied", "Reserved", "Unavailable", "Faulted"}
+
+func validConnectorStatus(status string) bool {
+	for _, candidate := range connectorStatuses {
+		if candidate == status {
+			return true
+		}
+	}
+	return false
+}
+
 type IDToken struct {
 	IDToken string  `json:"idToken"`
 	Type    string  `json:"type"`

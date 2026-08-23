@@ -166,7 +166,8 @@ const boot201Envelope = envelope(
 const status201Envelope = envelope(
   z.object({
     timestamp: z.string().min(1),
-    connectorStatus: z.string().min(1).max(32),
+    // ConnectorStatusEnumType: 2.0.1's five statuses, not 1.6's nine.
+    connectorStatus: z.enum(['Available', 'Occupied', 'Reserved', 'Unavailable', 'Faulted']),
     evseId: z.number().int().positive(),
     connectorId: z.number().int().positive(),
   })

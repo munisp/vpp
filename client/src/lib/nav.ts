@@ -138,6 +138,7 @@ export const NAV_GROUPS: NavGroup[] = [
       { label: 'Grid Operator', path: '/admin/grid-operator', adminOnly: true },
       { label: 'Payment Credentials', path: '/admin/payment-credentials', adminOnly: true },
       { label: 'Reconciliation', path: '/admin/reconciliation', adminOnly: true, keywords: ['settlement'] },
+      { label: 'Ledger Reconciliation', path: '/admin/ledger', adminOnly: true, keywords: ['double entry', 'tigerbeetle', 'balance'] },
       { label: 'Webhook Config', path: '/admin/webhook-config', adminOnly: true, keywords: ['callback'] },
       { label: 'Admin Analytics', path: '/admin/analytics', adminOnly: true },
       { label: 'Analytics Dashboard', path: '/admin/analytics-dashboard', adminOnly: true },

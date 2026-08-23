@@ -67,6 +67,7 @@ import DigitalTwin from "@/pages/DigitalTwin";
 import OperationsWall from "@/pages/OperationsWall";
 import MatterLoads from "@/pages/MatterLoads";
 import DegradedOperation from "@/pages/DegradedOperation";
+import LedgerReconciliation from "@/pages/LedgerReconciliation";
 import LocationalFlexibility from "@/pages/LocationalFlexibility";
 import V2G from "@/pages/V2G";
 import Wallet from "@/pages/Wallet";
@@ -210,6 +211,11 @@ function Router() {
       <Route path="/admin/reconciliation">
         <RouteShell adminOnly>
           <ReconciliationDashboard />
+        </RouteShell>
+      </Route>
+      <Route path="/admin/ledger">
+        <RouteShell adminOnly chrome={false}>
+          <LedgerReconciliation />
         </RouteShell>
       </Route>
       <Route path="/admin/cache-monitoring">

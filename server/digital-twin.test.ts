@@ -209,6 +209,20 @@ describe('digital twin graph', () => {
     expect(graph.measuredBehindMeter).toBe(0);
   });
 
+  it('does not claim nothing is reporting when equipment reported without a power value', () => {
+    const graph = graphOf([
+      asset({ id: 1, assetType: 'solar', observation: observation({ powerWatts: null }) }),
+    ]);
+
+    const site = graph.nodes.find(node => node.id === 'site');
+    // The bus is being seen, so the caption may not say the opposite of its own
+    // state; the net flow is still unknown rather than zero.
+    expect(site?.evidence).toBe('measured');
+    expect(site?.detail).not.toContain('No asset behind this bus is currently reporting');
+    expect(site?.detail).toContain('without a power value');
+    expect(site?.detail).toContain('unknown rather than zero');
+  });
+
   it('says an empty scope is an empty registry, not an idle plant', () => {
     const graph = graphOf([]);
     const site = graph.nodes.find(node => node.id === 'site');

@@ -1,5 +1,8 @@
 import { eq, and, desc, gte, lte, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/node-postgres";
+// `pg` is CommonJS and has no ESM named exports, so the default export is
+// destructured rather than imported by name.
+import pg from "pg";
 import {
   InsertUser,
   users,
@@ -45,12 +48,21 @@ export async function getDb() {
       // `timestamp without time zone` holding UTC, and `NOW()` is converted
       // with the *session* time zone. A non-UTC session would silently shift
       // every server-generated timestamp (payment, settlement, DR windows).
-      _db = drizzle({
-        connection: {
-          connectionString: process.env.DATABASE_URL,
-          options: '-c timezone=UTC',
-        },
+      // The pool is created here rather than by drizzle so an `error` listener
+      // can be attached to it. Without one, a backend terminated out from under
+      // an idle client (failover, restart, `pg_terminate_backend`) emits an
+      // unhandled `error` event and takes the whole API process down, which is
+      // worse than the outage it is reacting to: callers lose the platform's own
+      // "this could not be read" surfaces and see a transport failure instead.
+      const pool = new pg.Pool({
+        connectionString: process.env.DATABASE_URL,
+        options: '-c timezone=UTC',
       });
+      pool.on('error', error => {
+        console.error('[Database] Idle client error; the pool will reconnect:', error);
+      });
+
+      _db = drizzle({ client: pool });
     } catch (error) {
       console.warn("[Database] Failed to connect:", error);
       _db = null;

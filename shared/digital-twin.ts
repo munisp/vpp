@@ -462,7 +462,9 @@ export function buildTwinGraph(input: TwinInput): TwinGraph {
           ? 'No asset is registered in this scope at all, so this is an empty registry rather than an idle plant.'
           : assetsBehindMeter === 0
             ? 'Only meters are registered here, so nothing is known about the equipment behind the bus.'
-            : 'No asset behind this bus is currently reporting, so the net flow is unknown rather than zero.',
+            : seenBehindMeterWithoutPower > 0
+              ? `${seenBehindMeterWithoutPower} of the ${assetsBehindMeter} assets behind this bus reported without a power value, so the bus is being seen but its net flow is unknown rather than zero.`
+              : 'No asset behind this bus is currently reporting, so the net flow is unknown rather than zero.',
   });
 
   nodes.push({

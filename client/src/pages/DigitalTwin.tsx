@@ -25,6 +25,7 @@ import {
   TableRow,
 } from '@/components/ui/table';
 import { useWebSocket } from '@/hooks/useWebSocket';
+import { operatorErrorDetail } from '@/lib/query-error';
 import { trpc } from '@/lib/trpc';
 import type { StateTone } from '@/lib/tone';
 
@@ -57,7 +58,11 @@ export default function DigitalTwin() {
     void utils.digitalTwin.mine.invalidate();
   }, [telemetry, utils]);
 
-  const graph = twin.data;
+  // A failed refetch drops the diagram rather than leaving the last good one on
+  // screen: react-query keeps prior data, and prior data under a red banner
+  // still reads as the plant's current state, badged with the age it had when
+  // the read last worked.
+  const graph = twin.isError ? undefined : twin.data;
   const rows = useMemo(
     () => (graph?.nodes ?? []).filter(node => node.assetId !== undefined),
     [graph]
@@ -111,7 +116,7 @@ export default function DigitalTwin() {
               <p className="font-medium text-red-900 dark:text-red-200">
                 The twin could not be read, so nothing is drawn.
               </p>
-              <p className="text-red-800 dark:text-red-300">{twin.error.message}</p>
+              <p className="text-red-800 dark:text-red-300">{operatorErrorDetail(twin.error)}</p>
             </div>
           </div>
         )}

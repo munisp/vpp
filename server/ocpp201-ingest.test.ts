@@ -280,6 +280,29 @@ describe('updating a transaction', () => {
     expect(JSON.parse(String(updates[0].values.metadata)).lastEventOffline).toBe(true);
   });
 
+  it('stores peak power at the deci-kilowatt scale the column holds', async () => {
+    const { handleTransactionEvent201 } = await import('./services/ocpp201-ingest');
+    await handleTransactionEvent201('CS-1', {
+      ...startedEvent(),
+      eventType: 'Updated',
+      seqNo: 4,
+      meterValue: [
+        {
+          timestamp: '2026-01-01T00:05:00Z',
+          sampledValue: [
+            {
+              value: 7_000,
+              measurand: 'Power.Active.Import',
+              unitOfMeasure: { unit: 'W' },
+            },
+          ],
+        },
+      ],
+    });
+    // charging_sessions.max_power_kw is kW * 10, so 7 kW is 70.
+    expect(updates[0].values.maxPowerKw).toBe(70);
+  });
+
   it('closes the session on Ended and records the stop reason', async () => {
     const { handleTransactionEvent201 } = await import('./services/ocpp201-ingest');
     await handleTransactionEvent201('CS-1', {
@@ -398,13 +421,48 @@ describe('station lifecycle', () => {
     const { handleStatusNotification201 } = await import('./services/ocpp201-ingest');
     await handleStatusNotification201('CS-1', {
       timestamp: '2026-01-01T00:00:00Z',
-      connectorStatus: 'Charging',
+      connectorStatus: 'Occupied',
       evseId: 2,
       connectorId: 1,
     });
-    expect(updates[0].values.status).toBe('charging');
+    expect(updates[0].values.status).toBe('occupied');
     const metadata = JSON.parse(String(updates[0].values.metadata));
     expect(metadata.lastConnectorStatus).toMatchObject({ evseId: 2, connectorId: 1 });
+  });
+
+  it('maps every 2.0.1 connector status', async () => {
+    const { handleStatusNotification201, OCPP201_CONNECTOR_STATUS_MAP } = await import(
+      './services/ocpp201-ingest'
+    );
+    expect(Object.keys(OCPP201_CONNECTOR_STATUS_MAP).sort()).toEqual([
+      'Available',
+      'Faulted',
+      'Occupied',
+      'Reserved',
+      'Unavailable',
+    ]);
+    for (const status of Object.keys(OCPP201_CONNECTOR_STATUS_MAP)) {
+      updates.length = 0;
+      await handleStatusNotification201('CS-1', {
+        timestamp: '2026-01-01T00:00:00Z',
+        connectorStatus: status,
+        evseId: 1,
+        connectorId: 1,
+      });
+      expect(updates[0].values.status).toBe(OCPP201_CONNECTOR_STATUS_MAP[status]);
+    }
+  });
+
+  it('rejects a 1.6-only connector status a 2.0.1 station must not send', async () => {
+    const { handleStatusNotification201 } = await import('./services/ocpp201-ingest');
+    await expect(
+      handleStatusNotification201('CS-1', {
+        timestamp: '2026-01-01T00:00:00Z',
+        connectorStatus: 'Preparing',
+        evseId: 1,
+        connectorId: 1,
+      })
+    ).rejects.toThrow(/unknown OCPP 2.0.1 connector status/);
   });
 
   it('rejects a connector status it cannot map', async () => {

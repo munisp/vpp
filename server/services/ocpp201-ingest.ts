@@ -24,12 +24,28 @@ import { chargingSessions, chargingStations } from '../../drizzle/nextgen-vpp-sc
 import { ocppIdTags } from '../../drizzle/grid-protocol-schema';
 import {
   GridProtocolError,
-  OCPP_STATUS_MAP,
   parseTimestamp,
   requireDb,
   requireStation,
   safeParse,
 } from './grid-protocol-ingest';
+
+/**
+ * ConnectorStatusEnumType (OCPP 2.0.1 part 2). This is a different, smaller set
+ * than 1.6's connector statuses, so the 1.6 map is deliberately not reused: it
+ * has no `Occupied`, and it would accept 1.6-only values a 2.0.1 station must
+ * never send.
+ */
+export const OCPP201_CONNECTOR_STATUS_MAP: Record<
+  string,
+  'available' | 'occupied' | 'charging' | 'faulted' | 'offline'
+> = {
+  Available: 'available',
+  Occupied: 'occupied',
+  Reserved: 'occupied',
+  Unavailable: 'offline',
+  Faulted: 'faulted',
+};
 
 /** IdTokenInfoType status values (OCPP 2.0.1 part 2, AuthorizationStatusEnumType). */
 export type AuthorizationStatus =
@@ -116,7 +132,7 @@ export async function handleStatusNotification201(
   req: StatusNotification201
 ): Promise<void> {
   const station = await requireStation(stationId);
-  const mapped = OCPP_STATUS_MAP[req.connectorStatus];
+  const mapped = OCPP201_CONNECTOR_STATUS_MAP[req.connectorStatus];
   if (!mapped) {
     throw new GridProtocolError(400, `unknown OCPP 2.0.1 connector status ${req.connectorStatus}`);
   }
@@ -358,7 +374,7 @@ export async function handleTransactionEvent201(
     .update(chargingSessions)
     .set({
       ...energy,
-      ...(powerW === null ? {} : { maxPowerKw: Math.round(Math.abs(powerW) / 1000) }),
+      ...(powerW === null ? {} : { maxPowerKw: Math.round(Math.abs(powerW) / 100) }),
       ...(soc === null ? {} : { endSocPercent: soc }),
       ...(req.eventType === 'Ended'
         ? { endTime: parseTimestamp(req.timestamp, 'timestamp'), status: 'completed' as const }

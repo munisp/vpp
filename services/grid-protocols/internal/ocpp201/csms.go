@@ -301,6 +301,9 @@ func (cs *CSMS) Dispatch(ctx context.Context, stationID string, call *ocppj.Call
 		if req.ConnectorStatus == "" || req.Timestamp == "" {
 			return nil, violation("connectorStatus and timestamp are required")
 		}
+		if !validConnectorStatus(req.ConnectorStatus) {
+			return nil, violation("connectorStatus must be one of " + strings.Join(connectorStatuses[:], ", "))
+		}
 		if req.EvseID <= 0 || req.ConnectorID <= 0 {
 			return nil, violation("evseId and connectorId must be positive")
 		}

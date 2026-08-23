@@ -26,6 +26,7 @@ type stubBackend struct {
 
 	events      []TransactionEventRequest
 	meterValues []MeterValuesRequest
+	statuses    []StatusNotificationRequest
 	heartbeats  int
 }
 
@@ -40,7 +41,10 @@ func (s *stubBackend) Heartbeat201(context.Context, string) error {
 	return nil
 }
 
-func (s *stubBackend) StatusNotification201(context.Context, string, StatusNotificationRequest) error {
+func (s *stubBackend) StatusNotification201(_ context.Context, _ string, req StatusNotificationRequest) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.statuses = append(s.statuses, req)
 	return nil
 }
 
@@ -203,6 +207,17 @@ func TestBootHeartbeatStatusAndMeterValues(t *testing.T) {
 		Timestamp: time.Now().UTC().Format(time.RFC3339), ConnectorStatus: "Available", EvseID: 1, ConnectorID: 1,
 	}); frame.Result == nil {
 		t.Fatalf("expected a status result, got %+v", frame)
+	}
+
+	// "Charging" is a 1.6 connector status; 2.0.1 has no such value, so it must
+	// not reach the platform as if it were a mappable status.
+	if frame := sendCall(t, conn, "3b", ActionStatusNotification, StatusNotificationRequest{
+		Timestamp: time.Now().UTC().Format(time.RFC3339), ConnectorStatus: "Charging", EvseID: 1, ConnectorID: 1,
+	}); frame.Result != nil {
+		t.Fatalf("expected a 1.6 connector status to be refused, got %+v", frame)
+	}
+	if len(backend.statuses) != 1 {
+		t.Fatalf("expected only the conformant status to reach the platform, got %d", len(backend.statuses))
 	}
 
 	multiplier := 3

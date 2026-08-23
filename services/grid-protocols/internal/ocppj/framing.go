@@ -1,21 +1,26 @@
-// Package ocpp16 implements the OCPP 1.6J central system: the JSON-over-WebSocket
-// wire format from the Open Charge Alliance specification, section 4 (RPC
-// framework) and the core profile operations.
-package ocpp16
+// Package ocppj implements the OCPP-J RPC framework: the JSON-over-WebSocket
+// framing and call correlation shared by OCPP 1.6J (specification section 4) and
+// OCPP 2.0.1 (part 4). The framing is identical in both versions; only the
+// actions and payloads differ, so the versions live in their own packages on top
+// of this one.
+package ocppj
 
 import (
 	"encoding/json"
 	"fmt"
 )
 
-// Message type identifiers from OCPP-J 1.6 section 4.2.
+// Message type identifiers from OCPP-J section 4.2, unchanged in 2.0.1.
 const (
 	MessageTypeCall       = 2
 	MessageTypeCallResult = 3
 	MessageTypeCallError  = 4
 )
 
-// Error codes from OCPP-J 1.6 section 4.2.3.
+// Error codes from OCPP-J 1.6 section 4.2.3. OCPP 2.0.1 renamed
+// FormationViolation to FormatViolation and OccurrenceConstraintViolation to
+// OccurenceConstraintViolation (sic, part 4 table 4); each version package
+// chooses the spelling it puts on the wire.
 const (
 	ErrNotImplemented              = "NotImplemented"
 	ErrNotSupported                = "NotSupported"
@@ -23,6 +28,7 @@ const (
 	ErrProtocolError               = "ProtocolError"
 	ErrSecurityError               = "SecurityError"
 	ErrFormationViolation          = "FormationViolation"
+	ErrFormatViolation             = "FormatViolation"
 	ErrPropertyConstraintViolation = "PropertyConstraintViolation"
 	ErrGenericError                = "GenericError"
 )
@@ -50,6 +56,21 @@ type CallError struct {
 
 func (e *CallError) Error() string {
 	return fmt.Sprintf("ocpp call error %s: %s", e.ErrorCode, e.ErrorDescription)
+}
+
+// UniqueIDOf reads the message id out of a frame the decoder rejected, so a
+// malformed request can still be answered with a CALLERROR the charge point can
+// correlate. An empty string means the frame is too broken to answer.
+func UniqueIDOf(data []byte) string {
+	var raw []json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil || len(raw) < 2 {
+		return ""
+	}
+	var id string
+	if err := json.Unmarshal(raw[1], &id); err != nil {
+		return ""
+	}
+	return id
 }
 
 // Frame is exactly one of Call, CallResult or CallError.

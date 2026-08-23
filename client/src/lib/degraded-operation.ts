@@ -39,6 +39,8 @@ export interface CapabilityStatus {
   capability: string;
   requires: string[];
   missing: string[];
+  /** Dependencies not in an outage that have not answered a real call recently. */
+  unproven?: string[];
   posture: CapabilityPosture;
   evidenceLimit: string | null;
   reason: string;
@@ -128,6 +130,30 @@ export const POSTURE_COPY: Record<
   },
 };
 
+/**
+ * How one capability should read.
+ *
+ * `available` with nothing observed is the trap this screen exists to avoid: a
+ * payout path whose gateway has been silent all day is not blocked, because the
+ * payout call is itself what establishes the evidence — but it is not proven
+ * either, and drawing it green is the reassuring lie.
+ */
+export function capabilityCopy(status: CapabilityStatus): {
+  label: string;
+  tone: StateTone;
+  meaning: string;
+} {
+  if (status.posture === 'available' && (status.unproven?.length ?? 0) > 0) {
+    return {
+      label: 'Unproven',
+      tone: 'warning',
+      meaning:
+        'Not blocked — nothing is in an outage — but nothing has answered recently either. The next real call is what establishes this, and it fails rather than reporting a result it did not get.',
+    };
+  }
+  return POSTURE_COPY[status.posture];
+}
+
 export const OBSERVATION_COPY: Record<Observation, { label: string; meaning: string }> = {
   reachable: { label: 'Answered', meaning: 'The dependency completed the call.' },
   unreachable: {
@@ -178,6 +204,8 @@ export interface PostureSummary {
   /** Capabilities the platform is currently refusing outright. */
   refused: number;
   degraded: number;
+  /** Capabilities nothing is blocking, and nothing has proven either. */
+  unproven: number;
   /** True when anything money- or market-facing is refused. */
   moneyPathsBlocked: boolean;
 }
@@ -202,6 +230,7 @@ export function summarisePosture(
     unknown: 0,
     refused: 0,
     degraded: 0,
+    unproven: 0,
     moneyPathsBlocked: false,
   };
 
@@ -212,6 +241,9 @@ export function summarisePosture(
   }
 
   for (const capability of capabilities) {
+    if (capability.posture === 'available' && (capability.unproven?.length ?? 0) > 0) {
+      summary.unproven += 1;
+    }
     if (capability.posture === 'refused') {
       summary.refused += 1;
       if (BINDING_CAPABILITIES.includes(capability.capability)) summary.moneyPathsBlocked = true;
@@ -241,6 +273,12 @@ export function postureHeadline(summary: PostureSummary): { text: string; tone: 
   if (summary.degraded > 0) {
     return {
       text: `${summary.degraded} capabilities running without their usual evidence`,
+      tone: 'warning',
+    };
+  }
+  if (summary.unproven > 0) {
+    return {
+      text: `${summary.unproven} capabilities unproven: nothing is blocking them, nothing has confirmed them`,
       tone: 'warning',
     };
   }

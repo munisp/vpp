@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  capabilityCopy,
   formatAge,
   memberNotice,
   postureHeadline,
@@ -54,6 +55,27 @@ function capability(
   };
 }
 
+describe('capabilityCopy', () => {
+  it('shows a capability nothing has confirmed as unproven, not available', () => {
+    const copy = capabilityCopy({
+      ...capability('settlement_payout', 'available'),
+      unproven: ['payment_gateway'],
+    });
+    expect(copy.label).toBe('Unproven');
+    expect(copy.tone).toBe('warning');
+  });
+
+  it('only reads as available when every dependency answered', () => {
+    const copy = capabilityCopy({ ...capability('settlement_payout', 'available'), unproven: [] });
+    expect(copy.label).toBe('Available');
+    expect(copy.tone).toBe('good');
+  });
+
+  it('keeps a refusal a refusal', () => {
+    expect(capabilityCopy(capability('market_bid', 'refused')).tone).toBe('danger');
+  });
+});
+
 describe('summarisePosture', () => {
   it('counts each dependency state separately so unknown is never folded into up', () => {
     const summary = summarisePosture(
@@ -65,6 +87,18 @@ describe('summarisePosture', () => {
       []
     );
     expect(summary).toMatchObject({ dependencies: 3, up: 1, unknown: 1, down: 1 });
+  });
+
+  it('counts an unproven capability so the headline can say so', () => {
+    const summary = summarisePosture(
+      [],
+      [
+        { ...capability('settlement_payout', 'available'), unproven: ['payment_gateway'] },
+        { ...capability('control_dispatch', 'available'), unproven: [] },
+      ]
+    );
+    expect(summary.unproven).toBe(1);
+    expect(postureHeadline(summary).tone).toBe('warning');
   });
 
   it('flags a refused money capability distinctly from a refused control one', () => {

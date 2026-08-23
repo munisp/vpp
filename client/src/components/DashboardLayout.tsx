@@ -50,7 +50,9 @@ import {
   Users,
   MessageSquare,
   Globe,
-  Coins
+  Coins,
+  MapPin,
+  House
 } from "lucide-react";
 import { CSSProperties, useEffect, useRef, useState } from "react";
 import { useLocation } from "wouter";
@@ -110,8 +112,11 @@ const getMenuSections = (userRole?: string): MenuSection[] => [
       { icon: CloudSun, label: "DR Forecast", path: "/grid/dr-forecast" },
       { icon: Target, label: "Forecast Accuracy", path: "/grid/forecast-accuracy" },
       { icon: Coins, label: "Price Signals", path: "/grid/price-signals" },
+      { icon: MapPin, label: "Locational Flexibility", path: "/grid/locational-flexibility" },
       ...(userRole === 'admin'
         ? [
+            { icon: Activity, label: "Fleet Telemetry", path: "/grid/fleet-telemetry" },
+            { icon: House, label: "Smart-Home Loads", path: "/grid/matter-loads" },
             { icon: ShieldAlert, label: "NTL Detection", path: "/grid/ntl" },
             { icon: FileCheck, label: "Compliance Reports", path: "/grid/compliance-reports" },
           ]

@@ -19,6 +19,7 @@ import { smsInboundRouter } from "../webhooks/sms-inbound";
 import { gridProtocolRouter } from "../webhooks/grid-protocols";
 import { webSocketService } from "../integration/websocket-service";
 import { startControlFallbackSweeper } from "../services/control-delivery";
+import { startFleetTelemetryRollup } from "../services/fleet-telemetry";
 
 function isPortAvailable(port: number): Promise<boolean> {
   return new Promise(resolve => {
@@ -170,7 +171,21 @@ async function startServer() {
         "will not fall back automatically in this process"
     );
   }
-  
+
+  // Roll up fleet telemetry aggregates. Opt-in via FLEET_TELEMETRY_ROLLUP_MS for
+  // the same reason as the sweeper; without it the rolling series only advances
+  // when an operator asks for it, and a stale series reads as a quiet fleet.
+  if (startFleetTelemetryRollup()) {
+    console.log(
+      `[FleetTelemetry] rollup started every ${process.env.FLEET_TELEMETRY_ROLLUP_MS}ms`
+    );
+  } else {
+    console.warn(
+      "[FleetTelemetry] FLEET_TELEMETRY_ROLLUP_MS is not set: rolling fleet " +
+        "aggregates will not advance automatically in this process"
+    );
+  }
+
   // Note: webSocketService.initialize removed - using single WebSocket server from initializeWebSocket
   
   // development mode uses Vite, production mode uses static files

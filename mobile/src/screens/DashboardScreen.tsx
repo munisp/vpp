@@ -288,6 +288,16 @@ export default function DashboardScreen({ navigation }: any) {
             onPress={() => navigation.navigate('PriceSignals')}
           />
           <ActionButton
+            icon="👥"
+            label="Community"
+            onPress={() => navigation.navigate('CommunityTelemetry')}
+          />
+          <ActionButton
+            icon="📍"
+            label="Local Grid"
+            onPress={() => navigation.navigate('LocationalFlexibility')}
+          />
+          <ActionButton
             icon="📖"
             label="Order Book"
             onPress={() => navigation.navigate('OrderBook')}
@@ -344,6 +354,11 @@ export default function DashboardScreen({ navigation }: any) {
               icon="🔄"
               label="Workflows"
               onPress={() => navigation.navigate('WorkflowMonitor')}
+            />
+            <ActionButton
+              icon="🏠"
+              label="Home Loads"
+              onPress={() => navigation.navigate('MatterLoads')}
             />
           </View>
         </View>

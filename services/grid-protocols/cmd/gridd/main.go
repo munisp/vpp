@@ -1,6 +1,7 @@
-// Command gridd runs the grid protocol adapters: an OCPP 1.6J central system,
-// an OpenADR 2.0b VEN and an IEEE 2030.5 client. Each one speaks its real wire
-// protocol; none of them reports a connection it does not have.
+// Command gridd runs the grid protocol adapters: an OCPP 1.6J/2.0.1 central
+// system, an OpenADR 2.0b VEN, an IEEE 2030.5 client and a Matter controller
+// client. Each one speaks its real wire protocol; none of them reports a
+// connection it does not have.
 package main
 
 import (
@@ -21,7 +22,10 @@ import (
 	"github.com/vpp/grid-protocols/config"
 	"github.com/vpp/grid-protocols/internal/admin"
 	"github.com/vpp/grid-protocols/internal/control"
+	"github.com/vpp/grid-protocols/internal/matter"
 	"github.com/vpp/grid-protocols/internal/ocpp16"
+	"github.com/vpp/grid-protocols/internal/ocpp201"
+	"github.com/vpp/grid-protocols/internal/ocppmux"
 	"github.com/vpp/grid-protocols/internal/openadr"
 	"github.com/vpp/grid-protocols/internal/platform"
 	"github.com/vpp/grid-protocols/internal/sep2"
@@ -66,7 +70,7 @@ func run(configPath string, logger *logrus.Logger) error {
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	})
 
-	errs := make(chan error, 3)
+	errs := make(chan error, 4)
 
 	if cfg.OCPP.Enabled {
 		// The supervisor needs the central system and the central system needs the
@@ -75,17 +79,43 @@ func run(configPath string, logger *logrus.Logger) error {
 		// startup finds no supervisor yet rather than a torn pointer, and the sweep
 		// re-asserts its fallback on the next pass.
 		var supervisorRef atomic.Pointer[control.Supervisor]
-		central, err := ocpp16.NewCentralSystem(client, ocpp16.Options{
-			Authenticate:      basicAuthenticator(cfg.OCPP.ChargePoints),
-			HeartbeatInterval: cfg.OCPP.HeartbeatInterval,
-			CallTimeout:       cfg.OCPP.CallTimeout,
-			OnSessionOpen: func(chargePointID string) {
-				if s := supervisorRef.Load(); s != nil {
-					s.OnSessionOpen(chargePointID)
-				}
-			},
-			Logger: logger,
-		})
+		onSessionOpen := func(chargePointID string) {
+			if s := supervisorRef.Load(); s != nil {
+				s.OnSessionOpen(chargePointID)
+			}
+		}
+
+		var central16 ocppmux.V16
+		if cfg.OCPP.Speaks(config.OCPPVersion16) {
+			central, err := ocpp16.NewCentralSystem(client, ocpp16.Options{
+				Authenticate:      basicAuthenticator(cfg.OCPP.ChargePoints),
+				HeartbeatInterval: cfg.OCPP.HeartbeatInterval,
+				CallTimeout:       cfg.OCPP.CallTimeout,
+				OnSessionOpen:     onSessionOpen,
+				Logger:            logger,
+			})
+			if err != nil {
+				return err
+			}
+			central16 = central
+		}
+
+		var csms201 ocppmux.V201
+		if cfg.OCPP.Speaks(config.OCPPVersion201) {
+			csms, err := ocpp201.NewCSMS(client, ocpp201.Options{
+				Authenticate:      basicAuthenticator(cfg.OCPP.ChargePoints),
+				HeartbeatInterval: cfg.OCPP.HeartbeatInterval,
+				CallTimeout:       cfg.OCPP.CallTimeout,
+				OnSessionOpen:     onSessionOpen,
+				Logger:            logger,
+			})
+			if err != nil {
+				return err
+			}
+			csms201 = csms
+		}
+
+		central, err := ocppmux.New(central16, csms201, logger)
 		if err != nil {
 			return err
 		}
@@ -108,9 +138,10 @@ func run(configPath string, logger *logrus.Logger) error {
 		go supervisor.Run(ctx)
 		logger.WithFields(logrus.Fields{
 			"charge_points":  len(cfg.OCPP.ChargePoints),
+			"versions":       cfg.OCPP.Versions,
 			"max_validity":   cfg.Control.MaxValidity,
 			"sweep_interval": cfg.Control.SweepInterval,
-		}).Info("OCPP 1.6J central system enabled with bounded control windows")
+		}).Info("OCPP central system enabled with bounded control windows")
 	}
 
 	if cfg.OpenADR.Enabled {
@@ -148,6 +179,46 @@ func run(configPath string, logger *logrus.Logger) error {
 		logger.WithFields(logrus.Fields{"server": cfg.SEP2.BaseURL, "lfdi": sepClient.LFDI()}).
 			Info("IEEE 2030.5 client enabled")
 		go func() { errs <- pollSEP2(ctx, sepClient, client, cfg.SEP2.PollInterval, logger) }()
+	}
+
+	if cfg.Matter.Enabled {
+		controller, err := matter.NewController(matter.Config{
+			URL:               cfg.Matter.URL,
+			CallTimeout:       cfg.Matter.CallTimeout,
+			ReconnectInterval: cfg.Matter.ReconnectInterval,
+			AllowTestNodes:    cfg.Matter.AllowTestNodes,
+			Logger:            logger,
+		}, client)
+		if err != nil {
+			return err
+		}
+		// Matter On/Off and Level commands carry no expiry, so the window is held
+		// here: without this supervisor a trimmed load would stay trimmed after the
+		// platform stopped talking to it.
+		supervisor, err := matter.NewSupervisor(controller, matter.SupervisorOptions{
+			MaxValidity:    cfg.Control.MaxValidity,
+			SweepInterval:  cfg.Control.SweepInterval,
+			CommandTimeout: cfg.Matter.CallTimeout,
+			Logger:         logger,
+		})
+		if err != nil {
+			return err
+		}
+		loads, err := matter.NewAPI(controller, supervisor, cfg.Platform.SharedSecret)
+		if err != nil {
+			return err
+		}
+		loads.Routes(mux)
+		go supervisor.Run(ctx)
+		go func() { errs <- controller.Run(ctx) }()
+		logger.WithFields(logrus.Fields{
+			"controller":       cfg.Matter.URL,
+			"allow_test_nodes": cfg.Matter.AllowTestNodes,
+			"max_validity":     cfg.Control.MaxValidity,
+		}).Info("Matter controller client enabled with bounded load control windows")
+		if cfg.Matter.AllowTestNodes {
+			logger.Warn("matter.allow_test_nodes is on: the controller's synthetic nodes acknowledge commands that no device performs")
+		}
 	}
 
 	server := &http.Server{

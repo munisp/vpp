@@ -1,4 +1,4 @@
-package ocpp16
+package ocppj
 
 import (
 	"encoding/json"
@@ -55,7 +55,7 @@ func TestDecodeRejectsMalformedFrames(t *testing.T) {
 }
 
 func TestEncodeRoundTrip(t *testing.T) {
-	data, err := EncodeCall("abc", ActionHeartbeat, struct{}{})
+	data, err := EncodeCall("abc", "Heartbeat", struct{}{})
 	if err != nil {
 		t.Fatalf("encode: %v", err)
 	}
@@ -67,7 +67,9 @@ func TestEncodeRoundTrip(t *testing.T) {
 		t.Fatalf("unexpected frame %s", data)
 	}
 
-	result, err := EncodeCallResult("abc", HeartbeatResponse{CurrentTime: "2026-01-01T00:00:00Z"})
+	result, err := EncodeCallResult("abc", struct {
+		CurrentTime string `json:"currentTime"`
+	}{CurrentTime: "2026-01-01T00:00:00Z"})
 	if err != nil {
 		t.Fatalf("encode result: %v", err)
 	}

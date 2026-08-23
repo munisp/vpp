@@ -11,3 +11,6 @@ export { complianceRouter } from './compliance';
 export { blockchainRouter } from './blockchain';
 export { derCapabilitiesRouter } from './der-capabilities';
 export { priceSignalRouter } from './price-signal';
+export { fleetTelemetryRouter } from './fleet-telemetry';
+export { locationalFlexibilityRouter } from './locational-flexibility';
+export { matterLoadsRouter } from './matter-loads';

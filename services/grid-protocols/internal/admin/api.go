@@ -3,25 +3,18 @@
 package admin
 
 import (
-	"crypto/hmac"
-	"crypto/sha256"
-	"crypto/subtle"
-	"encoding/hex"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
-	"strconv"
 	"time"
 
 	"github.com/vpp/grid-protocols/internal/control"
 	"github.com/vpp/grid-protocols/internal/ocpp16"
+	"github.com/vpp/grid-protocols/internal/signed"
 )
-
-// maxClockSkew bounds how old a signed command may be, so a captured request
-// cannot be replayed indefinitely.
-const maxClockSkew = 5 * time.Minute
 
 // ControlSupervisor tracks control windows and re-asserts safe fallbacks.
 type ControlSupervisor interface {
@@ -31,16 +24,30 @@ type ControlSupervisor interface {
 	State() []control.TargetState
 }
 
+// Commander is the charge point command surface, which for a deployment running
+// both OCPP versions is the version mux. Commands are expressed in the 1.6 shape
+// the platform stores; translation to 2.0.1 happens behind this interface, and a
+// command with no faithful 2.0.1 equivalent is refused there rather than guessed.
+type Commander interface {
+	ConnectedChargePoints() []string
+	// ProtocolVersion is "" for a station with no session.
+	ProtocolVersion(chargePointID string) string
+	RemoteStart(ctx context.Context, chargePointID string, req ocpp16.RemoteStartTransactionRequest, remoteStartID int, idTokenType string) (ocpp16.StatusResponse, error)
+	RemoteStop(ctx context.Context, chargePointID string, req ocpp16.RemoteStopTransactionRequest, transactionID201 string) (ocpp16.StatusResponse, error)
+	SetChargingProfile(ctx context.Context, chargePointID string, req ocpp16.SetChargingProfileRequest) (ocpp16.StatusResponse, error)
+	ClearChargingProfile(ctx context.Context, chargePointID string, req ocpp16.ClearChargingProfileRequest) (ocpp16.StatusResponse, error)
+}
+
 // API serves the command endpoints.
 type API struct {
-	central    *ocpp16.CentralSystem
+	central    Commander
 	secret     []byte
 	supervisor ControlSupervisor
 }
 
-func New(central *ocpp16.CentralSystem, sharedSecret string, supervisor ControlSupervisor) (*API, error) {
+func New(central Commander, sharedSecret string, supervisor ControlSupervisor) (*API, error) {
 	if central == nil {
-		return nil, errors.New("admin: central system is required")
+		return nil, errors.New("admin: charge point commander is required")
 	}
 	if len(sharedSecret) < 32 {
 		return nil, errors.New("admin: shared secret must be at least 32 characters")
@@ -64,11 +71,20 @@ func (a *API) Routes(mux *http.ServeMux) {
 type remoteStartBody struct {
 	ChargePointID string                               `json:"charge_point_id"`
 	Request       ocpp16.RemoteStartTransactionRequest `json:"request"`
+	// IDTokenType and RemoteStartID are only meaningful on OCPP 2.0.1, where id
+	// tokens are typed and the station ties the transaction it creates back to
+	// this request.
+	IDTokenType   string `json:"id_token_type"`
+	RemoteStartID int    `json:"remote_start_id"`
 }
 
 type remoteStopBody struct {
 	ChargePointID string                              `json:"charge_point_id"`
 	Request       ocpp16.RemoteStopTransactionRequest `json:"request"`
+	// TransactionID201 is the station's own transaction id, which is the only
+	// identifier a 2.0.1 station recognises; the platform's integer session id
+	// means nothing to it.
+	TransactionID201 string `json:"transaction_id_201"`
 }
 
 type chargingProfileBody struct {
@@ -93,7 +109,12 @@ func (a *API) handleChargePoints(w http.ResponseWriter, r *http.Request) {
 	if !a.authorized(w, r, nil) {
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"connected": a.central.ConnectedChargePoints()})
+	connected := a.central.ConnectedChargePoints()
+	versions := make(map[string]string, len(connected))
+	for _, id := range connected {
+		versions[id] = a.central.ProtocolVersion(id)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"connected": connected, "versions": versions})
 }
 
 func (a *API) handleRemoteStart(w http.ResponseWriter, r *http.Request) {
@@ -105,7 +126,7 @@ func (a *API) handleRemoteStart(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "request.idTag is required", http.StatusBadRequest)
 		return
 	}
-	status, err := a.central.RemoteStartTransaction(r.Context(), body.ChargePointID, body.Request)
+	status, err := a.central.RemoteStart(r.Context(), body.ChargePointID, body.Request, body.RemoteStartID, body.IDTokenType)
 	respond(w, status, err)
 }
 
@@ -114,11 +135,11 @@ func (a *API) handleRemoteStop(w http.ResponseWriter, r *http.Request) {
 	if !a.decode(w, r, &body) {
 		return
 	}
-	if body.Request.TransactionID == 0 {
-		http.Error(w, "request.transactionId is required", http.StatusBadRequest)
+	if body.Request.TransactionID == 0 && body.TransactionID201 == "" {
+		http.Error(w, "request.transactionId or transaction_id_201 is required", http.StatusBadRequest)
 		return
 	}
-	status, err := a.central.RemoteStopTransaction(r.Context(), body.ChargePointID, body.Request)
+	status, err := a.central.RemoteStop(r.Context(), body.ChargePointID, body.Request, body.TransactionID201)
 	respond(w, status, err)
 }
 
@@ -294,31 +315,8 @@ func chargePointIDOf(raw []byte) string {
 
 // authorized verifies the HMAC the VPP server attaches to every command.
 func (a *API) authorized(w http.ResponseWriter, r *http.Request, body []byte) bool {
-	timestamp := r.Header.Get("x-grid-timestamp")
-	signature := r.Header.Get("x-grid-signature")
-	if timestamp == "" || signature == "" {
-		http.Error(w, "missing signature", http.StatusUnauthorized)
-		return false
-	}
-	seconds, err := strconv.ParseInt(timestamp, 10, 64)
-	if err != nil {
-		http.Error(w, "invalid timestamp", http.StatusUnauthorized)
-		return false
-	}
-	age := time.Since(time.Unix(seconds, 0))
-	if age > maxClockSkew || age < -maxClockSkew {
-		http.Error(w, "stale signature", http.StatusUnauthorized)
-		return false
-	}
-
-	mac := hmac.New(sha256.New, a.secret)
-	mac.Write([]byte(timestamp))
-	mac.Write([]byte("."))
-	mac.Write(body)
-	expected := hex.EncodeToString(mac.Sum(nil))
-
-	if subtle.ConstantTimeCompare([]byte(expected), []byte(signature)) != 1 {
-		http.Error(w, "invalid signature", http.StatusUnauthorized)
+	if err := signed.Verify(a.secret, r, body); err != nil {
+		http.Error(w, err.Error(), signed.Status(err))
 		return false
 	}
 	return true

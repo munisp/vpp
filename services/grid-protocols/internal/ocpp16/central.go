@@ -7,17 +7,13 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/sirupsen/logrus"
-)
 
-// ErrNotConnected is returned when a command targets a charge point that has no
-// open WebSocket session. Commands are never buffered and reported as sent: the
-// caller has to know the charger did not receive it.
-var ErrNotConnected = errors.New("charge point is not connected")
+	"github.com/vpp/grid-protocols/internal/ocppj"
+)
 
 // Backend is the platform side of the central system. Every authorization and
 // transaction decision comes from here — the central system has no local
@@ -73,9 +69,7 @@ type CentralSystem struct {
 	backend  Backend
 	opts     Options
 	upgrader websocket.Upgrader
-
-	mu       sync.RWMutex
-	sessions map[string]*session
+	sessions *ocppj.Registry
 }
 
 func NewCentralSystem(backend Backend, opts Options) (*CentralSystem, error) {
@@ -89,9 +83,9 @@ func NewCentralSystem(backend Backend, opts Options) (*CentralSystem, error) {
 	return &CentralSystem{
 		backend:  backend,
 		opts:     opts,
-		sessions: make(map[string]*session),
+		sessions: ocppj.NewRegistry(),
 		upgrader: websocket.Upgrader{
-			Subprotocols:    []string{"ocpp1.6"},
+			Subprotocols:    []string{Subprotocol},
 			ReadBufferSize:  4096,
 			WriteBufferSize: 4096,
 		},
@@ -100,13 +94,7 @@ func NewCentralSystem(backend Backend, opts Options) (*CentralSystem, error) {
 
 // ConnectedChargePoints lists the charge points with an open session.
 func (cs *CentralSystem) ConnectedChargePoints() []string {
-	cs.mu.RLock()
-	defer cs.mu.RUnlock()
-	ids := make([]string, 0, len(cs.sessions))
-	for id := range cs.sessions {
-		ids = append(ids, id)
-	}
-	return ids
+	return cs.sessions.IDs()
 }
 
 // ServeHTTP upgrades /ocpp/<chargePointId> to an OCPP 1.6J session.
@@ -116,15 +104,21 @@ func (cs *CentralSystem) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "path must be /ocpp/<chargePointId>", http.StatusNotFound)
 		return
 	}
+	// A charge point that does not offer the ocpp1.6 subprotocol is speaking a
+	// different version; guessing would misparse every payload.
+	if !ocppj.HasSubprotocol(r, Subprotocol) {
+		http.Error(w, "ocpp1.6 subprotocol required", http.StatusBadRequest)
+		return
+	}
+	cs.Serve(w, r, chargePointID)
+}
+
+// Serve runs a 1.6J session for an already-routed charge point identity. The
+// version mux calls this after it has picked 1.6 from the offered subprotocols.
+func (cs *CentralSystem) Serve(w http.ResponseWriter, r *http.Request, chargePointID string) {
 	if err := cs.opts.Authenticate(r, chargePointID); err != nil {
 		cs.opts.Logger.WithError(err).WithField("charge_point", chargePointID).Warn("rejected OCPP connection")
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
-	}
-	// A charge point that does not offer the ocpp1.6 subprotocol is speaking a
-	// different version; guessing would misparse every payload.
-	if !hasSubprotocol(r, "ocpp1.6") {
-		http.Error(w, "ocpp1.6 subprotocol required", http.StatusBadRequest)
 		return
 	}
 
@@ -135,73 +129,32 @@ func (cs *CentralSystem) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	conn.SetReadLimit(cs.opts.ReadLimit)
 
-	sess := &session{
-		chargePointID: chargePointID,
-		conn:          conn,
-		pending:       make(map[string]chan *Frame),
-		logger:        cs.opts.Logger.WithField("charge_point", chargePointID),
-	}
-	cs.register(sess)
-	defer cs.unregister(sess)
-
-	sess.readLoop(r.Context(), cs)
-}
-
-func hasSubprotocol(r *http.Request, want string) bool {
-	for _, offered := range websocket.Subprotocols(r) {
-		if strings.EqualFold(offered, want) {
-			return true
-		}
-	}
-	return false
-}
-
-func (cs *CentralSystem) register(s *session) {
-	cs.mu.Lock()
-	if existing, ok := cs.sessions[s.chargePointID]; ok {
-		// One physical charge point, one session: drop the stale one so commands
-		// cannot be written to a half-open socket.
-		existing.close()
-	}
-	cs.sessions[s.chargePointID] = s
-	cs.mu.Unlock()
-	s.logger.Info("OCPP session opened")
+	sess := ocppj.NewSession(chargePointID, conn, cs,
+		cs.opts.Logger.WithFields(logrus.Fields{"charge_point": chargePointID, "ocpp_version": "1.6"}))
+	cs.sessions.Add(sess)
+	sess.Logger().Info("OCPP session opened")
 	if cs.opts.OnSessionOpen != nil {
 		// Asynchronous: the hook commands the charge point over this very session,
-		// which cannot be served until readLoop starts.
-		go cs.opts.OnSessionOpen(s.chargePointID)
+		// which cannot be served until the read loop starts.
+		go cs.opts.OnSessionOpen(chargePointID)
 	}
-}
+	defer func() {
+		cs.sessions.Remove(sess)
+		sess.Logger().Info("OCPP session closed")
+	}()
 
-func (cs *CentralSystem) unregister(s *session) {
-	cs.mu.Lock()
-	if cs.sessions[s.chargePointID] == s {
-		delete(cs.sessions, s.chargePointID)
-	}
-	cs.mu.Unlock()
-	s.close()
-	s.logger.Info("OCPP session closed")
-}
-
-func (cs *CentralSystem) session(chargePointID string) (*session, error) {
-	cs.mu.RLock()
-	defer cs.mu.RUnlock()
-	s, ok := cs.sessions[chargePointID]
-	if !ok {
-		return nil, fmt.Errorf("%w: %s", ErrNotConnected, chargePointID)
-	}
-	return s, nil
+	sess.ReadLoop(r.Context())
 }
 
 // Call sends a command to a charge point and waits for its CALLRESULT. A
 // CALLERROR is returned as an error, so a rejected command is never mistaken
 // for an applied one.
 func (cs *CentralSystem) Call(ctx context.Context, chargePointID, action string, payload any) (json.RawMessage, error) {
-	sess, err := cs.session(chargePointID)
+	sess, err := cs.sessions.Get(chargePointID)
 	if err != nil {
 		return nil, err
 	}
-	return sess.call(ctx, action, payload, cs.opts.CallTimeout)
+	return sess.Call(ctx, action, payload, cs.opts.CallTimeout)
 }
 
 // RemoteStartTransaction asks the charge point to start charging.
@@ -253,168 +206,10 @@ func callStatus(ctx context.Context, cs *CentralSystem, chargePointID, action st
 	return status, nil
 }
 
-type session struct {
-	chargePointID string
-	conn          *websocket.Conn
-	logger        *logrus.Entry
-
-	writeMu sync.Mutex
-
-	pendingMu sync.Mutex
-	pending   map[string]chan *Frame
-	counter   uint64
-
-	closeOnce sync.Once
-}
-
-func (s *session) close() {
-	s.closeOnce.Do(func() {
-		_ = s.conn.Close()
-		s.pendingMu.Lock()
-		for id, ch := range s.pending {
-			close(ch)
-			delete(s.pending, id)
-		}
-		s.pendingMu.Unlock()
-	})
-}
-
-func (s *session) write(data []byte) error {
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
-	return s.conn.WriteMessage(websocket.TextMessage, data)
-}
-
-func (s *session) call(ctx context.Context, action string, payload any, timeout time.Duration) (json.RawMessage, error) {
-	s.pendingMu.Lock()
-	s.counter++
-	uniqueID := fmt.Sprintf("cs-%d-%d", time.Now().UnixNano(), s.counter)
-	replies := make(chan *Frame, 1)
-	s.pending[uniqueID] = replies
-	s.pendingMu.Unlock()
-
-	defer func() {
-		s.pendingMu.Lock()
-		delete(s.pending, uniqueID)
-		s.pendingMu.Unlock()
-	}()
-
-	data, err := EncodeCall(uniqueID, action, payload)
-	if err != nil {
-		return nil, err
-	}
-	if err := s.write(data); err != nil {
-		return nil, fmt.Errorf("send %s to %s: %w", action, s.chargePointID, err)
-	}
-
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
-
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case <-timer.C:
-		return nil, fmt.Errorf("%s to %s timed out after %s: delivery is unconfirmed", action, s.chargePointID, timeout)
-	case frame, ok := <-replies:
-		if !ok {
-			return nil, fmt.Errorf("%s to %s: session closed before a response arrived", action, s.chargePointID)
-		}
-		if frame.Error != nil {
-			return nil, frame.Error
-		}
-		return frame.Result.Payload, nil
-	}
-}
-
-func (s *session) readLoop(ctx context.Context, cs *CentralSystem) {
-	for {
-		_, data, err := s.conn.ReadMessage()
-		if err != nil {
-			if !websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
-				s.logger.WithError(err).Debug("OCPP read ended")
-			}
-			return
-		}
-
-		frame, err := DecodeFrame(data)
-		if err != nil {
-			s.logger.WithError(err).Warn("malformed OCPP frame")
-			// Without a unique id there is nobody to answer; RFC-wise the frame
-			// is unusable, so the session is torn down rather than desynchronised.
-			if id := uniqueIDOf(data); id != "" {
-				if reply, encErr := EncodeCallError(id, ErrFormationViolation, err.Error()); encErr == nil {
-					_ = s.write(reply)
-					continue
-				}
-			}
-			return
-		}
-
-		switch {
-		case frame.Call != nil:
-			s.handleCall(ctx, cs, frame.Call)
-		case frame.Result != nil:
-			s.deliver(frame.Result.UniqueID, frame)
-		case frame.Error != nil:
-			s.deliver(frame.Error.UniqueID, frame)
-		}
-	}
-}
-
-func uniqueIDOf(data []byte) string {
-	var raw []json.RawMessage
-	if err := json.Unmarshal(data, &raw); err != nil || len(raw) < 2 {
-		return ""
-	}
-	var id string
-	if err := json.Unmarshal(raw[1], &id); err != nil {
-		return ""
-	}
-	return id
-}
-
-func (s *session) deliver(uniqueID string, frame *Frame) {
-	s.pendingMu.Lock()
-	ch, ok := s.pending[uniqueID]
-	if ok {
-		delete(s.pending, uniqueID)
-	}
-	s.pendingMu.Unlock()
-	if !ok {
-		s.logger.WithField("unique_id", uniqueID).Warn("response for unknown request")
-		return
-	}
-	ch <- frame
-}
-
-func (s *session) handleCall(ctx context.Context, cs *CentralSystem, call *Call) {
-	payload, err := cs.dispatch(ctx, s.chargePointID, call)
-	if err != nil {
-		code := ErrInternalError
-		var callErr *CallError
-		if errors.As(err, &callErr) {
-			code = callErr.ErrorCode
-		}
-		s.logger.WithError(err).WithField("action", call.Action).Warn("OCPP call failed")
-		if reply, encErr := EncodeCallError(call.UniqueID, code, err.Error()); encErr == nil {
-			_ = s.write(reply)
-		}
-		return
-	}
-	reply, err := EncodeCallResult(call.UniqueID, payload)
-	if err != nil {
-		s.logger.WithError(err).Error("failed to encode OCPP result")
-		return
-	}
-	if err := s.write(reply); err != nil {
-		s.logger.WithError(err).Warn("failed to write OCPP result")
-	}
-}
-
 // dispatch routes an inbound call to the backend. Backend failures surface as
 // CALLERROR: refusing the charge point is correct, whereas answering "Accepted"
 // on a failed platform lookup would authorize energy nobody agreed to pay for.
-func (cs *CentralSystem) dispatch(ctx context.Context, chargePointID string, call *Call) (any, error) {
+func (cs *CentralSystem) Dispatch(ctx context.Context, chargePointID string, call *Call) (any, error) {
 	switch call.Action {
 	case ActionBootNotification:
 		var req BootNotificationRequest
@@ -526,13 +321,5 @@ func (cs *CentralSystem) dispatch(ctx context.Context, chargePointID string, cal
 	}
 }
 
-// decodeStrict rejects unknown fields so a charge point speaking a different
-// profile is not silently half-understood.
-func decodeStrict(payload json.RawMessage, target any) error {
-	decoder := json.NewDecoder(strings.NewReader(string(payload)))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(target); err != nil {
-		return &CallError{ErrorCode: ErrFormationViolation, ErrorDescription: err.Error()}
-	}
-	return nil
-}
+// ErrorCodeForMalformedFrame is 1.6's spelling of the format error code.
+func (cs *CentralSystem) ErrorCodeForMalformedFrame() string { return ErrFormationViolation }

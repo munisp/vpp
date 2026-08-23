@@ -8,6 +8,8 @@ which this service calls over an authenticated internal API.
 | Protocol | Role | Transport | Package |
 | --- | --- | --- | --- |
 | OCPP 1.6J | Central system | JSON over WebSocket (`ocpp1.6` subprotocol) | `internal/ocpp16` |
+| OCPP 2.0.1 | CSMS | JSON over WebSocket (`ocpp2.0.1` subprotocol) | `internal/ocpp201` |
+| OCPP-J framing/sessions | shared by both versions | — | `internal/ocppj` |
 | OpenADR 2.0b | VEN (simple HTTP pull) | XML over HTTP(S) | `internal/openadr` |
 | IEEE 2030.5 (SEP2) | Client | XML over HTTPS with mutual TLS | `internal/sep2` |
 | Modbus TCP/RTU | Poller | see `services/modbus-poller` (Rust) | — |
@@ -15,7 +17,12 @@ which this service calls over an authenticated internal API.
 ## What it refuses to do
 
 * Accept a charge point that did not authenticate (basic auth, security
-  profile 1) or that does not offer the `ocpp1.6` subprotocol.
+  profile 1) or that does not offer a configured OCPP subprotocol. A station
+  offering `ocpp2.0.1` when only 1.6 is enabled is rejected — there is no
+  silent downgrade, and one station cannot hold both versions at once.
+* Issue an OCPP 2.0.1 transaction identity. The station generates
+  `transactionInfo.transactionId`; the CSMS maps it and refuses to translate a
+  transaction-scoped command it can only express with an invented id.
 * Answer `Authorize`, `StartTransaction` or `StopTransaction` on its own — the
   platform answers, and a platform failure becomes an OCPP `CALLERROR`.
 * Report a command as applied when the charge point answered `Rejected` or did
@@ -51,5 +58,5 @@ go test ./... && go vet ./... && go build ./...
 
 The test suite covers framing, correlation, timeouts, registration, event
 parsing, TLS and LFDI derivation against in-process servers. Interoperability
-with a real charge point, a utility VTN or a 2030.5 server has not been
-exercised; treat certification as outstanding.
+with a real charge point (either OCPP version), a utility VTN or a 2030.5
+server has not been exercised; treat certification as outstanding.

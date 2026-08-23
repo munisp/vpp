@@ -15,6 +15,7 @@ import (
 
 	"github.com/vpp/grid-protocols/internal/control"
 	"github.com/vpp/grid-protocols/internal/ocpp16"
+	"github.com/vpp/grid-protocols/internal/ocppmux"
 )
 
 const testSecret = "0123456789abcdef0123456789abcdef"
@@ -47,11 +48,15 @@ func newAPI(t *testing.T) *httptest.Server {
 	if err != nil {
 		t.Fatalf("central system: %v", err)
 	}
-	supervisor, err := control.New(central, control.Options{})
+	commander, err := ocppmux.New(central, nil, nil)
+	if err != nil {
+		t.Fatalf("mux: %v", err)
+	}
+	supervisor, err := control.New(commander, control.Options{})
 	if err != nil {
 		t.Fatalf("supervisor: %v", err)
 	}
-	api, err := New(central, testSecret, supervisor)
+	api, err := New(commander, testSecret, supervisor)
 	if err != nil {
 		t.Fatalf("api: %v", err)
 	}
@@ -226,15 +231,19 @@ func TestNewRequiresSecretAndCentralSystem(t *testing.T) {
 	if err != nil {
 		t.Fatalf("central system: %v", err)
 	}
-	supervisor, err := control.New(central, control.Options{})
+	commander, err := ocppmux.New(central, nil, nil)
+	if err != nil {
+		t.Fatalf("mux: %v", err)
+	}
+	supervisor, err := control.New(commander, control.Options{})
 	if err != nil {
 		t.Fatalf("supervisor: %v", err)
 	}
-	if _, err := New(central, "short", supervisor); err == nil {
+	if _, err := New(commander, "short", supervisor); err == nil {
 		t.Fatal("expected a short shared secret to be rejected")
 	}
 	// Without a supervisor nothing would ever close an expired control window.
-	if _, err := New(central, testSecret, nil); err == nil {
+	if _, err := New(commander, testSecret, nil); err == nil {
 		t.Fatal("expected a missing control supervisor to be rejected")
 	}
 }

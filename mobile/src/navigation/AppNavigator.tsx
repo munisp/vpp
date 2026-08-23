@@ -42,6 +42,7 @@ import MatterLoadsScreen from '../screens/MatterLoadsScreen';
 import ServiceStatusScreen from '../screens/ServiceStatusScreen';
 import LedgerReconciliationScreen from '../screens/LedgerReconciliationScreen';
 import LakehouseScreen from '../screens/LakehouseScreen';
+import ModelHealthScreen from '../screens/ModelHealthScreen';
 import DiagnosticsScreen from '../screens/DiagnosticsScreen';
 
 const Stack = createNativeStackNavigator();
@@ -181,6 +182,7 @@ export default function AppNavigator() {
       <Stack.Screen name="ServiceStatus" component={ServiceStatusScreen} />
       <Stack.Screen name="LedgerReconciliation" component={LedgerReconciliationScreen} />
       <Stack.Screen name="Lakehouse" component={LakehouseScreen} />
+      <Stack.Screen name="ModelHealth" component={ModelHealthScreen} />
       <Stack.Screen name="Diagnostics" component={DiagnosticsScreen} />
           </>
         )}

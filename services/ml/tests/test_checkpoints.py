@@ -111,3 +111,28 @@ def test_saving_refuses_a_kind_it_cannot_rebuild(tmp_path):
             feature_spec={},
             provenance={},
         )
+
+
+class Sneaky:
+    """Stands in for whatever an attacker would rather have unpickled."""
+
+    def __init__(self) -> None:
+        self.value = 1
+
+
+def test_a_foreign_pickled_file_is_refused_rather_than_executed(tmp_path):
+    """A digest match proves the bytes are the recorded ones, not that they are safe.
+    Checkpoints are read with `weights_only=True`, so a file carrying arbitrary
+    pickled objects cannot load however well it hashes."""
+    path = str(tmp_path / "foreign.pt")
+    torch.save({"kind": "asset_forecaster", "state_dict": {}, "extra": Sneaky()}, path)
+    digest = checkpoints.digest_file(path)
+    with pytest.raises(checkpoints.CheckpointError):
+        checkpoints.load(path, digest)
+
+
+def test_a_checkpoint_without_metadata_is_refused(tmp_path):
+    path = str(tmp_path / "bare.pt")
+    torch.save({"state_dict": {"w": torch.zeros(2)}}, path)
+    with pytest.raises(checkpoints.CheckpointError, match="not a checkpoint this service wrote"):
+        checkpoints.load(path, checkpoints.digest_file(path))

@@ -15,7 +15,9 @@
  *   re-hashed against the digest the run recorded; where it cannot, the state is
  *   `not_readable_here` rather than `verified`.
  * - **Live accuracy comes from actuals only.** Predictions whose actual has not
- *   arrived are excluded, and a model with none reads `no_actuals`.
+ *   arrived are excluded; a model with none reads `no_actuals`, and one scored too
+ *   few times to mean anything reads `too_few_scored` rather than borrowing either
+ *   verdict.
  * - **Staleness is measured.** A production model whose newest prediction is older
  *   than the budget reads `idle`; one that has never predicted reads `never_used`.
  */
@@ -42,7 +44,13 @@ export type ArtifactState =
 
 export type UsageState = 'serving' | 'idle' | 'never_used';
 
-export type LiveAccuracyState = 'measured' | 'no_actuals';
+export type LiveAccuracyState =
+  /** Enough predictions carry an actual for the live error to mean something. */
+  | 'measured'
+  /** Not one prediction has an actual yet. */
+  | 'no_actuals'
+  /** Some predictions are scored, but too few to report a live error from. */
+  | 'too_few_scored';
 
 /** Newest predictions older than this and a production model is not really serving. */
 export const USAGE_BUDGET_SECONDS = 24 * 3600;
@@ -245,10 +253,13 @@ export function describeArtifact(check: Omit<ArtifactCheck, 'detail'>): string {
   }
 }
 
-function describeAccuracy(accuracy: Omit<LiveAccuracy, 'detail'>): string {
+export function describeAccuracy(accuracy: Omit<LiveAccuracy, 'detail'>): string {
+  if (accuracy.state === 'too_few_scored') {
+    return `Only ${accuracy.scoredPredictions} prediction(s) carry an actual, below the ${MIN_SCORED_PREDICTIONS} needed for a live error to say more about the model than the sample, so live accuracy is unknown — not good.`;
+  }
   if (accuracy.state === 'no_actuals') {
     return accuracy.unscoredPredictions > 0
-      ? `${accuracy.unscoredPredictions} prediction(s) have no actual recorded yet, so live accuracy is unknown — not good.`
+      ? `${accuracy.unscoredPredictions} prediction(s) have no actual recorded yet and none has been scored, so live accuracy is unknown — not good.`
       : 'No prediction has been scored against an actual, so live accuracy is unknown.';
   }
   const live = accuracy.liveMae === null ? '?' : accuracy.liveMae.toFixed(1);
@@ -452,7 +463,7 @@ export async function modelHealth(limit = 50): Promise<ModelHealthOverview> {
     const measurable = scored >= MIN_SCORED_PREDICTIONS && liveMae !== null;
     const ratio = measurable && heldOutMae !== null && heldOutMae > 0 ? liveMae / heldOutMae : null;
     const accuracyPartial: Omit<LiveAccuracy, 'detail'> = {
-      state: measurable ? 'measured' : 'no_actuals',
+      state: measurable ? 'measured' : scored > 0 ? 'too_few_scored' : 'no_actuals',
       scoredPredictions: scored,
       unscoredPredictions: unscored,
       liveMae: measurable ? liveMae : null,

@@ -35,14 +35,16 @@ interface Recorder {
 
 /**
  * A unique violation from the partial index on payments.p2pTradeId, shaped as
- * node-postgres reports it.
+ * Drizzle actually surfaces it: a plain Error with no code of its own, and the
+ * node-postgres error carrying the code on `cause`.
  */
-function uniqueViolation(): Error & { code: string } {
-  const error = new Error(
+function uniqueViolation(): Error {
+  const driverError = new Error(
     'duplicate key value violates unique constraint "payments_p2p_trade_live_uq"'
-  ) as Error & { code: string };
-  error.code = '23505';
-  return error;
+  ) as Error & { code: string; constraint: string };
+  driverError.code = '23505';
+  driverError.constraint = 'payments_p2p_trade_live_uq';
+  return new Error('Failed query: insert into "payments" ...', { cause: driverError });
 }
 
 function mockDb(store: Store, recorder: Recorder, opts: { insertError?: () => Error } = {}) {

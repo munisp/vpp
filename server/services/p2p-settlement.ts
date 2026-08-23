@@ -22,6 +22,7 @@ import { payments, telemetry, trades } from '../../drizzle/schema';
 import { p2pSettlements } from '../../drizzle/innovations-schema';
 import { PaymentGatewayManager } from '../payment-gateways';
 import { resolveGatewayEnvironment } from '../payment-gateways/environment';
+import { isUniqueViolation } from '../pg-errors';
 
 export type P2pGateway = 'mpesa' | 'airtel_money' | 'tigo_pesa';
 
@@ -83,15 +84,6 @@ function alreadyRequested(row: {
         ? 'A payment request for this purchase is being raised with the provider.'
         : 'A payment request for this purchase is already awaiting the provider callback.',
   };
-}
-
-function isUniqueViolation(error: unknown): boolean {
-  return (
-    typeof error === 'object' &&
-    error !== null &&
-    'code' in error &&
-    (error as { code?: unknown }).code === '23505'
-  );
 }
 
 export interface StartTradePaymentInput {

@@ -11,6 +11,7 @@ import { eq, desc, and, gte, lte, sql, type SQL } from 'drizzle-orm';
 import { kafkaPublisher } from '../integration/kafka-publisher';
 import { requireCapability } from './degraded-operation';
 import type { SqlRow } from '../sql-row';
+import { isUniqueViolation } from '../pg-errors';
 
 // Import schema (will be available after schema update)
 interface SettlementEvent {
@@ -193,9 +194,8 @@ export class SettlementLedgerService {
       try {
         return await this.appendEvent(input);
       } catch (error: any) {
-        // PostgreSQL reports unique violations as SQLSTATE 23505.
         const isChainConflict =
-          error?.code === '23505' ||
+          isUniqueViolation(error) ||
           /duplicate key value violates unique constraint/i.test(String(error?.message ?? ''));
 
         if (!isChainConflict) throw error;

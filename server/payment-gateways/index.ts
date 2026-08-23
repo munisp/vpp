@@ -68,6 +68,27 @@ export class PaymentGatewayManager {
   }
 
   /**
+   * Whether this gateway can be asked for money at all: credentials are stored
+   * for the environment and marked active. Callers resolve this before they
+   * reserve anything, so a configuration gap is refused as a precondition
+   * instead of surfacing as a failed charge.
+   */
+  static async isConfigured(
+    gatewayId: 'mpesa' | 'airtel_money' | 'tigo_pesa',
+    environment: 'sandbox' | 'production' = 'sandbox'
+  ): Promise<{ configured: boolean; reason?: string }> {
+    if (this.gateways.has(`${gatewayId}_${environment}`)) return { configured: true };
+    const credentials = await credDb.getPaymentCredentials(gatewayId, environment);
+    if (!credentials) {
+      return { configured: false, reason: `No ${environment} credentials are stored for ${gatewayId}.` };
+    }
+    if (credentials.isActive !== 'true') {
+      return { configured: false, reason: `The ${gatewayId} ${environment} gateway is stored but not active.` };
+    }
+    return { configured: true };
+  }
+
+  /**
    * Initiate a payment
    */
   static async initiatePayment(

@@ -345,9 +345,11 @@ async function executePostPaymentActions(
         try {
           const result = await recordBuyerPaymentSettled({
             id: payment.id,
+            userId: payment.userId,
             amount: payment.amount,
             currency: payment.currency ?? null,
             transactionId: payment.transactionId ?? null,
+            p2pTradeId: payment.p2pTradeId ?? null,
             metadata: payment.metadata ?? null,
           });
           console.log(

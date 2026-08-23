@@ -180,12 +180,30 @@ export default defineConfig({
     emptyOutDir: true,
     rollupOptions: {
       output: {
-        manualChunks: {
-          'react-vendor': ['react', 'react-dom', 'react/jsx-runtime'],
-          'router': ['wouter'],
-          'trpc': ['@trpc/client', '@trpc/react-query'],
-          'query': ['@tanstack/react-query'],
-          'ui': ['lucide-react', 'recharts'],
+        // Every dependency group is split out, because a single chunk over
+        // `maximumFileSizeToCacheInBytes` fails the service-worker build and
+        // `build:client` then produces no deployable PWA at all. One bundle
+        // holding all of them was 3.34 MB and did exactly that.
+        manualChunks: (id: string) => {
+          if (!id.includes('node_modules')) return undefined;
+          if (/[\\/]node_modules[\\/](react|react-dom|scheduler)[\\/]/.test(id)) return 'react-vendor';
+          if (id.includes('node_modules/wouter')) return 'router';
+          if (id.includes('node_modules/@trpc')) return 'trpc';
+          if (id.includes('node_modules/@tanstack')) return 'query';
+          if (id.includes('node_modules/@radix-ui')) return 'radix';
+          if (id.includes('node_modules/lucide-react')) return 'ui';
+          if (id.includes('node_modules/recharts') || id.includes('node_modules/d3-')) return 'charts';
+          if (id.includes('node_modules/framer-motion')) return 'motion';
+          if (id.includes('node_modules/react-hook-form') || id.includes('node_modules/zod')) return 'forms';
+          if (
+            id.includes('node_modules/html5-qrcode') ||
+            id.includes('node_modules/qrcode') ||
+            id.includes('node_modules/canvas-confetti')
+          ) {
+            return 'media';
+          }
+          if (id.includes('node_modules/firebase') || id.includes('node_modules/@firebase')) return 'firebase';
+          return 'vendor';
         },
       },
     },

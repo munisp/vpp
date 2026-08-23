@@ -26,6 +26,14 @@ import {
   handleStopTransaction,
   verifyGridSignature,
 } from '../services/grid-protocol-ingest';
+import {
+  authorizeIdToken201,
+  handleBootNotification201,
+  handleHeartbeat201,
+  handleMeterValues201,
+  handleStatusNotification201,
+  handleTransactionEvent201,
+} from '../services/ocpp201-ingest';
 
 const chargePointId = z.string().min(1).max(64);
 
@@ -105,6 +113,99 @@ const meterValuesEnvelope = envelope(
         })
       )
       .min(1),
+  })
+);
+
+// ---------------------------- OCPP 2.0.1 ----------------------------
+// Separate schemas, not a widened 1.6 set: 2.0.1 payloads are a different
+// message set, and accepting either shape on one route would let a malformed
+// message from one version pass as the other.
+
+const idToken201 = z.object({
+  idToken: z.string().min(1).max(36),
+  type: z.string().min(1).max(32),
+});
+
+const sampledValue201 = z.object({
+  value: z.number(),
+  context: z.string().optional(),
+  measurand: z.string().optional(),
+  phase: z.string().optional(),
+  location: z.string().optional(),
+  unitOfMeasure: z
+    .object({ unit: z.string().optional(), multiplier: z.number().int().optional() })
+    .optional(),
+  signedMeterValue: z
+    .object({
+      signedMeterData: z.string().min(1),
+      signingMethod: z.string().min(1),
+      encodingMethod: z.string().min(1),
+      publicKey: z.string().optional(),
+    })
+    .optional(),
+});
+
+const meterValue201 = z.object({
+  timestamp: z.string().min(1),
+  sampledValue: z.array(sampledValue201).min(1),
+});
+
+const boot201Envelope = envelope(
+  z.object({
+    reason: z.string().min(1).max(32),
+    chargingStation: z.object({
+      model: z.string().min(1).max(20),
+      vendorName: z.string().min(1).max(50),
+      serialNumber: z.string().max(25).optional(),
+      firmwareVersion: z.string().max(50).optional(),
+      modem: z.object({ iccid: z.string().optional(), imsi: z.string().optional() }).optional(),
+    }),
+  })
+);
+
+const status201Envelope = envelope(
+  z.object({
+    timestamp: z.string().min(1),
+    connectorStatus: z.string().min(1).max(32),
+    evseId: z.number().int().positive(),
+    connectorId: z.number().int().positive(),
+  })
+);
+
+const authorize201Envelope = envelope(z.object({ idToken: idToken201 }));
+
+const meterValues201Envelope = envelope(
+  z.object({
+    evseId: z.number().int().min(0),
+    meterValue: z.array(meterValue201).min(1),
+  })
+);
+
+const transactionEvent201Envelope = envelope(
+  z.object({
+    eventType: z.enum(['Started', 'Updated', 'Ended']),
+    timestamp: z.string().min(1),
+    triggerReason: z.string().min(1).max(32),
+    // Monotonic per transaction; a station replaying buffered events repeats
+    // sequence numbers it already sent, which the handler must absorb.
+    seqNo: z.number().int().min(0),
+    offline: z.boolean().optional(),
+    numberOfPhasesUsed: z.number().int().optional(),
+    cableMaxCurrent: z.number().int().optional(),
+    reservationId: z.number().int().optional(),
+    transactionInfo: z.object({
+      // Station-generated: the platform maps this id, it never issues one.
+      transactionId: z.string().min(1).max(36),
+      chargingState: z.string().max(32).optional(),
+      timeSpentCharging: z.number().int().optional(),
+      stoppedReason: z.string().max(32).optional(),
+      remoteStartId: z.number().int().optional(),
+    }),
+    evse: z
+      .object({ id: z.number().int().positive(), connectorId: z.number().int().positive().optional() })
+      .optional(),
+    idToken: idToken201.optional(),
+    meterValue: z.array(meterValue201).optional(),
   })
 );
 
@@ -248,6 +349,39 @@ gridProtocolRouter.post(
 gridProtocolRouter.post(
   '/ocpp/meter-values',
   handler(meterValuesEnvelope, input => handleMeterValues(input.charge_point_id, input.payload))
+);
+gridProtocolRouter.post(
+  '/ocpp201/boot-notification',
+  handler(boot201Envelope, input => handleBootNotification201(input.charge_point_id, input.payload))
+);
+gridProtocolRouter.post(
+  '/ocpp201/heartbeat',
+  handler(heartbeatSchema, input => handleHeartbeat201(input.charge_point_id))
+);
+gridProtocolRouter.post(
+  '/ocpp201/status-notification',
+  handler(status201Envelope, async input => {
+    await handleStatusNotification201(input.charge_point_id, input.payload);
+    return {};
+  })
+);
+gridProtocolRouter.post(
+  '/ocpp201/authorize',
+  handler(authorize201Envelope, async input => ({
+    idTokenInfo: await authorizeIdToken201(input.payload.idToken),
+  }))
+);
+gridProtocolRouter.post(
+  '/ocpp201/meter-values',
+  handler(meterValues201Envelope, input =>
+    handleMeterValues201(input.charge_point_id, input.payload)
+  )
+);
+gridProtocolRouter.post(
+  '/ocpp201/transaction-event',
+  handler(transactionEvent201Envelope, input =>
+    handleTransactionEvent201(input.charge_point_id, input.payload)
+  )
 );
 gridProtocolRouter.post(
   '/openadr/event',

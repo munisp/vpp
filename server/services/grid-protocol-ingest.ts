@@ -95,7 +95,7 @@ export function verifyGridSignature(
   }
 }
 
-async function requireDb() {
+export async function requireDb() {
   const db = await getDb();
   if (!db) {
     throw new GridProtocolError(
@@ -106,7 +106,7 @@ async function requireDb() {
   return db;
 }
 
-async function requireStation(chargePointId: string) {
+export async function requireStation(chargePointId: string) {
   const db = await requireDb();
   const rows = await db
     .select()
@@ -174,7 +174,7 @@ export async function handleHeartbeat(chargePointId: string): Promise<{ currentT
   return { currentTime: new Date().toISOString() };
 }
 
-const OCPP_STATUS_MAP: Record<string, 'available' | 'occupied' | 'charging' | 'faulted' | 'offline'> = {
+export const OCPP_STATUS_MAP: Record<string, 'available' | 'occupied' | 'charging' | 'faulted' | 'offline'> = {
   Available: 'available',
   Preparing: 'occupied',
   Charging: 'charging',
@@ -504,7 +504,7 @@ function readMeterStart(metadata: string | null): number {
   return meterStart;
 }
 
-function safeParse(value: string | null): Record<string, unknown> | null {
+export function safeParse(value: string | null): Record<string, unknown> | null {
   if (!value) return null;
   try {
     const parsed: unknown = JSON.parse(value);
@@ -516,7 +516,7 @@ function safeParse(value: string | null): Record<string, unknown> | null {
   }
 }
 
-function parseTimestamp(value: string, field: string): Date {
+export function parseTimestamp(value: string, field: string): Date {
   const parsed = new Date(value);
   if (Number.isNaN(parsed.getTime())) {
     throw new GridProtocolError(400, `${field} is not a valid timestamp`);

@@ -31,6 +31,11 @@ type PlatformConfig struct {
 
 type OCPPConfig struct {
 	Enabled bool `yaml:"enabled"`
+	// Versions lists the OCPP versions this deployment accepts, "1.6" and/or
+	// "2.0.1". A station is routed by the WebSocket subprotocol it offers, so a
+	// version that is not listed is refused rather than served with the other
+	// version's message set. Defaults to 1.6 only.
+	Versions []string `yaml:"versions"`
 	// ChargePoints maps charge point identity to its HTTP basic auth password.
 	// OCPP 1.6 security profile 1 is basic auth over TLS; an empty map means no
 	// charger can connect, which is preferable to accepting all of them.
@@ -69,6 +74,22 @@ type SEP2Config struct {
 	ClientKeyFile  string        `yaml:"client_key_file"`
 	CAFile         string        `yaml:"ca_file"`
 	PollInterval   time.Duration `yaml:"poll_interval"`
+}
+
+// The OCPP versions this service can terminate.
+const (
+	OCPPVersion16  = "1.6"
+	OCPPVersion201 = "2.0.1"
+)
+
+// Speaks reports whether an OCPP version is enabled.
+func (o OCPPConfig) Speaks(version string) bool {
+	for _, enabled := range o.Versions {
+		if enabled == version {
+			return true
+		}
+	}
+	return false
 }
 
 // Load reads a YAML file, applies environment overrides and validates.
@@ -155,6 +176,14 @@ func (c *Config) Validate() error {
 		}
 		if c.OCPP.CallTimeout <= 0 {
 			c.OCPP.CallTimeout = 30 * time.Second
+		}
+		if len(c.OCPP.Versions) == 0 {
+			c.OCPP.Versions = []string{OCPPVersion16}
+		}
+		for _, version := range c.OCPP.Versions {
+			if version != OCPPVersion16 && version != OCPPVersion201 {
+				return fmt.Errorf("ocpp.versions: %q is not a supported OCPP version (%s, %s)", version, OCPPVersion16, OCPPVersion201)
+			}
 		}
 	}
 

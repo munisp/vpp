@@ -22,6 +22,8 @@ import (
 	"github.com/vpp/grid-protocols/internal/admin"
 	"github.com/vpp/grid-protocols/internal/control"
 	"github.com/vpp/grid-protocols/internal/ocpp16"
+	"github.com/vpp/grid-protocols/internal/ocpp201"
+	"github.com/vpp/grid-protocols/internal/ocppmux"
 	"github.com/vpp/grid-protocols/internal/openadr"
 	"github.com/vpp/grid-protocols/internal/platform"
 	"github.com/vpp/grid-protocols/internal/sep2"
@@ -75,17 +77,43 @@ func run(configPath string, logger *logrus.Logger) error {
 		// startup finds no supervisor yet rather than a torn pointer, and the sweep
 		// re-asserts its fallback on the next pass.
 		var supervisorRef atomic.Pointer[control.Supervisor]
-		central, err := ocpp16.NewCentralSystem(client, ocpp16.Options{
-			Authenticate:      basicAuthenticator(cfg.OCPP.ChargePoints),
-			HeartbeatInterval: cfg.OCPP.HeartbeatInterval,
-			CallTimeout:       cfg.OCPP.CallTimeout,
-			OnSessionOpen: func(chargePointID string) {
-				if s := supervisorRef.Load(); s != nil {
-					s.OnSessionOpen(chargePointID)
-				}
-			},
-			Logger: logger,
-		})
+		onSessionOpen := func(chargePointID string) {
+			if s := supervisorRef.Load(); s != nil {
+				s.OnSessionOpen(chargePointID)
+			}
+		}
+
+		var central16 ocppmux.V16
+		if cfg.OCPP.Speaks(config.OCPPVersion16) {
+			central, err := ocpp16.NewCentralSystem(client, ocpp16.Options{
+				Authenticate:      basicAuthenticator(cfg.OCPP.ChargePoints),
+				HeartbeatInterval: cfg.OCPP.HeartbeatInterval,
+				CallTimeout:       cfg.OCPP.CallTimeout,
+				OnSessionOpen:     onSessionOpen,
+				Logger:            logger,
+			})
+			if err != nil {
+				return err
+			}
+			central16 = central
+		}
+
+		var csms201 ocppmux.V201
+		if cfg.OCPP.Speaks(config.OCPPVersion201) {
+			csms, err := ocpp201.NewCSMS(client, ocpp201.Options{
+				Authenticate:      basicAuthenticator(cfg.OCPP.ChargePoints),
+				HeartbeatInterval: cfg.OCPP.HeartbeatInterval,
+				CallTimeout:       cfg.OCPP.CallTimeout,
+				OnSessionOpen:     onSessionOpen,
+				Logger:            logger,
+			})
+			if err != nil {
+				return err
+			}
+			csms201 = csms
+		}
+
+		central, err := ocppmux.New(central16, csms201, logger)
 		if err != nil {
 			return err
 		}
@@ -108,9 +136,10 @@ func run(configPath string, logger *logrus.Logger) error {
 		go supervisor.Run(ctx)
 		logger.WithFields(logrus.Fields{
 			"charge_points":  len(cfg.OCPP.ChargePoints),
+			"versions":       cfg.OCPP.Versions,
 			"max_validity":   cfg.Control.MaxValidity,
 			"sweep_interval": cfg.Control.SweepInterval,
-		}).Info("OCPP 1.6J central system enabled with bounded control windows")
+		}).Info("OCPP central system enabled with bounded control windows")
 	}
 
 	if cfg.OpenADR.Enabled {

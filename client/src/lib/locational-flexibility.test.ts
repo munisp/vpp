@@ -116,11 +116,26 @@ describe('describeNodeCapacity', () => {
       unverifiedRatedW: 6000,
       linkedAssets: 3,
       unverifiedAssets: 1,
+      awardableAssets: 2,
     });
     expect(verdict.label).toBe('9.00 kW');
     expect(verdict.tone).toBe('warning');
+    expect(verdict.meaning).toContain('9.00 kW rated across 2 awardable assets');
     expect(verdict.meaning).toContain('Nameplate ratings, not measured availability');
     expect(verdict.meaning).toContain('6.00 kW sits behind 1 unverified link');
+  });
+
+  it('does not count a verified but inactive asset as awardable', () => {
+    // Three verified links, one of them on a decommissioned asset: the watts
+    // exclude it, so the count must too or the line contradicts itself.
+    const verdict = describeNodeCapacity({
+      awardableRatedW: 9000,
+      unverifiedRatedW: 0,
+      linkedAssets: 3,
+      unverifiedAssets: 0,
+      awardableAssets: 2,
+    });
+    expect(verdict.meaning).toContain('9.00 kW rated across 2 awardable assets');
   });
 });
 

@@ -31,6 +31,7 @@ import {
   type DependencyPosture,
 } from '@/lib/degraded-operation';
 import { formatFleetKw } from '@/lib/fleet-telemetry';
+import { operatorErrorDetail } from '@/lib/query-error';
 import type { StateTone } from '@/lib/tone';
 import { trpc } from '@/lib/trpc';
 import { cn } from '@/lib/utils';
@@ -84,7 +85,7 @@ function FleetTwinPanel() {
   }, [telemetry, utils]);
 
   if (twin.isError) {
-    return <PanelUnavailable what="The fleet twin" detail={twin.error.message} />;
+    return <PanelUnavailable what="The fleet twin" detail={operatorErrorDetail(twin.error)} />;
   }
   if (!twin.data) return <Skeleton className="h-[420px] w-full" />;
 
@@ -170,7 +171,7 @@ function ControlPosturePanel() {
   const health = trpc.controlWindows.health.useQuery(undefined, { refetchInterval: REFRESH_MS });
 
   if (health.isError) {
-    return <PanelUnavailable what="Control posture" detail={health.error.message} />;
+    return <PanelUnavailable what="Control posture" detail={operatorErrorDetail(health.error)} />;
   }
   if (!health.data) return <Skeleton className="h-40 w-full" />;
 
@@ -250,7 +251,7 @@ function PosturePanel() {
   });
 
   if (posture.isError) {
-    return <PanelUnavailable what="Degraded-operation posture" detail={posture.error.message} />;
+    return <PanelUnavailable what="Degraded-operation posture" detail={operatorErrorDetail(posture.error)} />;
   }
   if (!posture.data) return <Skeleton className="h-64 w-full" />;
 
@@ -318,7 +319,7 @@ function FleetSeriesPanel() {
   );
 
   if (series.isError) {
-    return <PanelUnavailable what="The rolling fleet aggregate" detail={series.error.message} />;
+    return <PanelUnavailable what="The rolling fleet aggregate" detail={operatorErrorDetail(series.error)} />;
   }
   if (!series.data) return <Skeleton className="h-40 w-full" />;
 
@@ -373,7 +374,15 @@ export default function OperationsWall() {
   const [dense, setDense] = useState(false);
 
   return (
-    <div className={cn('ops-surface min-h-screen bg-background text-foreground', dense && 'text-sm')}>
+    // The wall is always dark, whatever the operator's theme: it hangs in a
+    // dimmed room, and a light board is both unreadable at distance and a
+    // glare source. `dark` sets the token values for everything nested here.
+    <div
+      className={cn(
+        'dark ops-surface min-h-screen bg-background text-foreground [color-scheme:dark]',
+        dense && 'text-sm'
+      )}
+    >
       <header className="sticky top-0 z-10 flex flex-wrap items-center justify-between gap-4 border-b border-border bg-background/95 px-6 py-4 backdrop-blur">
         <div className="flex items-center gap-3">
           <Radio className="h-6 w-6 text-cyan-500" aria-hidden />

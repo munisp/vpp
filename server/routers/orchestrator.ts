@@ -6,6 +6,7 @@ import { temporalClient } from "../integration/temporal-client";
 import { temporalQueryService } from "../integration/temporal-query";
 import * as db from "../db";
 import * as drDb from "../dr-db";
+import { ownsWorkflow } from "../services/workflows/ownership";
 
 /**
  * Orchestrator Router - tRPC bridge to Temporal workflows
@@ -365,10 +366,10 @@ export const orchestratorRouter = router({
     }))
     .query(async ({ ctx, input }) => {
       // A workflow execution carries its input, which for payment and trading
-      // workflows means amounts, phone numbers and counterparties. User
-      // workflow IDs embed the user id, so ownership is read from there.
-      const userMarker = `-${ctx.user.id}-`;
-      if (!input.workflowId.includes(userMarker) && ctx.user.role !== "admin") {
+      // workflows means amounts, phone numbers and counterparties. Ownership is
+      // parsed from the id's known shape; an id with no encoded owner is refused
+      // to a non-admin rather than matched loosely.
+      if (!ownsWorkflow(input.workflowId, ctx.user.id) && ctx.user.role !== "admin") {
         throw new TRPCError({
           code: "FORBIDDEN",
           message: "You can only read your own workflows",
@@ -398,11 +399,10 @@ export const orchestratorRouter = router({
 
   listUserWorkflows: protectedProcedure
     .query(async ({ ctx }) => {
-      const userMarker = `-${ctx.user.id}-`;
       const workflows = await temporalQueryService.listWorkflows({ limit: 200 });
 
       return workflows
-        .filter((w) => w.workflowId.includes(userMarker))
+        .filter((w) => ownsWorkflow(w.workflowId, ctx.user.id))
         .sort((a, b) => b.startTime.getTime() - a.startTime.getTime())
         .slice(0, 20); // Last 20 workflows
     }),
@@ -412,9 +412,8 @@ export const orchestratorRouter = router({
       workflowId: z.string(),
     }))
     .mutation(async ({ ctx, input }) => {
-      // Verify ownership: user workflow IDs embed the user id.
-      const userMarker = `-${ctx.user.id}-`;
-      if (!input.workflowId.includes(userMarker) && ctx.user.role !== "admin") {
+      // Verify ownership from the id's known shape, not a substring match.
+      if (!ownsWorkflow(input.workflowId, ctx.user.id) && ctx.user.role !== "admin") {
         throw new TRPCError({
           code: "FORBIDDEN",
           message: "You can only cancel your own workflows",

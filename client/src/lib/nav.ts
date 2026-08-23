@@ -141,6 +141,7 @@ export const NAV_GROUPS: NavGroup[] = [
       { label: 'Ledger Reconciliation', path: '/admin/ledger', adminOnly: true, keywords: ['double entry', 'tigerbeetle', 'balance'] },
       { label: 'Event Stream', path: '/admin/event-stream', adminOnly: true, keywords: ['kafka', 'outbox', 'dead letter', 'topics'] },
       { label: 'Lakehouse', path: '/admin/lakehouse', adminOnly: true, keywords: ['etl', 'parquet', 'ingestion', 'analytics', 'watermark'] },
+      { label: 'Diagnostics', path: '/admin/diagnostics', adminOnly: true, keywords: ['ollama', 'local llm', 'ai', 'troubleshoot', 'root cause', 'evidence'] },
       { label: 'Webhook Config', path: '/admin/webhook-config', adminOnly: true, keywords: ['callback'] },
       { label: 'Admin Analytics', path: '/admin/analytics', adminOnly: true },
       { label: 'Analytics Dashboard', path: '/admin/analytics-dashboard', adminOnly: true },

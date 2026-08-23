@@ -64,6 +64,13 @@
       "when": 1787504000000,
       "tag": "0008_matter_loads",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1787510000000,
+      "tag": "0009_degraded_operation",
+      "breakpoints": true
     }
   ]
 }

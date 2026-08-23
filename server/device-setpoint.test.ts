@@ -184,6 +184,16 @@ describe('MQTT fallback on expiry', () => {
   });
 
   async function sweep(assignment: Record<string, unknown>) {
+    const actualDegraded = await import('./services/degraded-operation');
+    vi.doMock('./services/degraded-operation', () => ({
+      ...actualDegraded,
+      requireCapability: vi.fn(async () => ({
+        posture: 'available' as const,
+        missing: [],
+        evidenceLimit: null,
+      })),
+      recordDegradedAction: vi.fn(async () => ({ id: 1 })),
+    }));
     const actual = await import('./services/control-validity');
     const outcomes: Array<{ outcome: string; detail: string }> = [];
     vi.doMock('./services/control-validity', () => ({

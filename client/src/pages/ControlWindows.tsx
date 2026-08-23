@@ -27,6 +27,7 @@ import {
   type ControlState,
   type ControlTone,
 } from "@/lib/control-state";
+import { memberNotice } from "@/lib/degraded-operation";
 
 const TONE_CLASS: Record<ControlTone, string> = {
   live: "bg-emerald-100 text-emerald-900 border-emerald-300",
@@ -178,6 +179,9 @@ export default function ControlWindows() {
     { limit: 50 },
     { enabled: isAdmin, refetchInterval: 15000 }
   );
+  const serviceStatus = trpc.degradedOperation.memberStatus.useQuery(undefined, {
+    refetchInterval: 60000,
+  });
 
   const sweep = trpc.controlWindows.sweepNow.useMutation({
     onSuccess: result => {
@@ -195,6 +199,12 @@ export default function ControlWindows() {
   const mineRows = (mine.data?.assignments ?? []) as unknown as AssignmentRow[];
   const fleetRows = (fleet.data?.assignments ?? []) as unknown as AssignmentRow[];
   const awaiting = health.data?.awaitingFallback ?? 0;
+  const controlNotice = serviceStatus.data
+    ? memberNotice(
+        serviceStatus.data.control.posture,
+        serviceStatus.data.control.limitation
+      )
+    : null;
 
   return (
     <TooltipProvider>
@@ -207,6 +217,15 @@ export default function ControlWindows() {
               to. States show what the platform can prove, not what it hopes.
             </p>
           </div>
+
+          {controlNotice && (
+            <Card className="border-amber-300 bg-amber-50">
+              <CardHeader className="flex flex-row items-center gap-2 pb-2">
+                <AlertTriangle className="h-4 w-4 text-amber-700" />
+                <CardTitle className="text-base text-amber-900">{controlNotice}</CardTitle>
+              </CardHeader>
+            </Card>
+          )}
 
           {isAdmin && awaiting > 0 && (
             <Card className="border-red-300 bg-red-50">

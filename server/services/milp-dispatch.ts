@@ -7,6 +7,8 @@
  * a heuristic and present the result as optimized.
  */
 
+import { observing } from './degraded-operation';
+
 export type MilpObjective =
   | 'minimize_cost'
   | 'maximize_revenue'
@@ -142,7 +144,30 @@ export function assertMilpOptimizerConfigured(): void {
   }
 }
 
+/**
+ * Every call to the optimizer is recorded as an observation of it, on both the
+ * success and the failure path, so `dependencyPostures()` reports what real
+ * traffic saw rather than what a health endpoint claims. An HTTP answer counts
+ * as `faulted` (it is up, but not usable); a transport failure or timeout counts
+ * as `unreachable`.
+ */
 async function post<TRequest, TResponse>(
+  path: string,
+  body: TRequest,
+  timeoutMs: number
+): Promise<TResponse> {
+  return observing(
+    {
+      dependency: 'optimizer',
+      observedBy: 'server',
+      operation: `POST ${path}`,
+      faultedWhen: error => error instanceof MilpOptimizerError && error.statusCode !== undefined,
+    },
+    () => postOnce<TRequest, TResponse>(path, body, timeoutMs)
+  );
+}
+
+async function postOnce<TRequest, TResponse>(
   path: string,
   body: TRequest,
   timeoutMs: number

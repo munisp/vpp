@@ -8,6 +8,7 @@ import mqtt from 'mqtt';
 import { getDb } from '../db';
 import { telemetry, alerts, assets } from '../../drizzle/schema';
 import { eq } from 'drizzle-orm';
+import { observing, recordObservation } from '../services/degraded-operation';
 
 export interface DeviceReading {
   deviceId: string;
@@ -194,6 +195,15 @@ class MQTTBrokerService {
           temperature: reading.temperature,
           metadata: reading.metadata ? JSON.stringify(reading.metadata) : null,
         });
+        // Stored samples are the evidence that the meter path works; a broker
+        // connection on its own is not, so the observation is recorded here and
+        // not when the client connects.
+        await recordObservation({
+          dependency: 'meter_telemetry',
+          observation: 'reachable',
+          observedBy: 'server',
+          operation: 'mqtt telemetry stored',
+        });
       }
 
       // Trigger callback
@@ -329,6 +339,13 @@ class MQTTBrokerService {
    * Publish command to device
    */
   async publishCommand(deviceId: string, command: string, params?: any): Promise<void> {
+    return observing(
+      { dependency: 'mqtt_broker', observedBy: 'server', operation: 'publish device command' },
+      () => this.publishCommandOnce(deviceId, command, params)
+    );
+  }
+
+  private async publishCommandOnce(deviceId: string, command: string, params?: any): Promise<void> {
     if (!this.client || !this.connected) {
       throw new Error('MQTT client not connected');
     }
@@ -362,6 +379,16 @@ class MQTTBrokerService {
    * the site received or acted on it.
    */
   async publishSiteSignal(siteRef: string, payload: Record<string, unknown>): Promise<void> {
+    return observing(
+      { dependency: 'mqtt_broker', observedBy: 'server', operation: 'publish site price signal' },
+      () => this.publishSiteSignalOnce(siteRef, payload)
+    );
+  }
+
+  private async publishSiteSignalOnce(
+    siteRef: string,
+    payload: Record<string, unknown>
+  ): Promise<void> {
     if (!this.client || !this.connected) {
       throw new Error('MQTT client not connected');
     }

@@ -9,6 +9,7 @@ import { createHash } from 'crypto';
 import { getDb } from '../db';
 import { eq, desc, and, gte, lte, sql, type SQL } from 'drizzle-orm';
 import { kafkaPublisher } from '../integration/kafka-publisher';
+import { requireCapability } from './degraded-operation';
 import type { SqlRow } from '../sql-row';
 
 // Import schema (will be available after schema update)
@@ -600,7 +601,11 @@ export class SettlementLedgerService {
   }
 
   /**
-   * Record a dispatch completion event
+   * Record a dispatch completion event.
+   *
+   * @throws DegradedOperationError when the meter path is down or unobserved:
+   * the compensation below is owed for measured energy, so an unmeasurable
+   * period must not produce a ledger event that looks measured.
    */
   async recordDispatchCompletion(
     userId: number,
@@ -612,6 +617,7 @@ export class SettlementLedgerService {
     compensation: number,
     currency: 'NGN' | 'TZS' | 'USD'
   ): Promise<SettlementEvent> {
+    await requireCapability('metered_settlement');
     const energyWh = Math.round((actualPowerWatts * durationMinutes) / 60);
     const platformFee = Math.round(compensation * 0.30); // 30% platform fee
 
@@ -663,7 +669,8 @@ export class SettlementLedgerService {
   }
 
   /**
-   * Record a DR event completion
+   * Record a DR event completion. Refuses for the same reason as a dispatch
+   * completion: the reduction being paid for is measured against telemetry.
    */
   async recordDRCompletion(
     userId: number,
@@ -675,6 +682,7 @@ export class SettlementLedgerService {
     compensationRate: number,
     currency: 'NGN' | 'TZS' | 'USD'
   ): Promise<SettlementEvent> {
+    await requireCapability('metered_settlement');
     const energyWh = Math.round((actualReductionKw * 1000 * durationMinutes) / 60);
     const grossAmount = Math.round((energyWh / 1000) * compensationRate);
     const platformFee = Math.round(grossAmount * 0.30);

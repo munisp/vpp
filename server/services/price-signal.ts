@@ -36,6 +36,7 @@ import {
   solveCoordination,
 } from './milp-dispatch';
 import { probabilisticForecasting } from './probabilistic-forecasting';
+import { requireCapability } from './degraded-operation';
 import type { SqlRow } from '../sql-row';
 
 /** Minimum telemetry history before a site's load forecast is usable. */
@@ -422,6 +423,9 @@ export async function coordinateFleetSignal(
 export async function publishFleetSignal(
   signalId: string
 ): Promise<{ queued: number; failed: number }> {
+  // A price a site never received cannot be settled against, so publication is
+  // refused rather than recorded as queued into a broker that may be gone.
+  await requireCapability('price_signal_publish');
   const db = await requireDb();
   const signalRows = await db
     .select()

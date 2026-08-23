@@ -25,6 +25,7 @@ import {
   isMilpOptimizerConfigured,
   solveMilpDispatch,
 } from './milp-dispatch';
+import { requireCapability } from './degraded-operation';
 import type { SqlRow } from '../sql-row';
 import { jsonSetText } from '../sql-json';
 
@@ -332,6 +333,9 @@ export class OptimizationEngine {
       grid_target_w: request.objective === 'balance_grid' ? contexts.map(() => 0) : null,
     };
 
+    // Refused while the optimizer is in an open outage: the alternative is a
+    // heuristic schedule stored under the optimizer's name.
+    await requireCapability('optimizer_dispatch');
     const result = await solveMilpDispatch(milpRequest);
     return {
       setpoints: this.milpSetpoints(result, request, assets, contexts, scheduleStart, intervalMinutes),

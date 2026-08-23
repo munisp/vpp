@@ -10,6 +10,7 @@
 
 import { createHmac } from 'crypto';
 import { resolveControlWindow, type ControlWindow } from './control-validity';
+import { observing } from './degraded-operation';
 
 export interface ChargingSchedulePeriod {
   /** Seconds from the start of the schedule. */
@@ -96,6 +97,24 @@ export function signCommand(
 }
 
 async function call<T>(
+  path: string,
+  payload: unknown,
+  method: 'GET' | 'POST' = 'POST'
+): Promise<T> {
+  // A 4xx/5xx from the service means it is up but the command failed (`faulted`);
+  // a transport error or timeout means the control path itself is gone.
+  return observing(
+    {
+      dependency: 'grid_protocols',
+      observedBy: 'server',
+      operation: `${method} ${path}`,
+      faultedWhen: error => error instanceof GridCommandError && error.status < 502,
+    },
+    () => callOnce<T>(path, payload, method)
+  );
+}
+
+async function callOnce<T>(
   path: string,
   payload: unknown,
   method: 'GET' | 'POST' = 'POST'

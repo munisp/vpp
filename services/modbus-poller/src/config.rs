@@ -15,6 +15,14 @@ pub struct Config {
     pub poll_interval_secs: u64,
     #[serde(default = "default_request_timeout_ms")]
     pub request_timeout_ms: u64,
+    /// Readings held while the platform is unreachable. Bounded on purpose: when
+    /// it fills, the oldest readings are dropped and counted rather than the
+    /// poller growing without limit on a field gateway.
+    #[serde(default = "default_spool_max_readings")]
+    pub spool_max_readings: usize,
+    /// Readings sent per delivery attempt, including replayed ones.
+    #[serde(default = "default_publish_batch_size")]
+    pub publish_batch_size: usize,
     #[serde(default)]
     pub devices: Vec<DeviceConfig>,
 }
@@ -124,6 +132,12 @@ fn default_unit_id() -> u8 {
 fn default_scale() -> f64 {
     1.0
 }
+fn default_spool_max_readings() -> usize {
+    50_000
+}
+fn default_publish_batch_size() -> usize {
+    500
+}
 
 impl Config {
     pub fn load(path: &Path) -> Result<Self> {
@@ -172,6 +186,16 @@ impl Config {
         }
         if self.request_timeout_ms == 0 {
             bail!("request_timeout_ms must be greater than zero");
+        }
+        if self.publish_batch_size == 0 {
+            bail!("publish_batch_size must be greater than zero: nothing would ever be sent");
+        }
+        if self.spool_max_readings < self.publish_batch_size {
+            bail!(
+                "spool_max_readings ({}) must be at least publish_batch_size ({}): a spool smaller than one batch would discard readings it was about to send",
+                self.spool_max_readings,
+                self.publish_batch_size
+            );
         }
 
         for device in &self.devices {
@@ -298,6 +322,10 @@ mod tests {
             (
                 "duplicate register",
                 VALID.replace("soc_percent", "active_power_w"),
+            ),
+            (
+                "spool smaller than a batch",
+                format!("spool_max_readings = 10\npublish_batch_size = 100\n{VALID}"),
             ),
         ];
         for (name, text) in cases {

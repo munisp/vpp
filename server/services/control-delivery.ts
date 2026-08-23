@@ -31,6 +31,7 @@ import {
   type ControlSource,
   type FallbackOutcome,
 } from './control-validity';
+import { recordDegradedAction, requireCapability } from './degraded-operation';
 import { mqttBrokerService } from '../integration/mqtt-broker';
 import type { ControlAssignment } from '../../drizzle/control-schema';
 
@@ -364,6 +365,11 @@ export async function sweepExpiredControls(
   now: Date = new Date()
 ): Promise<FallbackSweepResult> {
   const expired = await expiredAssignments(now);
+  // `control_dispatch` may run degraded on purpose: hardware still holding an
+  // expired setpoint is worse than a conservative command we cannot confirm. So
+  // this never refuses — it tells us whether each fallback below has to be filed
+  // as an action taken without delivery evidence.
+  const posture = await requireCapability('control_dispatch', now);
   const result: FallbackSweepResult = {
     examined: expired.length,
     applied: 0,
@@ -387,6 +393,18 @@ export async function sweepExpiredControls(
       result.details.push(
         `assignment ${assignment.id}: hold_last, setpoint still active on ${assignment.targetRef}`
       );
+      // hold_last issues no command, so the claim that the setpoint is still
+      // active rests entirely on the delivery path being observable. With that
+      // path unavailable, "still active" is an assumption about hardware nobody
+      // can currently see, and it is filed as one.
+      if (posture.posture === 'degraded') {
+        await recordDegradedAction({
+          capability: 'control_dispatch',
+          subject: `control_assignment:${assignment.id}`,
+          missingDependencies: posture.missing,
+          evidenceLimit: `hold_last left the setpoint in force on ${assignment.targetRef} while ${posture.missing.join(', ')} was unavailable: the platform cannot currently read what the asset is doing`,
+        });
+      }
       continue;
     }
     try {
@@ -399,6 +417,7 @@ export async function sweepExpiredControls(
       } else {
         result.failed += 1;
       }
+      await noteDegradedFallback(posture, assignment.id, outcome, detail);
       result.details.push(`assignment ${assignment.id}: ${detail}`);
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
@@ -412,11 +431,38 @@ export async function sweepExpiredControls(
         classifyFallbackFailure(error),
         reason
       );
+      await noteDegradedFallback(
+        posture,
+        assignment.id,
+        classifyFallbackFailure(error),
+        reason
+      );
       result.failed += 1;
       result.details.push(`assignment ${assignment.id}: fallback failed: ${reason}`);
     }
   }
   return result;
+}
+
+/**
+ * Files a fallback issued while the delivery path was unavailable, so an
+ * operator can list every asset whose current physical state the platform cannot
+ * account for. A confirmed `applied` outcome needs no such record: the device
+ * answered, which is the evidence the record would otherwise be missing.
+ */
+async function noteDegradedFallback(
+  posture: Awaited<ReturnType<typeof requireCapability>>,
+  assignmentId: number,
+  outcome: FallbackOutcome,
+  detail: string
+): Promise<void> {
+  if (posture.posture !== 'degraded' || outcome === 'applied') return;
+  await recordDegradedAction({
+    capability: 'control_dispatch',
+    subject: `control_assignment:${assignmentId}`,
+    missingDependencies: posture.missing,
+    evidenceLimit: `${posture.evidenceLimit ?? 'delivery path unavailable'} (outcome ${outcome}: ${detail.slice(0, 200)})`,
+  });
 }
 
 interface AppliedFallback {

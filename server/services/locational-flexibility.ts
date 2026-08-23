@@ -31,6 +31,7 @@ import {
   gridNodeAssets,
   gridNodes,
 } from '../../drizzle/locational-flexibility-schema';
+import { recordDegradedAction, requireCapability } from './degraded-operation';
 import { settlementLedger } from './settlement-ledger';
 import type { SqlRow } from '../sql-row';
 
@@ -761,6 +762,10 @@ export async function measureRequirement(
 export async function settleAward(
   awardId: number
 ): Promise<{ awardId: number; settlementEventId: number; amount: number }> {
+  // Delivered energy is measured from telemetry. If that path is down — or has
+  // not been seen recently enough to know — the amount below is arithmetic on
+  // stale rows, not a measurement, so the payout is refused rather than made.
+  const posture = await requireCapability('flexibility_settlement');
   const db = await requireDb();
   const rows = await db.execute<SqlRow>(sql`
     SELECT
@@ -874,6 +879,18 @@ export async function settleAward(
       updatedAt: new Date(),
     })
     .where(eq(flexibilityAwards.id, awardId));
+
+  if (posture.posture === 'degraded') {
+    // The deployment chose to keep paying while blind to the meter path. The
+    // payment stands, but it is written down as unproven so an auditor can find
+    // every amount that was paid without a current measurement path.
+    await recordDegradedAction({
+      capability: 'flexibility_settlement',
+      subject: `flexibility_award:${awardId}`,
+      missingDependencies: posture.missing,
+      evidenceLimit: posture.evidenceLimit ?? 'delivery measurement path unavailable',
+    });
+  }
 
   return { awardId, settlementEventId: event.id, amount: grossAmount };
 }

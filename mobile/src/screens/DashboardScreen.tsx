@@ -322,6 +322,11 @@ export default function DashboardScreen({ navigation }: any) {
             label="Rewards"
             onPress={() => navigation.navigate('Gamification')}
           />
+          <ActionButton
+            icon="🩺"
+            label="Service Status"
+            onPress={() => navigation.navigate('ServiceStatus')}
+          />
         </View>
       </View>
 

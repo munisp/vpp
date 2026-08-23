@@ -27,6 +27,10 @@ import {
   verifyGridSignature,
 } from '../services/grid-protocol-ingest';
 import {
+  recordObservation,
+  type DependencyName,
+} from '../services/degraded-operation';
+import {
   handleMatterAttribute,
   handleMatterNode,
   handleMatterNodeRemoved,
@@ -330,9 +334,16 @@ function authenticate(req: Request): void {
   );
 }
 
+/**
+ * @param dependency which service a signed request proves is talking to us. An
+ * authenticated inbound report is the platform's only evidence that the protocol
+ * service or the Matter controller is alive, so it is recorded as an observation
+ * — nothing else marks these dependencies reachable.
+ */
 function handler<T>(
   schema: z.ZodType<T>,
-  run: (input: T) => Promise<unknown>
+  run: (input: T) => Promise<unknown>,
+  dependency: DependencyName = 'grid_protocols'
 ): (req: Request, res: Response) => Promise<void> {
   return async (req, res) => {
     try {
@@ -343,6 +354,7 @@ function handler<T>(
         return;
       }
       const result = await run(parsed.data);
+      await recordInboundObservation(dependency, req.path);
       res.status(200).json(result ?? {});
     } catch (error) {
       if (error instanceof GridProtocolError) {
@@ -356,6 +368,24 @@ function handler<T>(
       });
     }
   };
+}
+
+async function recordInboundObservation(
+  dependency: DependencyName,
+  path: string
+): Promise<void> {
+  try {
+    await recordObservation({
+      dependency,
+      observation: 'reachable',
+      observedBy: 'server',
+      operation: `inbound ${path}`,
+    });
+  } catch (error) {
+    // A missing observation decays to `unknown`, which refuses money paths; it
+    // must not also reject a report the platform already stored.
+    console.error('[GridProtocols] could not record dependency observation:', error);
+  }
 }
 
 export const gridProtocolRouter = Router();
@@ -436,19 +466,19 @@ gridProtocolRouter.post(
 );
 gridProtocolRouter.post(
   '/matter/nodes',
-  handler(matterNodesSchema, input => handleMatterNodes(input))
+  handler(matterNodesSchema, input => handleMatterNodes(input), 'matter_controller')
 );
 gridProtocolRouter.post(
   '/matter/node',
-  handler(matterSingleNodeSchema, input => handleMatterNode(input))
+  handler(matterSingleNodeSchema, input => handleMatterNode(input), 'matter_controller')
 );
 gridProtocolRouter.post(
   '/matter/attribute',
-  handler(matterAttributeSchema, input => handleMatterAttribute(input))
+  handler(matterAttributeSchema, input => handleMatterAttribute(input), 'matter_controller')
 );
 gridProtocolRouter.post(
   '/matter/node-removed',
-  handler(matterNodeRemovedSchema, input => handleMatterNodeRemoved(input))
+  handler(matterNodeRemovedSchema, input => handleMatterNodeRemoved(input), 'matter_controller')
 );
 gridProtocolRouter.post(
   '/modbus/readings',

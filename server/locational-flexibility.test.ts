@@ -109,6 +109,27 @@ function mockLedger(failure?: string) {
   }));
 }
 
+/**
+ * Settlement is guarded by meter-telemetry evidence. These tests exercise the
+ * clearing and settlement arithmetic, so the guard is mocked available here and
+ * its refusal is covered where the refusal itself is the subject.
+ */
+function mockDegraded(refusal?: string) {
+  vi.doMock('./services/degraded-operation', async () => {
+    const actual =
+      await vi.importActual<typeof import('./services/degraded-operation')>(
+        './services/degraded-operation'
+      );
+    return {
+      ...actual,
+      requireCapability: async (capability: string) => {
+        if (refusal) throw new actual.DegradedOperationError(capability, ['meter_telemetry'], refusal);
+        return { posture: 'available' as const, missing: [], evidenceLimit: null };
+      },
+    };
+  });
+}
+
 beforeEach(() => {
   vi.resetModules();
   ledgerEvents.length = 0;
@@ -121,11 +142,13 @@ beforeEach(() => {
     returningId: 1,
   };
   mockLedger();
+  mockDegraded();
 });
 
 afterEach(() => {
   vi.doUnmock('./db');
   vi.doUnmock('./services/settlement-ledger');
+  vi.doUnmock('./services/degraded-operation');
   vi.restoreAllMocks();
 });
 
@@ -570,6 +593,18 @@ describe('settleAward', () => {
     const { settleAward } = await import('./services/locational-flexibility');
     await expect(settleAward(8)).rejects.toThrow(/only measured delivery can be settled/);
     expect(ledgerEvents).toEqual([]);
+  });
+
+  it('pays nothing while the meter path is unobservable', async () => {
+    mockDegraded('meter_telemetry is unknown');
+    mockDb();
+    state.executeQueue = [[settleRow()]];
+    const { settleAward } = await import('./services/locational-flexibility');
+    await expect(settleAward(8)).rejects.toThrow(/meter_telemetry is unknown/);
+    expect(ledgerEvents).toEqual([]);
+    // Refused before the claim, so the award stays settleable once the meter
+    // path is observed again.
+    expect(state.updated).toEqual([]);
   });
 
   it('refuses to settle the same award twice', async () => {

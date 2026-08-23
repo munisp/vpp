@@ -38,6 +38,7 @@ import PriceSignalsScreen from '../screens/PriceSignalsScreen';
 import CommunityTelemetryScreen from '../screens/CommunityTelemetryScreen';
 import LocationalFlexibilityScreen from '../screens/LocationalFlexibilityScreen';
 import MatterLoadsScreen from '../screens/MatterLoadsScreen';
+import ServiceStatusScreen from '../screens/ServiceStatusScreen';
 
 const Stack = createNativeStackNavigator();
 const Tab = createBottomTabNavigator();
@@ -172,6 +173,7 @@ export default function AppNavigator() {
       <Stack.Screen name="CommunityTelemetry" component={CommunityTelemetryScreen} />
       <Stack.Screen name="LocationalFlexibility" component={LocationalFlexibilityScreen} />
       <Stack.Screen name="MatterLoads" component={MatterLoadsScreen} />
+      <Stack.Screen name="ServiceStatus" component={ServiceStatusScreen} />
           </>
         )}
       </Stack.Navigator>

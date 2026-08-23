@@ -338,6 +338,9 @@ interface SweepHarness {
   clearCalls: unknown[];
   fallbackError?: Error;
   clearError?: Error;
+  /** Posture the sweep sees; `degraded` means the delivery path is unobservable. */
+  posture: 'available' | 'degraded';
+  degradedActions: Array<{ capability: string; subject: string; evidenceLimit: string }>;
 }
 
 /**
@@ -353,8 +356,26 @@ async function harness(state: Partial<SweepHarness> = {}) {
     held: [],
     fallbackCalls: [],
     clearCalls: [],
+    posture: 'available',
+    degradedActions: [],
     ...state,
   };
+
+  const actualDegraded = await import('./services/degraded-operation');
+  vi.doMock('./services/degraded-operation', () => ({
+    ...actualDegraded,
+    requireCapability: vi.fn(async () => ({
+      posture: h.posture,
+      missing: h.posture === 'degraded' ? ['mqtt_broker'] : [],
+      evidenceLimit: h.posture === 'degraded' ? 'delivery path unobservable' : null,
+    })),
+    recordDegradedAction: vi.fn(
+      async (input: { capability: string; subject: string; evidenceLimit: string }) => {
+        h.degradedActions.push(input);
+        return { id: h.degradedActions.length };
+      }
+    ),
+  }));
 
   const actualCommands = await import('./services/grid-commands');
   vi.doMock('./services/grid-commands', () => ({
@@ -475,6 +496,41 @@ describe('sweepExpiredControls', () => {
     expect(h.claims).toEqual([1]);
     expect(h.fallbackCalls).toHaveLength(0);
     expect(h.outcomes).toHaveLength(0);
+  });
+
+  it('leaves an evidence gap for a hold_last taken while the delivery path was unobservable', async () => {
+    const h = await harness({
+      posture: 'degraded',
+      rows: [expiredRow({ fallbackPolicy: 'hold_last', fallbackLimitWatts: null })],
+    });
+    const { sweepExpiredControls } = await import('./services/control-delivery');
+    await sweepExpiredControls(NOW);
+    expect(h.degradedActions).toHaveLength(1);
+    expect(h.degradedActions[0]).toMatchObject({
+      capability: 'control_dispatch',
+      subject: 'control_assignment:1',
+    });
+    expect(h.degradedActions[0]?.evidenceLimit).toMatch(/cannot currently read/);
+  });
+
+  it('records no evidence gap for a fallback the device confirmed', async () => {
+    const h = await harness({ posture: 'degraded', rows: [expiredRow()] });
+    const { sweepExpiredControls } = await import('./services/control-delivery');
+    const result = await sweepExpiredControls(NOW);
+    expect(result.applied).toBe(1);
+    expect(h.degradedActions).toHaveLength(0);
+  });
+
+  it('records an evidence gap for an unconfirmed fallback', async () => {
+    const { GridCommandError } = await import('./services/grid-commands');
+    const h = await harness({
+      posture: 'degraded',
+      rows: [expiredRow()],
+      fallbackError: new GridCommandError(504, 'no answer within 20000ms'),
+    });
+    const { sweepExpiredControls } = await import('./services/control-delivery');
+    await sweepExpiredControls(NOW);
+    expect(h.degradedActions).toHaveLength(1);
   });
 
   it('fails loudly when safe_limit has no watts anywhere', async () => {

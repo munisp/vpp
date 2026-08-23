@@ -52,7 +52,8 @@ import {
   Globe,
   Coins,
   MapPin,
-  House
+  House,
+  HeartPulse
 } from "lucide-react";
 import { CSSProperties, useEffect, useRef, useState } from "react";
 import { useLocation } from "wouter";
@@ -117,6 +118,7 @@ const getMenuSections = (userRole?: string): MenuSection[] => [
         ? [
             { icon: Activity, label: "Fleet Telemetry", path: "/grid/fleet-telemetry" },
             { icon: House, label: "Smart-Home Loads", path: "/grid/matter-loads" },
+            { icon: HeartPulse, label: "Degraded Operation", path: "/grid/degraded-operation" },
             { icon: ShieldAlert, label: "NTL Detection", path: "/grid/ntl" },
             { icon: FileCheck, label: "Compliance Reports", path: "/grid/compliance-reports" },
           ]

@@ -25,6 +25,7 @@ import {
   gridProtocolInstructions,
   ocppIdTags,
 } from '../../drizzle/grid-protocol-schema';
+import { recordObservation } from './degraded-operation';
 
 /** Signed requests older than this are replays and are rejected. */
 export const SIGNATURE_MAX_AGE_SECONDS = 300;
@@ -465,6 +466,14 @@ export async function handleMeterValues(
     })
     .where(eq(chargingSessions.id, session.id));
 
+  // A stored meter register is the settlement measurement itself, so it is the
+  // strongest evidence the meter path works.
+  await recordObservation({
+    dependency: 'meter_telemetry',
+    observation: 'reachable',
+    observedBy: 'server',
+    operation: 'ocpp meter values stored',
+  });
   return { recorded };
 }
 
@@ -778,6 +787,16 @@ export async function handleModbusReadings(
       .where(eq(devices.id, device.id));
     stored += deviceReadings.length;
   }
+
+  // Stored measurements are the only honest evidence that the meter path works,
+  // so the arrival of real samples is what marks `meter_telemetry` reachable —
+  // not a poller that says it is running.
+  await recordObservation({
+    dependency: 'meter_telemetry',
+    observation: 'reachable',
+    observedBy: 'server',
+    operation: 'modbus readings stored',
+  });
   return { stored };
 }
 

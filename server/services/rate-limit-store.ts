@@ -263,6 +263,14 @@ export function sharedCountersConfigured(): boolean {
  */
 export function assertSharedCountersAvailable(): void {
   if (process.env.NODE_ENV !== 'production') return;
+  // The opt-out is a decision, not a misconfiguration: it is the one way a
+  // production deployment is allowed to count per replica, so it must boot.
+  if (process.env.RATE_LIMIT_STORE === 'memory') {
+    console.warn(
+      '[RateLimit] RATE_LIMIT_STORE=memory in production: counters live in each replica, so every configured limit is multiplied by the replica count.'
+    );
+    return;
+  }
   if (sharedCountersConfigured()) return;
   throw new Error(
     'REDIS_HOST is not set, so rate-limit counters would live in each replica and the configured limits would be multiplied by the replica count. Set REDIS_HOST, or set RATE_LIMIT_STORE=memory to accept per-replica limits deliberately.'

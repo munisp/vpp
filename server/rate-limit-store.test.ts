@@ -353,6 +353,18 @@ describe('shared counter configuration', () => {
     Object.assign(process.env, env);
   });
 
+  it('starts a production deployment that opted into per-replica counting, and says so', () => {
+    process.env.NODE_ENV = 'production';
+    delete process.env.REDIS_HOST;
+    delete process.env.REDIS_URL;
+    process.env.RATE_LIMIT_STORE = 'memory';
+    const warned = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    expect(() => assertSharedCountersAvailable()).not.toThrow();
+    expect(String(warned.mock.calls[0][0])).toContain('replica count');
+    warned.mockRestore();
+    Object.assign(process.env, env);
+  });
+
   it('starts a development deployment without Redis and warns', () => {
     process.env.NODE_ENV = 'development';
     delete process.env.REDIS_HOST;

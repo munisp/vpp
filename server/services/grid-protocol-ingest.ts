@@ -726,26 +726,37 @@ export interface ModbusReading {
  * Stores Modbus readings as telemetry for the asset the device is registered
  * to. Readings from unregistered devices are rejected rather than dropped, so
  * a misconfigured poller is visible instead of silently producing no data.
+ *
+ * One sample is one telemetry row: readings are grouped by device *and* by the
+ * instant they were read, so a batch (or a replayed spool) carrying several
+ * minutes of history is stored as that history rather than collapsed into its
+ * newest value. `samples` counts the rows written and `readings` the registers
+ * they were built from — a caller is told what was persisted, not what arrived.
  */
 export async function handleModbusReadings(
   readings: ModbusReading[]
-): Promise<{ stored: number }> {
+): Promise<{ samples: number; readings: number }> {
   if (readings.length === 0) {
-    return { stored: 0 };
+    return { samples: 0, readings: 0 };
   }
   const db = await requireDb();
-  const byDevice = new Map<string, ModbusReading[]>();
+  const byDevice = new Map<string, Map<number, ModbusReading[]>>();
   for (const reading of readings) {
     if (!Number.isFinite(reading.value)) {
       throw new GridProtocolError(400, `reading ${reading.name} is not a finite number`);
     }
-    const list = byDevice.get(reading.device_id);
-    if (list) list.push(reading);
-    else byDevice.set(reading.device_id, [reading]);
+    let samples = byDevice.get(reading.device_id);
+    if (!samples) {
+      samples = new Map<number, ModbusReading[]>();
+      byDevice.set(reading.device_id, samples);
+    }
+    const sample = samples.get(reading.timestamp_ms);
+    if (sample) sample.push(reading);
+    else samples.set(reading.timestamp_ms, [reading]);
   }
 
-  let stored = 0;
-  for (const [deviceId, deviceReadings] of byDevice) {
+  let samplesStored = 0;
+  for (const [deviceId, samplesByInstant] of byDevice) {
     const rows = await db
       .select()
       .from(devices)
@@ -762,30 +773,35 @@ export async function handleModbusReadings(
       throw new GridProtocolError(409, `device ${deviceId} is disabled`);
     }
 
-    const measurement = mapReadings(deviceReadings);
-    const timestamp = new Date(
-      Math.max(...deviceReadings.map(reading => reading.timestamp_ms))
-    );
-    await db.insert(telemetry).values({
-      assetId: device.assetId,
-      timestamp,
-      ...measurement,
-      metadata: JSON.stringify({
-        source: 'modbus',
-        deviceId,
-        registers: deviceReadings.map(reading => ({
-          name: reading.name,
-          address: reading.address,
-          value: reading.value,
-          unit: reading.unit,
-        })),
-      }),
-    });
+    let latest = 0;
+    for (const [timestampMs, sampleReadings] of [...samplesByInstant].sort(
+      (a, b) => a[0] - b[0]
+    )) {
+      const timestamp = new Date(timestampMs);
+      await db.insert(telemetry).values({
+        assetId: device.assetId,
+        timestamp,
+        ...mapReadings(sampleReadings),
+        metadata: JSON.stringify({
+          source: 'modbus',
+          deviceId,
+          registers: sampleReadings.map(reading => ({
+            name: reading.name,
+            address: reading.address,
+            value: reading.value,
+            unit: reading.unit,
+          })),
+        }),
+      });
+      samplesStored += 1;
+      latest = Math.max(latest, timestampMs);
+    }
+
+    const lastSeen = new Date(latest);
     await db
       .update(devices)
-      .set({ status: 'online', lastSeen: timestamp, lastMessageAt: timestamp })
+      .set({ status: 'online', lastSeen, lastMessageAt: lastSeen })
       .where(eq(devices.id, device.id));
-    stored += deviceReadings.length;
   }
 
   // Stored measurements are the only honest evidence that the meter path works,
@@ -797,7 +813,7 @@ export async function handleModbusReadings(
     observedBy: 'server',
     operation: 'modbus readings stored',
   });
-  return { stored };
+  return { samples: samplesStored, readings: readings.length };
 }
 
 /**

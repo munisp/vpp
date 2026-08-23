@@ -34,7 +34,7 @@ import { AlertTriangle, Info, RefreshCw } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
 import {
   OBSERVATION_COPY,
-  POSTURE_COPY,
+  capabilityCopy,
   STATE_COPY,
   ageSeconds,
   capabilityLabel,
@@ -271,7 +271,7 @@ export default function DegradedOperation() {
                 </CardHeader>
                 <CardContent className="grid gap-3 sm:grid-cols-2">
                   {capabilities.map(capability => {
-                    const copy = POSTURE_COPY[capability.posture];
+                    const copy = capabilityCopy(capability);
                     return (
                       <div key={capability.capability} className="rounded-md border p-3">
                         <div className="flex items-center justify-between gap-2">

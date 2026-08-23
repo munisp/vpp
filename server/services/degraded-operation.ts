@@ -551,6 +551,13 @@ export interface CapabilityStatus {
   requires: DependencyName[];
   /** Dependencies that are down or unknown; both block, for the same reason. */
   missing: DependencyName[];
+  /**
+   * Dependencies this capability only needs to be *not down*, which have not
+   * answered a real call recently. They do not block — the next call is what
+   * establishes the evidence, and it fails rather than fabricating a result —
+   * but the capability is not proven either, so it must not read as healthy.
+   */
+  unproven: DependencyName[];
   posture: 'available' | 'degraded' | 'refused';
   evidenceLimit: string | null;
   reason: string;
@@ -568,17 +575,19 @@ export function statusFor(
     ...notDown.filter(dep => states.get(dep)?.state === 'down'),
   ];
   const declared = [...rule.requires, ...notDown];
+  const unproven = notDown.filter(dep => states.get(dep)?.state !== 'up');
   if (missing.length === 0) {
     return {
       capability,
       requires: declared,
       missing,
+      unproven,
       posture: 'available',
-      evidenceLimit: null,
+      evidenceLimit: unproven.length === 0 ? null : rule.evidenceLimit,
       reason:
-        notDown.length === 0
+        unproven.length === 0
           ? 'every dependency answered a real call within its staleness bound'
-          : 'no required dependency is in an open outage, and every observed one answered within its staleness bound',
+          : `no required dependency is in an open outage, but ${unproven.join(', ')} has not answered a real call recently: the next call is what establishes that, and it will fail rather than report a result it did not get`,
     };
   }
 
@@ -590,6 +599,7 @@ export function statusFor(
     capability,
     requires: declared,
     missing,
+    unproven,
     posture: rule.degradedAllowed ? 'degraded' : 'refused',
     evidenceLimit: rule.evidenceLimit,
     reason: detail,

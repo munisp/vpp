@@ -144,6 +144,26 @@ describe('statusFor', () => {
     expect(status.posture).toBe('available');
   });
 
+  it('reports a self-observed unknown dependency as unproven rather than silently fine', () => {
+    // Not blocked, but nothing has confirmed it either: the operator screen must
+    // not paint a payout path green off the back of a dependency nothing has
+    // called all day.
+    const status = statusFor(
+      'settlement_payout',
+      CAPABILITIES.settlement_payout,
+      allUp({ payment_gateway: posture('payment_gateway', 'unknown') })
+    );
+    expect(status.unproven).toEqual(['payment_gateway']);
+    expect(status.evidenceLimit).not.toBeNull();
+    expect(status.reason).toContain('has not answered a real call recently');
+  });
+
+  it('leaves nothing unproven when every dependency answered', () => {
+    const status = statusFor('settlement_payout', CAPABILITIES.settlement_payout, allUp());
+    expect(status.unproven).toEqual([]);
+    expect(status.evidenceLimit).toBeNull();
+  });
+
   it('gives control dispatch a degraded posture rather than refusing it', () => {
     const status = statusFor(
       'control_dispatch',

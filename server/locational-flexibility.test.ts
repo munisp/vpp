@@ -18,6 +18,8 @@ interface DbState {
   executeQueue: Record<string, unknown>[][];
   inserted: Array<{ table: string; values: Record<string, unknown> }>;
   updated: Array<Record<string, unknown>>;
+  /** Every statement passed to `db.execute()`, so claim/release calls are visible. */
+  executed: unknown[];
   returningId: number;
 }
 
@@ -85,17 +87,21 @@ function mockDb(available = true) {
         },
       }),
     }),
-    execute: async () => ({ rows: state.executeQueue.shift() ?? [] }),
+    execute: async (statement: unknown) => {
+      state.executed.push(statement);
+      return { rows: state.executeQueue.shift() ?? [] };
+    },
   };
   vi.doMock('./db', () => ({ getDb: async () => (available ? db : null) }));
 }
 
 const ledgerEvents: Array<Record<string, unknown>> = [];
 
-function mockLedger() {
+function mockLedger(failure?: string) {
   vi.doMock('./services/settlement-ledger', () => ({
     settlementLedger: {
       createEvent: async (input: Record<string, unknown>) => {
+        if (failure) throw new Error(failure);
         ledgerEvents.push(input);
         return { id: 9001 };
       },
@@ -111,6 +117,7 @@ beforeEach(() => {
     executeQueue: [],
     inserted: [],
     updated: [],
+    executed: [],
     returningId: 1,
   };
   mockLedger();
@@ -531,7 +538,8 @@ describe('settleAward', () => {
 
   it('settles measured delivery into the ledger with its measurement method', async () => {
     mockDb();
-    state.executeQueue = [[settleRow()]];
+    // Award row, then the claim update winning its row.
+    state.executeQueue = [[settleRow()], [{ id: 8 }]];
     const { settleAward, BASELINE_METHOD } = await import('./services/locational-flexibility');
     const result = await settleAward(8);
     expect(result).toEqual({ awardId: 8, settlementEventId: 9001, amount: 18 });
@@ -570,6 +578,30 @@ describe('settleAward', () => {
     const { settleAward } = await import('./services/locational-flexibility');
     await expect(settleAward(8)).rejects.toThrow(/already settled as event 4242/);
     expect(ledgerEvents).toEqual([]);
+  });
+
+  it('pays nothing when a concurrent settlement already claimed the award', async () => {
+    mockDb();
+    // Both callers read an unsettled award; only one claim update matches a row,
+    // so the loser must stop before writing a paid ledger event.
+    state.executeQueue = [[settleRow()], []];
+    const { settleAward } = await import('./services/locational-flexibility');
+    await expect(settleAward(8)).rejects.toThrow(/already being settled/);
+    expect(ledgerEvents).toEqual([]);
+    expect(state.updated).toEqual([]);
+  });
+
+  it('releases its claim when the ledger write fails', async () => {
+    mockLedger('ledger unavailable');
+    mockDb();
+    state.executeQueue = [[settleRow()], [{ id: 8 }], []];
+    const { settleAward } = await import('./services/locational-flexibility');
+    await expect(settleAward(8)).rejects.toThrow(/ledger unavailable/);
+    expect(ledgerEvents).toEqual([]);
+    // Read, claim, release: the award is settleable again rather than stuck as
+    // settled with no payment behind it.
+    expect(state.executed).toHaveLength(3);
+    expect(state.updated).toEqual([]);
   });
 });
 

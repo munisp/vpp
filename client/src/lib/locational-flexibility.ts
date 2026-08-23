@@ -290,6 +290,12 @@ export function describeNodeCapacity(node: {
   unverifiedRatedW: number;
   linkedAssets: number;
   unverifiedAssets: number;
+  /**
+   * Assets behind the awardable watts. Reported by the server on the same
+   * condition it sums the watts on, because a verified link on an inactive asset
+   * is linked without being awardable.
+   */
+  awardableAssets: number;
 }): { label: string; tone: FlexibilityTone; meaning: string } {
   if (node.linkedAssets === 0) {
     return {
@@ -298,7 +304,7 @@ export function describeNodeCapacity(node: {
       meaning: 'No asset has been recorded behind this node, so nothing can be offered here.',
     };
   }
-  const base = `${formatKw(node.awardableRatedW)} rated across ${node.linkedAssets - node.unverifiedAssets} awardable asset${node.linkedAssets - node.unverifiedAssets === 1 ? '' : 's'}. Nameplate ratings, not measured availability.`;
+  const base = `${formatKw(node.awardableRatedW)} rated across ${node.awardableAssets} awardable asset${node.awardableAssets === 1 ? '' : 's'}. Nameplate ratings, not measured availability.`;
   if (node.unverifiedAssets === 0) {
     return { label: formatKw(node.awardableRatedW), tone: 'good', meaning: base };
   }

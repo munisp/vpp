@@ -752,6 +752,11 @@ export async function measureRequirement(
  * Refuses anything not measured as delivery, refuses a second settlement of the
  * same award, and pays the measured reduction rather than the award: a site that
  * delivered 60% of its block is paid for 60%.
+ *
+ * The award is claimed with a conditional update before the ledger event is
+ * written, so two concurrent settlements of one award cannot both pass the
+ * "not settled yet" check and pay it twice. The claim is released if the ledger
+ * write fails, leaving the award settleable again.
  */
 export async function settleAward(
   awardId: number
@@ -807,37 +812,65 @@ export async function settleAward(
   const ratePerUnit = Math.round(priceCentsPerKwh / PRICE_SCALE);
   const grossAmount = Math.round(((energyWh / 1000) * priceCentsPerKwh) / PRICE_SCALE);
 
-  const event = await settlementLedger.createEvent({
-    eventType: 'service_delivered',
-    userId: Number(award.user_id),
-    sourceType: 'flexibility_award',
-    sourceId: awardId,
-    energyWh,
-    powerKw: Number(award.delivered_power_w ?? 0) / 1000,
-    durationMinutes,
-    ratePerUnit,
-    grossAmount,
-    fees: 0,
-    netAmount: grossAmount,
-    currency,
-    measurementMethod: 'baseline_comparison',
-    baselineMethod: BASELINE_METHOD,
-    eventData: {
-      serviceType: 'locational_flexibility',
-      requirementId: Number(award.requirement_id),
-      assetId: Number(award.asset_id),
-      direction: String(award.direction),
-      awardedPowerW: Number(award.awarded_power_w),
-      deliveredPowerW: Number(award.delivered_power_w ?? 0),
-      deliveryStatus: status,
-    },
-  });
+  // Claim the award before any money is written. Whoever wins this conditional
+  // update owns the settlement; a loser sees no row and stops, instead of
+  // writing a second paid ledger event for the same delivered window.
+  const claimedAt = new Date();
+  const claim = await db.execute<SqlRow>(sql`
+    UPDATE flexibility_awards
+    SET settled_at = ${claimedAt}, updated_at = ${claimedAt}
+    WHERE id = ${awardId} AND settlement_event_id IS NULL AND settled_at IS NULL
+    RETURNING id
+  `);
+  if ((claim.rows ?? []).length === 0) {
+    throw new LocationalFlexibilityError(
+      `Award ${awardId} is already being settled or has been settled`
+    );
+  }
+
+  let event: { id: number };
+  try {
+    event = await settlementLedger.createEvent({
+      eventType: 'service_delivered',
+      userId: Number(award.user_id),
+      sourceType: 'flexibility_award',
+      sourceId: awardId,
+      energyWh,
+      powerKw: Number(award.delivered_power_w ?? 0) / 1000,
+      durationMinutes,
+      ratePerUnit,
+      grossAmount,
+      fees: 0,
+      netAmount: grossAmount,
+      currency,
+      measurementMethod: 'baseline_comparison',
+      baselineMethod: BASELINE_METHOD,
+      eventData: {
+        serviceType: 'locational_flexibility',
+        requirementId: Number(award.requirement_id),
+        assetId: Number(award.asset_id),
+        direction: String(award.direction),
+        awardedPowerW: Number(award.awarded_power_w),
+        deliveredPowerW: Number(award.delivered_power_w ?? 0),
+        deliveryStatus: status,
+      },
+    });
+  } catch (error) {
+    // No ledger event was written, so the claim must not stand: releasing it
+    // leaves the award settleable rather than stranding a delivered window as
+    // settled-but-unpaid.
+    await db.execute(sql`
+      UPDATE flexibility_awards
+      SET settled_at = NULL, updated_at = ${new Date()}
+      WHERE id = ${awardId} AND settlement_event_id IS NULL
+    `);
+    throw error;
+  }
 
   await db
     .update(flexibilityAwards)
     .set({
       settlementEventId: event.id,
-      settledAt: new Date(),
       updatedAt: new Date(),
     })
     .where(eq(flexibilityAwards.id, awardId));
@@ -1035,6 +1068,12 @@ export interface NodeHeadroomView {
   linkedAssets: number;
   /** Assets whose link nobody has verified: capacity we cannot sell here. */
   unverifiedAssets: number;
+  /**
+   * Assets that could actually be awarded here: verified link and active. An
+   * inactive asset counts as linked but not as awardable, which is why this is
+   * not `linkedAssets - unverifiedAssets`.
+   */
+  awardableAssets: number;
   /** Rated capacity of awardable assets, watts. Not a measured availability. */
   awardableRatedW: number;
   unverifiedRatedW: number;
@@ -1059,6 +1098,10 @@ export async function listNodeHeadroom(region?: string): Promise<NodeHeadroomVie
       n.firm_capacity_w,
       COUNT(l.id)::int AS linked_assets,
       COALESCE(SUM(CASE WHEN l.link_source = 'unverified' THEN 1 ELSE 0 END), 0)::int AS unverified_assets,
+      -- Counted on exactly the condition the awardable watts are summed on, so a
+      -- verified but inactive asset raises neither figure.
+      COALESCE(SUM(CASE WHEN l.link_source <> 'unverified' AND a.status = 'active'
+        THEN 1 ELSE 0 END), 0)::int AS awardable_assets,
       COALESCE(SUM(CASE WHEN l.link_source <> 'unverified' AND a.status = 'active'
         THEN a.capacity ELSE 0 END), 0)::bigint AS awardable_rated_w,
       COALESCE(SUM(CASE WHEN l.link_source = 'unverified' THEN a.capacity ELSE 0 END), 0)::bigint AS unverified_rated_w,
@@ -1081,6 +1124,7 @@ export async function listNodeHeadroom(region?: string): Promise<NodeHeadroomVie
     firmCapacityW: row.firm_capacity_w === null ? null : Number(row.firm_capacity_w),
     linkedAssets: Number(row.linked_assets),
     unverifiedAssets: Number(row.unverified_assets),
+    awardableAssets: Number(row.awardable_assets),
     awardableRatedW: Number(row.awardable_rated_w),
     unverifiedRatedW: Number(row.unverified_rated_w),
     openRequirements: Number(row.open_requirements),

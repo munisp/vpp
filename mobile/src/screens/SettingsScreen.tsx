@@ -140,7 +140,7 @@ export default function SettingsScreen({ navigation }: any) {
             <Switch
               value={pushEnabled}
               onValueChange={handlePushToggle}
-              disabled={notifLoading || updateNotifPrefs.isLoading}
+              disabled={notifLoading || updateNotifPrefs.isPending}
               trackColor={{ false: '#d1d5db', true: '#10b981' }}
               thumbColor="#fff"
             />
@@ -165,7 +165,7 @@ export default function SettingsScreen({ navigation }: any) {
             <Switch
               value={autoSellEnabled}
               onValueChange={handleAutoSellToggle}
-              disabled={tradingLoading || updateTradingPrefs.isLoading}
+              disabled={tradingLoading || updateTradingPrefs.isPending}
               trackColor={{ false: '#d1d5db', true: '#10b981' }}
               thumbColor="#fff"
             />
@@ -195,7 +195,7 @@ export default function SettingsScreen({ navigation }: any) {
               <Switch
                 value={drAutoOptIn}
                 onValueChange={handleDrAutoOptInToggle}
-                disabled={drLoading || updateDrEnrollment.isLoading}
+                disabled={drLoading || updateDrEnrollment.isPending}
                 trackColor={{ false: '#d1d5db', true: '#10b981' }}
                 thumbColor="#fff"
               />

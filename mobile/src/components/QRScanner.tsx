@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, Alert } from 'react-native';
-import { Camera, CameraType } from 'expo-camera';
+import { Camera, CameraType, FlashMode } from 'expo-camera';
 import { BarCodeScanner, BarCodeScannerResult } from 'expo-barcode-scanner';
 import { Ionicons } from '@expo/vector-icons';
 
@@ -56,7 +56,7 @@ export default function QRScanner({
   if (hasPermission === false) {
     return (
       <View style={styles.container}>
-        <Ionicons name="camera-off" size={64} color="#dc2626" />
+        <Ionicons name="videocam-off" size={64} color="#dc2626" />
         <Text style={styles.message}>Camera permission denied</Text>
         <Text style={styles.description}>
           Please enable camera access in your device settings to scan QR codes
@@ -96,11 +96,7 @@ export default function QRScanner({
           barCodeTypes: [BarCodeScanner.Constants.BarCodeType.qr],
         }}
         onBarCodeScanned={scanned ? undefined : handleBarCodeScanned}
-        flashMode={
-          flashEnabled
-            ? Camera.Constants.FlashMode.torch
-            : Camera.Constants.FlashMode.off
-        }
+        flashMode={flashEnabled ? FlashMode.torch : FlashMode.off}
       >
         <View style={styles.overlay}>
           {/* Top overlay */}

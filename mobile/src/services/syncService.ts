@@ -145,7 +145,9 @@ export class SyncService {
 
     try {
       // Fetch and cache assets
-      const assets = await trpcClient.assets.list.query();
+      // assets.list returns { assets, count }
+      const assetList = await trpcClient.assets.list.query();
+      const assets = assetList.assets;
       await OfflineStorage.saveAssets(assets);
 
       // Fetch and cache trades (trading.list returns { trades, count })

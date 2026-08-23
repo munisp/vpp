@@ -220,10 +220,10 @@ export default function P2PTradingScreen({ navigation }: any) {
             <TouchableOpacity
               style={styles.submitButton}
               onPress={handleCreateOffer}
-              disabled={createOfferMutation.isLoading}
+              disabled={createOfferMutation.isPending}
             >
               <Text style={styles.submitButtonText}>
-                {createOfferMutation.isLoading ? 'Creating...' : 'Create Offer'}
+                {createOfferMutation.isPending ? 'Creating...' : 'Create Offer'}
               </Text>
             </TouchableOpacity>
           </View>
@@ -322,7 +322,7 @@ export default function P2PTradingScreen({ navigation }: any) {
                     <TouchableOpacity
                       style={styles.acceptButton}
                       onPress={() => handleAcceptOffer(offer.id)}
-                      disabled={acceptOfferMutation.isLoading}
+                      disabled={acceptOfferMutation.isPending}
                     >
                       <Text style={styles.acceptButtonText}>Accept</Text>
                     </TouchableOpacity>
@@ -427,7 +427,7 @@ export default function P2PTradingScreen({ navigation }: any) {
                     <TouchableOpacity
                       style={styles.cancelOfferButton}
                       onPress={() => handleCancelOffer(offer.id)}
-                      disabled={cancelOfferMutation.isLoading}
+                      disabled={cancelOfferMutation.isPending}
                     >
                       <Text style={styles.cancelOfferButtonText}>Cancel</Text>
                     </TouchableOpacity>

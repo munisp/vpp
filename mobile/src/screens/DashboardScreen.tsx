@@ -355,6 +355,11 @@ export default function DashboardScreen({ navigation }: any) {
               label="Workflows"
               onPress={() => navigation.navigate('WorkflowMonitor')}
             />
+            <ActionButton
+              icon="🏠"
+              label="Home Loads"
+              onPress={() => navigation.navigate('MatterLoads')}
+            />
           </View>
         </View>
       )}

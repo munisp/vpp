@@ -22,6 +22,10 @@ import { payments, telemetry, trades } from '../../drizzle/schema';
 import { p2pSettlements } from '../../drizzle/innovations-schema';
 import { PaymentGatewayManager } from '../payment-gateways';
 import { resolveGatewayEnvironment } from '../payment-gateways/environment';
+import { isUniqueViolation } from '../pg-errors';
+import { postBuyerPaymentCaptured } from './ledger/postings';
+import { LedgerRefusedError } from './ledger/tigerbeetle';
+import type { LedgerPostingState } from '../../drizzle/ledger-schema';
 
 export type P2pGateway = 'mpesa' | 'airtel_money' | 'tigo_pesa';
 
@@ -61,6 +65,30 @@ function mergeMetadata(existing: string | null, patch: Record<string, unknown>):
   return JSON.stringify({ ...parseMetadata(existing), ...patch });
 }
 
+/**
+ * A reservation or request that already exists for this trade. It is returned
+ * rather than re-raised, so a retry never asks the provider a second time.
+ */
+function alreadyRequested(row: {
+  id: number;
+  amount: number;
+  transactionId: string | null;
+  metadata: string | null;
+}): StartTradePaymentResult {
+  const meta = parseMetadata(row.metadata);
+  return {
+    paymentId: row.id,
+    amountDueCents: row.amount,
+    transactionId: row.transactionId ?? null,
+    checkoutRequestId: typeof meta.checkoutRequestId === 'string' ? meta.checkoutRequestId : null,
+    settlement: SETTLEMENT_PAYMENT_INITIATED,
+    message:
+      row.transactionId === null
+        ? 'A payment request for this purchase is being raised with the provider.'
+        : 'A payment request for this purchase is already awaiting the provider callback.',
+  };
+}
+
 export interface StartTradePaymentInput {
   buyTradeId: number;
   buyerId: number;
@@ -79,8 +107,9 @@ export interface StartTradePaymentResult {
 
 /**
  * Ask the buyer's mobile-money provider for the amount owed on a matched
- * trade. The payment row is written only after the provider accepted the
- * request, and it stays `pending` until the provider's callback settles it.
+ * trade. A pending payment row is reserved first so that only one request per
+ * trade can reach the provider; it stays `pending`, holding no claim that money
+ * moved, until the provider's callback settles it.
  */
 export async function startTradePayment(input: StartTradePaymentInput): Promise<StartTradePaymentResult> {
   const db = await getDb();
@@ -111,10 +140,23 @@ export async function startTradePayment(input: StartTradePaymentInput): Promise<
     throw new P2pSettlementError('TRADE_AMOUNT_INVALID', 'This purchase has no amount to pay.');
   }
 
+  // Resolved before anything is reserved: a deployment with no provider cannot
+  // charge anyone, and saying so is not the same as a payment that failed.
+  const environment = resolveGatewayEnvironment();
+  const readiness = await PaymentGatewayManager.isConfigured(input.gateway, environment);
+  if (!readiness.configured) {
+    throw new P2pSettlementError(
+      'GATEWAY_NOT_CONFIGURED',
+      `No payment can be raised through ${input.gateway}: ${readiness.reason ?? 'the gateway is not configured.'}`
+    );
+  }
+
   // Idempotency: one live payment attempt per trade, enforced in the database
-  // by payments_p2p_trade_live_uq. A completed payment is never re-charged, and
-  // a pending one is returned rather than duplicated.
-  const forThisTrade = await db
+  // by payments_p2p_trade_live_uq. The row is reserved *before* the provider is
+  // asked for money, because the index guards the row, not the charge: reading
+  // first and inserting afterwards leaves a window in which two concurrent
+  // requests both ask the provider and the buyer is debited twice.
+  const liveBefore = await db
     .select()
     .from(payments)
     .where(
@@ -124,48 +166,15 @@ export async function startTradePayment(input: StartTradePaymentInput): Promise<
       )
     );
 
-  const completed = forThisTrade.find(row => row.status === 'completed');
-  if (completed) {
+  const settledEarlier = liveBefore.find(row => row.status === 'completed');
+  if (settledEarlier) {
     throw new P2pSettlementError(
       'ALREADY_PAID',
-      `This purchase was already paid by payment ${completed.id}.`
+      `This purchase was already paid by payment ${settledEarlier.id}.`
     );
   }
-  const pending = forThisTrade.find(row => row.status === 'pending');
-  if (pending) {
-    const meta = parseMetadata(pending.metadata);
-    return {
-      paymentId: pending.id,
-      amountDueCents: pending.amount,
-      transactionId: pending.transactionId ?? null,
-      checkoutRequestId: typeof meta.checkoutRequestId === 'string' ? meta.checkoutRequestId : null,
-      settlement: SETTLEMENT_PAYMENT_INITIATED,
-      message: 'A payment request for this purchase is already awaiting the provider callback.',
-    };
-  }
-
-  const response = await PaymentGatewayManager.initiatePayment(
-    input.gateway,
-    {
-      amount: trade.totalAmount,
-      phoneNumber: input.phoneNumber,
-      accountReference: `P2P-${trade.id}`,
-      transactionDesc: `P2P energy purchase ${trade.energy}Wh (trade ${trade.id})`,
-      metadata: {
-        userId: input.buyerId,
-        buyTradeId: trade.id,
-        sellerId: trade.counterpartyId,
-      },
-    },
-    resolveGatewayEnvironment()
-  );
-
-  if (!response.success) {
-    throw new P2pSettlementError(
-      'GATEWAY_REFUSED',
-      response.message || 'The payment provider refused the request.'
-    );
-  }
+  const inFlightEarlier = liveBefore.find(row => row.status === 'pending');
+  if (inFlightEarlier) return alreadyRequested(inFlightEarlier);
 
   let payment: { id: number };
   try {
@@ -178,39 +187,134 @@ export async function startTradePayment(input: StartTradePaymentInput): Promise<
         currency: P2P_CURRENCY,
         paymentMethod: input.gateway,
         phoneNumber: input.phoneNumber,
-        transactionId: response.transactionId,
         status: 'pending',
         p2pTradeId: trade.id,
         metadata: JSON.stringify({
           buyTradeId: trade.id,
           sellTradeId: parseMetadata(trade.metadata).sellOfferId ?? null,
           sellerId: trade.counterpartyId,
-          checkoutRequestId: response.checkoutRequestId,
+          providerRequested: false,
         }),
       })
       .returning({ id: payments.id });
   } catch (error) {
-    // The provider was already asked for the money, so this cannot be reported
-    // as a refusal: the buyer may be charged with no payment row to settle.
+    if (!isUniqueViolation(error)) throw error;
+    // Another request reserved this trade first. It owns the provider call, so
+    // this one must not raise a second charge.
+    const [live] = await db
+      .select()
+      .from(payments)
+      .where(
+        and(
+          eq(payments.p2pTradeId, trade.id),
+          inArray(payments.status, ['pending', 'completed'])
+        )
+      )
+      .limit(1);
+    if (live?.status === 'completed') {
+      throw new P2pSettlementError(
+        'ALREADY_PAID',
+        `This purchase was already paid by payment ${live.id}.`
+      );
+    }
+    if (live) return alreadyRequested(live);
+    // The winner released its reservation between the failed insert and this
+    // read, so no charge is in flight and reserving again would succeed.
+    throw new P2pSettlementError(
+      'RESERVATION_RACE_LOST',
+      'Another payment attempt for this purchase was being resolved. No payment was raised; try again.'
+    );
+  }
+
+  let response: Awaited<ReturnType<typeof PaymentGatewayManager.initiatePayment>>;
+  try {
+    response = await PaymentGatewayManager.initiatePayment(
+      input.gateway,
+      {
+        amount: trade.totalAmount,
+        phoneNumber: input.phoneNumber,
+        accountReference: `P2P-${trade.id}`,
+        transactionDesc: `P2P energy purchase ${trade.energy}Wh (trade ${trade.id})`,
+        metadata: {
+          userId: input.buyerId,
+          buyTradeId: trade.id,
+          sellerId: trade.counterpartyId,
+        },
+      },
+      environment
+    );
+  } catch (error) {
+    // The request may or may not have reached the provider, so the reservation
+    // stays live: releasing it would let a retry raise a second charge against
+    // a request that could still settle.
     console.error(
-      `[P2pSettlement] Provider accepted request ${response.transactionId ?? '(no id)'} for trade ${trade.id} but the payment row could not be written:`,
+      `[P2pSettlement] Provider call for trade ${trade.id} (reservation ${payment.id}) failed outright:`,
+      error
+    );
+    throw new P2pSettlementError(
+      'GATEWAY_UNREACHABLE',
+      `The payment provider could not be reached for this purchase (reservation ${payment.id}). Do not retry: contact support so the attempt can be reconciled.`
+    );
+  }
+
+  if (!response.success) {
+    // The provider declined before taking money, so the reservation is released
+    // and the buyer can try again. 'failed' is outside the live-payment index.
+    await db
+      .update(payments)
+      .set({
+        status: 'failed',
+        metadata: JSON.stringify({
+          buyTradeId: trade.id,
+          sellerId: trade.counterpartyId,
+          providerRequested: true,
+          providerRefusal: response.message ?? 'no message',
+        }),
+      })
+      .where(eq(payments.id, payment.id));
+    throw new P2pSettlementError(
+      'GATEWAY_REFUSED',
+      response.message || 'The payment provider refused the request.'
+    );
+  }
+
+  // The provider has accepted a request for real money. If recording its
+  // references fails, they are logged rather than lost: the callback arrives
+  // regardless, and without the reference it cannot be matched to this trade.
+  try {
+    await db
+      .update(payments)
+      .set({
+        transactionId: response.transactionId,
+        metadata: JSON.stringify({
+          buyTradeId: trade.id,
+          sellTradeId: parseMetadata(trade.metadata).sellOfferId ?? null,
+          sellerId: trade.counterpartyId,
+          checkoutRequestId: response.checkoutRequestId,
+          providerRequested: true,
+        }),
+      })
+      .where(eq(payments.id, payment.id));
+
+    await db
+      .update(trades)
+      .set({
+        metadata: mergeMetadata(trade.metadata, {
+          settlement: SETTLEMENT_PAYMENT_INITIATED,
+          buyerPaymentId: payment.id,
+        }),
+      })
+      .where(eq(trades.id, trade.id));
+  } catch (error) {
+    console.error(
+      `[P2pSettlement] Provider accepted a payment request for trade ${trade.id} (reservation ${payment.id}, transactionId ${response.transactionId ?? 'none'}, checkoutRequestId ${response.checkoutRequestId ?? 'none'}) but it could not be recorded:`,
       error
     );
     throw new P2pSettlementError(
       'PAYMENT_UNRECORDED',
-      `Your provider was asked for ${trade.totalAmount} cents but the platform could not record the request (provider reference ${response.transactionId ?? 'unknown'}). Do not retry: contact support so the charge can be reconciled.`
+      `The provider accepted a payment request for this purchase (reservation ${payment.id}) but the platform could not record it. Do not retry: contact support so the attempt can be reconciled.`
     );
   }
-
-  await db
-    .update(trades)
-    .set({
-      metadata: mergeMetadata(trade.metadata, {
-        settlement: SETTLEMENT_PAYMENT_INITIATED,
-        buyerPaymentId: payment.id,
-      }),
-    })
-    .where(eq(trades.id, trade.id));
 
   return {
     paymentId: payment.id,
@@ -230,6 +334,13 @@ export interface BuyerPaymentSettledResult {
   settlement: typeof SETTLEMENT_BUYER_PAID;
   sellerPayoutAvailable: false;
   detail: string;
+  /**
+   * What the double-entry ledger did with this payment. `posted` means the funds
+   * held at the gateway and the amount owed to the seller are both on the ledger;
+   * anything else means the platform's own record of the money is incomplete and
+   * says so, instead of the settlement row implying a balance nobody holds.
+   */
+  ledgerPosting: { state: LedgerPostingState; detail: string };
 }
 
 /**
@@ -242,17 +353,33 @@ export interface BuyerPaymentSettledResult {
  */
 export async function recordBuyerPaymentSettled(payment: {
   id: number;
+  userId: number;
   amount: number;
   currency?: string | null;
   transactionId?: string | null;
+  p2pTradeId?: number | null;
+  /** The provider that took the money. It names the clearing account it sits in. */
+  paymentMethod?: string | null;
   metadata: string | null;
 }): Promise<BuyerPaymentSettledResult> {
   const db = await getDb();
   if (!db) throw new P2pSettlementError('DATABASE_UNAVAILABLE', 'Database not available');
 
+  // The `p2pTradeId` column is the linkage the database constrains and indexes;
+  // metadata is only a copy of it. Where both name a trade they must agree, or
+  // the payment's own record of what it paid for is self-contradictory.
   const meta = parseMetadata(payment.metadata);
-  const buyTradeId = Number(meta.buyTradeId);
-  if (!Number.isInteger(buyTradeId) || buyTradeId <= 0) {
+  const fromMetadata = Number(meta.buyTradeId);
+  const fromColumn = payment.p2pTradeId ?? null;
+  const metadataTradeId = Number.isInteger(fromMetadata) && fromMetadata > 0 ? fromMetadata : null;
+  if (fromColumn !== null && metadataTradeId !== null && fromColumn !== metadataTradeId) {
+    throw new P2pSettlementError(
+      'PAYMENT_TRADE_CONFLICT',
+      `Payment ${payment.id} is linked to trade ${fromColumn} but its metadata names trade ${metadataTradeId}; it cannot be attributed to either.`
+    );
+  }
+  const buyTradeId = fromColumn ?? metadataTradeId;
+  if (buyTradeId === null) {
     throw new P2pSettlementError(
       'PAYMENT_NOT_LINKED',
       `Payment ${payment.id} is a P2P trade payment with no buyTradeId; it cannot be attributed to a trade.`
@@ -264,6 +391,20 @@ export async function recordBuyerPaymentSettled(payment: {
     throw new P2pSettlementError(
       'TRADE_NOT_FOUND',
       `Payment ${payment.id} references trade ${buyTradeId}, which does not exist.`
+    );
+  }
+  // A payment can only settle the trade of the person who made it: otherwise
+  // one participant's payment would settle another participant's purchase.
+  if (buyTrade.userId !== payment.userId) {
+    throw new P2pSettlementError(
+      'PAYMENT_PAYER_MISMATCH',
+      `Payment ${payment.id} was made by user ${payment.userId} but trade ${buyTradeId} is owed by user ${buyTrade.userId}.`
+    );
+  }
+  if (buyTrade.tradeType !== 'p2p_buy') {
+    throw new P2pSettlementError(
+      'TRADE_NOT_PURCHASE',
+      `Payment ${payment.id} references trade ${buyTradeId}, which is a '${buyTrade.tradeType}' and not a P2P purchase.`
     );
   }
   if (payment.amount !== buyTrade.totalAmount) {
@@ -371,6 +512,19 @@ export async function recordBuyerPaymentSettled(payment: {
     return { settlementId: settlement.id, settledSellTradeId: sellTradeIdOrNull };
   });
 
+  // The double entry is attempted after the settlement commits, because the money
+  // has already moved at the provider: the entry records that fact, it does not
+  // authorise it. A ledger that is unreachable or that refuses therefore leaves a
+  // visible unposted row for reconciliation instead of discarding a confirmed
+  // payment.
+  const ledgerPosting = await recordCaptureOnLedger({
+    paymentId: payment.id,
+    sellerUserId: buyTrade.counterpartyId as number,
+    gatewayKey: payment.paymentMethod ?? 'unknown_gateway',
+    amountMinor: payment.amount,
+    providerReference,
+  });
+
   return {
     buyTradeId: buyTrade.id,
     sellTradeId: settledSellTradeId,
@@ -378,7 +532,49 @@ export async function recordBuyerPaymentSettled(payment: {
     settlement: SETTLEMENT_BUYER_PAID,
     sellerPayoutAvailable: false,
     detail,
+    ledgerPosting,
   };
+}
+
+/**
+ * Post a confirmed buyer payment to the double-entry ledger, translating every
+ * outcome into a state a reader can act on. Nothing is thrown: the caller has a
+ * provider-confirmed payment recorded, and losing that record because the ledger
+ * was down would be worse than an unposted entry an operator can see.
+ */
+export async function recordCaptureOnLedger(input: {
+  paymentId: number;
+  sellerUserId: number;
+  gatewayKey: string;
+  amountMinor: number;
+  providerReference: string;
+}): Promise<{ state: LedgerPostingState; detail: string }> {
+  try {
+    const result = await postBuyerPaymentCaptured({
+      paymentId: input.paymentId,
+      sellerUserId: input.sellerUserId,
+      gatewayKey: input.gatewayKey,
+      currency: P2P_CURRENCY,
+      amountMinor: input.amountMinor,
+      providerReference: input.providerReference,
+    });
+    return { state: result.state, detail: result.detail };
+  } catch (error) {
+    if (error instanceof LedgerRefusedError) {
+      console.error(
+        `[P2pSettlement] The ledger refused the entry for payment ${input.paymentId} (${error.status}); the payment stands and the entry is recorded as refused`
+      );
+      return { state: 'refused', detail: `The ledger refused this entry: ${error.status}.` };
+    }
+    const reason = error instanceof Error ? error.message : String(error);
+    console.error(
+      `[P2pSettlement] The ledger did not confirm the entry for payment ${input.paymentId}: ${reason}`
+    );
+    return {
+      state: 'pending',
+      detail: `The ledger did not confirm this entry: ${reason}. It will be retried.`,
+    };
+  }
 }
 
 /**

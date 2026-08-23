@@ -345,13 +345,16 @@ async function executePostPaymentActions(
         try {
           const result = await recordBuyerPaymentSettled({
             id: payment.id,
+            userId: payment.userId,
             amount: payment.amount,
             currency: payment.currency ?? null,
             transactionId: payment.transactionId ?? null,
+            p2pTradeId: payment.p2pTradeId ?? null,
+            paymentMethod: payment.paymentMethod ?? null,
             metadata: payment.metadata ?? null,
           });
           console.log(
-            `[PostPayment] Trade ${result.buyTradeId} recorded as ${result.settlement} in settlement ${result.settlementId}; seller payout unavailable`
+            `[PostPayment] Trade ${result.buyTradeId} recorded as ${result.settlement} in settlement ${result.settlementId}; seller payout unavailable; ledger entry ${result.ledgerPosting.state}`
           );
         } catch (error) {
           // The buyer's money moved and the platform cannot say which trade it

@@ -1,12 +1,12 @@
 import { z } from 'zod';
-import { protectedProcedure, router } from '../_core/trpc';
+import { adminProcedure, router } from '../_core/trpc';
 import { temporalQueryService } from '../integration/temporal-query';
 
 export const workflowsRouter = router({
   /**
    * List workflows with filters
    */
-  list: protectedProcedure
+  list: adminProcedure
     .input(
       z.object({
         workflowType: z.enum(['DREventWorkflow', 'AutomatedTradingWorkflow', 'P2PTradingWorkflow', 'PaymentProcessingWorkflow']).optional(),
@@ -23,7 +23,7 @@ export const workflowsRouter = router({
   /**
    * Get workflow details
    */
-  getDetails: protectedProcedure
+  getDetails: adminProcedure
     .input(z.object({
       workflowId: z.string(),
     }))
@@ -40,7 +40,7 @@ export const workflowsRouter = router({
   /**
    * Get workflow statistics
    */
-  getStats: protectedProcedure
+  getStats: adminProcedure
     .input(z.object({
       workflowType: z.enum(['DREventWorkflow', 'AutomatedTradingWorkflow', 'P2PTradingWorkflow', 'PaymentProcessingWorkflow']).optional(),
     }).optional())
@@ -52,7 +52,7 @@ export const workflowsRouter = router({
   /**
    * Cancel workflow
    */
-  cancel: protectedProcedure
+  cancel: adminProcedure
     .input(z.object({
       workflowId: z.string(),
       reason: z.string(),
@@ -69,7 +69,7 @@ export const workflowsRouter = router({
   /**
    * Terminate workflow
    */
-  terminate: protectedProcedure
+  terminate: adminProcedure
     .input(z.object({
       workflowId: z.string(),
       reason: z.string(),
@@ -86,7 +86,7 @@ export const workflowsRouter = router({
   /**
    * Get workflow history
    */
-  getHistory: protectedProcedure
+  getHistory: adminProcedure
     .input(z.object({
       workflowId: z.string(),
     }))

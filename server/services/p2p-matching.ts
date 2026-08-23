@@ -269,6 +269,16 @@ export interface OrderBookLevel {
 }
 
 /**
+ * Energy already matched against a resting order.
+ *
+ * `trades."id"` is written out rather than interpolated: Drizzle renders a
+ * column reference unqualified, and inside this subquery a bare `"id"` binds to
+ * `p2p_matches.id`, so every order reported the fills of an unrelated match.
+ * p2p_matches columns are camelCase, which PostgreSQL only preserves quoted.
+ */
+export const filledEnergySql = sql<number>`COALESCE((SELECT SUM(m."energyWh") FROM p2p_matches m WHERE m."buyOrderId" = "trades"."id" OR m."sellOrderId" = "trades"."id"), 0)`;
+
+/**
  * Aggregated order-book depth by price level, using remaining (unfilled)
  * energy per order. Bids sorted high->low, asks low->high.
  */
@@ -282,9 +292,7 @@ export async function getOrderBook(): Promise<{ bids: OrderBookLevel[]; asks: Or
       tradeType: trades.tradeType,
       energy: trades.energy,
       price: trades.price,
-      // Quoted identifiers: p2p_matches columns are camelCase, and PostgreSQL
-      // folds unquoted names to lowercase, which made this read throw.
-      filled: sql<number>`COALESCE((SELECT SUM(m."energyWh") FROM p2p_matches m WHERE m."buyOrderId" = ${trades.id} OR m."sellOrderId" = ${trades.id}), 0)`,
+      filled: filledEnergySql,
     })
     .from(trades)
     .where(and(inArray(trades.tradeType, ['p2p_buy', 'p2p_sell']), eq(trades.status, 'pending')));
@@ -336,7 +344,7 @@ export async function getMyOpenOrders(userId: number) {
       price: trades.price,
       status: trades.status,
       createdAt: trades.createdAt,
-      filled: sql<number>`COALESCE((SELECT SUM(m."energyWh") FROM p2p_matches m WHERE m."buyOrderId" = ${trades.id} OR m."sellOrderId" = ${trades.id}), 0)`,
+      filled: filledEnergySql,
     })
     .from(trades)
     .where(

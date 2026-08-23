@@ -4,7 +4,7 @@ import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { useAuth } from '../contexts/AuthContext';
 import { trpc } from '../services/trpc';
-import { ActivityIndicator, View, StyleSheet } from 'react-native';
+import { ActivityIndicator, Text, View, StyleSheet } from 'react-native';
 
 // Import screens
 import LoginScreen from '../screens/LoginScreen';
@@ -40,6 +40,8 @@ import DigitalTwinScreen from '../screens/DigitalTwinScreen';
 import LocationalFlexibilityScreen from '../screens/LocationalFlexibilityScreen';
 import MatterLoadsScreen from '../screens/MatterLoadsScreen';
 import ServiceStatusScreen from '../screens/ServiceStatusScreen';
+import LedgerReconciliationScreen from '../screens/LedgerReconciliationScreen';
+import LakehouseScreen from '../screens/LakehouseScreen';
 
 const Stack = createNativeStackNavigator();
 const Tab = createBottomTabNavigator();
@@ -105,7 +107,7 @@ function MainTabs() {
 function TabIcon({ icon, color }: { icon: string; color: string }) {
   return (
     <View style={styles.tabIcon}>
-      <span style={{ fontSize: 24 }}>{icon}</span>
+      <Text style={{ fontSize: 24, color }}>{icon}</Text>
     </View>
   );
 }
@@ -176,6 +178,8 @@ export default function AppNavigator() {
       <Stack.Screen name="LocationalFlexibility" component={LocationalFlexibilityScreen} />
       <Stack.Screen name="MatterLoads" component={MatterLoadsScreen} />
       <Stack.Screen name="ServiceStatus" component={ServiceStatusScreen} />
+      <Stack.Screen name="LedgerReconciliation" component={LedgerReconciliationScreen} />
+      <Stack.Screen name="Lakehouse" component={LakehouseScreen} />
           </>
         )}
       </Stack.Navigator>

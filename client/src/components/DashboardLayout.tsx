@@ -19,135 +19,38 @@ import {
   SidebarTrigger,
   useSidebar,
 } from "@/components/ui/sidebar";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
+import { Input } from "@/components/ui/input";
 import { APP_LOGO, APP_TITLE, getLoginUrl } from "@/const";
 import { useIsMobile } from "@/hooks/useMobile";
-import { 
-  LayoutDashboard, 
-  LogOut, 
-  PanelLeft, 
-  Zap, 
-  Activity, 
-  TrendingUp, 
-  Receipt, 
-  CreditCard,
-  Bell,
-  Settings,
-  Shield,
-  BarChart3,
-  Sparkles,
-  Sun,
-  BatteryCharging,
-  Leaf,
-  ArrowDownUp,
-  Wallet as WalletIcon,
-  CalendarClock,
-  AlertTriangle,
-  CloudSun,
-  SlidersHorizontal,
-  Target,
-  ShieldAlert,
-  FileCheck,
-  Users,
-  MessageSquare,
-  Globe,
-  Coins,
-  MapPin,
-  House,
-  HeartPulse,
-  Radio,
-  Network
-} from "lucide-react";
-import { CSSProperties, useEffect, useRef, useState } from "react";
+import {
+  NavGroup,
+  findNavItem,
+  getNavGroups,
+  groupIdForPath,
+  readOpenGroups,
+  searchNavItems,
+  writeOpenGroups,
+} from "@/lib/nav";
+import { ChevronRight, LogOut, PanelLeft, Search } from "lucide-react";
+import { CSSProperties, useEffect, useMemo, useRef, useState } from "react";
 import { useLocation } from "wouter";
 import { DashboardLayoutSkeleton } from './DashboardLayoutSkeleton';
 import { Button } from "./ui/button";
 import { NotificationCenter } from './NotificationCenter';
-import { QrCode, Gift, History } from 'lucide-react';
+import { NAV_ICONS } from '@/lib/nav-icons';
 
-type MenuItem = { icon: any; label: string; path: string };
-type MenuSection = { label?: string; items: MenuItem[] };
-
-const getMenuSections = (userRole?: string): MenuSection[] => [
-  {
-    items: [
-      { icon: LayoutDashboard, label: "Dashboard", path: "/" },
-      { icon: Zap, label: "My Assets", path: "/assets" },
-      { icon: Activity, label: "Monitoring", path: "/monitoring" },
-      { icon: Network, label: "Digital Twin", path: "/digital-twin" },
-      { icon: TrendingUp, label: "Trading", path: "/trading" },
-      { icon: Zap, label: "Energy Insights", path: "/energy-insights" },
-      { icon: Receipt, label: "Billing", path: "/billing" },
-      { icon: CreditCard, label: "Payments", path: "/payments" },
-      { icon: Bell, label: "Alerts", path: "/alerts" },
-      { icon: BarChart3, label: "Analytics", path: "/analytics" },
-      { icon: Zap, label: "Demand Response", path: "/demand-response" },
-    ],
-  },
-  {
-    label: "Insights",
-    items: [
-      { icon: BarChart3, label: "Energy Analytics", path: "/energy-analytics" },
-      { icon: Sparkles, label: "Energy Advisor", path: "/insights/advisor" },
-      { icon: Sun, label: "Solar Yield", path: "/insights/solar-yield" },
-      { icon: BatteryCharging, label: "Battery Health", path: "/insights/battery-health" },
-      { icon: Leaf, label: "Carbon Credits", path: "/insights/carbon" },
-    ],
-  },
-  {
-    label: "Market",
-    items: [
-      { icon: TrendingUp, label: "Tariffs", path: "/market/tariffs" },
-      { icon: ArrowDownUp, label: "Order Book", path: "/market/order-book" },
-      { icon: Globe, label: "Price Alerts", path: "/trading/price-alerts" },
-    ],
-  },
-  {
-    label: "Wallet & V2G",
-    items: [
-      { icon: WalletIcon, label: "Wallet", path: "/wallet" },
-      { icon: CalendarClock, label: "V2G Optimizer", path: "/v2g" },
-    ],
-  },
-  {
-    label: "Grid Ops",
-    items: [
-      { icon: SlidersHorizontal, label: "Control Windows", path: "/grid/control-windows" },
-      ...(userRole === 'admin'
-        ? [{ icon: Radio, label: "Operations Wall", path: "/grid/operations-wall" }]
-        : []),
-      { icon: AlertTriangle, label: "Anomalies", path: "/grid/anomalies" },
-      { icon: CloudSun, label: "DR Forecast", path: "/grid/dr-forecast" },
-      { icon: Target, label: "Forecast Accuracy", path: "/grid/forecast-accuracy" },
-      { icon: Coins, label: "Price Signals", path: "/grid/price-signals" },
-      { icon: MapPin, label: "Locational Flexibility", path: "/grid/locational-flexibility" },
-      ...(userRole === 'admin'
-        ? [
-            { icon: Activity, label: "Fleet Telemetry", path: "/grid/fleet-telemetry" },
-            { icon: House, label: "Smart-Home Loads", path: "/grid/matter-loads" },
-            { icon: HeartPulse, label: "Degraded Operation", path: "/grid/degraded-operation" },
-            { icon: ShieldAlert, label: "NTL Detection", path: "/grid/ntl" },
-            { icon: FileCheck, label: "Compliance Reports", path: "/grid/compliance-reports" },
-          ]
-        : []),
-    ],
-  },
-  {
-    label: "Community",
-    items: [
-      { icon: Users, label: "Community Pools", path: "/community-pools" },
-      { icon: MessageSquare, label: "SMS Center", path: "/sms-center" },
-    ],
-  },
-  {
-    items: [
-      { icon: QrCode, label: "QR Scanner", path: "/qr-scanner" },
-      { icon: History, label: "QR History", path: "/qr-history" },
-      { icon: Gift, label: "Referrals", path: "/referrals" },
-      { icon: Settings, label: "Settings", path: "/settings" },
-      ...(userRole === 'admin' ? [{ icon: Shield, label: "Admin", path: "/admin" }] : []),
-    ],
-  },
-];
+function NavIcon({ path, isActive }: { path: string; isActive: boolean }) {
+  const Icon = NAV_ICONS[path];
+  if (!Icon) {
+    return <span className="h-4 w-4 flex items-center justify-center text-xs">&bull;</span>;
+  }
+  return <Icon className={`h-4 w-4 ${isActive ? "text-primary" : ""}`} />;
+}
 
 const SIDEBAR_WIDTH_KEY = "sidebar-width";
 const DEFAULT_WIDTH = 280;
@@ -238,10 +141,60 @@ function DashboardLayoutContent({
   const isCollapsed = state === "collapsed";
   const [isResizing, setIsResizing] = useState(false);
   const sidebarRef = useRef<HTMLDivElement>(null);
-  const menuSections = getMenuSections(user?.role);
-  const allMenuItems = menuSections.flatMap(s => s.items);
-  const activeMenuItem = allMenuItems.find(item => item.path === location);
+  const navGroups = useMemo(() => getNavGroups(user?.role), [user?.role]);
+  const activeMenuItem = findNavItem(navGroups, location);
   const isMobile = useIsMobile();
+  const [filter, setFilter] = useState("");
+  const [openGroups, setOpenGroups] = useState<string[]>(() =>
+    readOpenGroups(localStorage, navGroups, location)
+  );
+  const filterMatches = useMemo(
+    () => searchNavItems(navGroups, filter),
+    [navGroups, filter]
+  );
+
+  // Reveal the group owning the route the user just navigated to, without
+  // closing whatever else they had open.
+  useEffect(() => {
+    const groupId = groupIdForPath(
+      navGroups.filter(group => !group.pinned),
+      location
+    );
+    if (!groupId) return;
+    setOpenGroups(previous =>
+      previous.includes(groupId) ? previous : [...previous, groupId]
+    );
+  }, [location, navGroups]);
+
+  useEffect(() => {
+    writeOpenGroups(localStorage, openGroups);
+  }, [openGroups]);
+
+  const navigate = (path: string) => {
+    setFilter("");
+    setLocation(path);
+  };
+
+  const renderItems = (items: NavGroup["items"]) => (
+    <SidebarMenu className="px-2 py-1">
+      {items.map(item => {
+        const isActive = location === item.path;
+        return (
+          <SidebarMenuItem key={item.path}>
+            <SidebarMenuButton
+              isActive={isActive}
+              onClick={() => navigate(item.path)}
+              tooltip={item.label}
+              className="h-9 transition-all font-normal"
+            >
+              <NavIcon path={item.path} isActive={isActive} />
+              <span>{item.label}</span>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+        );
+      })}
+    </SidebarMenu>
+  );
 
   useEffect(() => {
     if (isCollapsed) {
@@ -327,35 +280,90 @@ function DashboardLayoutContent({
           </SidebarHeader>
 
           <SidebarContent className="gap-0">
-            {menuSections.map((section, si) => (
-              <div key={si}>
-                {section.label && (
-                  <p className="px-4 pt-3 pb-1 text-xs font-medium uppercase tracking-wide text-muted-foreground group-data-[collapsible=icon]:hidden">
-                    {section.label}
-                  </p>
+            {isCollapsed ? (
+              // Icon rail: a collapsed group would hide its icons entirely, so
+              // every route stays reachable as a flat list of icons.
+              renderItems(navGroups.flatMap(group => group.items))
+            ) : (
+              <>
+                <div className="px-3 pt-2 pb-1">
+                  <div className="relative">
+                    <Search className="absolute left-2 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+                    <Input
+                      value={filter}
+                      onChange={event => setFilter(event.target.value)}
+                      placeholder="Find a page"
+                      aria-label="Find a page"
+                      className="h-8 pl-8 text-sm"
+                    />
+                  </div>
+                </div>
+
+                {filter.trim() ? (
+                  filterMatches.length === 0 ? (
+                    <p className="px-4 py-3 text-sm text-muted-foreground">
+                      No page matches “{filter.trim()}”.
+                    </p>
+                  ) : (
+                    <div>
+                      <p className="px-4 pt-2 pb-1 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                        {filterMatches.length} match
+                        {filterMatches.length === 1 ? "" : "es"}
+                      </p>
+                      <SidebarMenu className="px-2 py-1">
+                        {filterMatches.map(({ item, groupLabel }) => {
+                          const isActive = location === item.path;
+                          return (
+                            <SidebarMenuItem key={item.path}>
+                              <SidebarMenuButton
+                                isActive={isActive}
+                                onClick={() => navigate(item.path)}
+                                className="h-9 font-normal"
+                              >
+                                <NavIcon path={item.path} isActive={isActive} />
+                                <span className="truncate">{item.label}</span>
+                                <span className="ml-auto text-[10px] uppercase tracking-wide text-muted-foreground truncate">
+                                  {groupLabel}
+                                </span>
+                              </SidebarMenuButton>
+                            </SidebarMenuItem>
+                          );
+                        })}
+                      </SidebarMenu>
+                    </div>
+                  )
+                ) : (
+                  navGroups.map(group =>
+                    group.pinned ? (
+                      <div key={group.id}>{renderItems(group.items)}</div>
+                    ) : (
+                      <Collapsible
+                        key={group.id}
+                        open={openGroups.includes(group.id)}
+                        onOpenChange={open =>
+                          setOpenGroups(previous =>
+                            open
+                              ? [...previous, group.id]
+                              : previous.filter(id => id !== group.id)
+                          )
+                        }
+                      >
+                        <CollapsibleTrigger className="group/nav flex w-full items-center gap-2 px-4 pt-3 pb-1 text-xs font-medium uppercase tracking-wide text-muted-foreground hover:text-foreground focus:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded-md">
+                          <ChevronRight className="h-3.5 w-3.5 transition-transform group-data-[state=open]/nav:rotate-90" />
+                          <span className="truncate">{group.label}</span>
+                          <span className="ml-auto text-[10px] font-normal normal-case text-muted-foreground/70">
+                            {group.items.length}
+                          </span>
+                        </CollapsibleTrigger>
+                        <CollapsibleContent>
+                          {renderItems(group.items)}
+                        </CollapsibleContent>
+                      </Collapsible>
+                    )
+                  )
                 )}
-                <SidebarMenu className="px-2 py-1">
-                  {section.items.map(item => {
-                    const isActive = location === item.path;
-                    return (
-                      <SidebarMenuItem key={item.path}>
-                        <SidebarMenuButton
-                          isActive={isActive}
-                          onClick={() => setLocation(item.path)}
-                          tooltip={item.label}
-                          className={`h-10 transition-all font-normal`}
-                        >
-                          <item.icon
-                            className={`h-4 w-4 ${isActive ? "text-primary" : ""}`}
-                          />
-                          <span>{item.label}</span>
-                        </SidebarMenuButton>
-                      </SidebarMenuItem>
-                    );
-                  })}
-                </SidebarMenu>
-              </div>
-            ))}
+              </>
+            )}
           </SidebarContent>
 
           <SidebarFooter className="p-3">

@@ -219,12 +219,15 @@ sudo ./scripts/security-hardening.sh
 - [ ] Server logs clean: `pm2 logs vpp-web-server`
 - [ ] Application accessible via Nginx
 
-#### Python ETL Pipeline
-- [ ] Python virtual environment created
-- [ ] Dependencies installed: `pip install -r server/integration/requirements.txt`
-- [ ] ETL service started (systemd or Docker)
-- [ ] ETL consuming Kafka events
-- [ ] Iceberg tables being populated
+#### Lakehouse ingestion (`services/lakehouse`)
+- [ ] Migration `0015_lakehouse_ingestion` applied
+- [ ] Dependencies installed: `pip install -r services/lakehouse/requirements.txt`
+- [ ] Object store named explicitly (`LAKEHOUSE_STORE`, bucket/credentials or `LAKEHOUSE_LOCAL_PATH`)
+- [ ] `LAKEHOUSE_FRESHNESS_SECONDS` identical for the job and the API process
+- [ ] CronJob applied: `infrastructure/k8s/ha/lakehouse-ingest-cronjob.yaml`
+- [ ] `lakehouse_runs` shows `succeeded` rows with an object key and digest — a
+      `succeeded` row means the object was read back and its SHA-256 matched
+- [ ] `/admin/lakehouse` reports no dataset as `never ingested`
 
 **Status:** ⏳ PENDING
 

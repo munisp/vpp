@@ -8,9 +8,11 @@
 import { createHash } from 'crypto';
 import { getDb } from '../db';
 import { eq, desc, and, gte, lte, sql, type SQL } from 'drizzle-orm';
-import { kafkaPublisher } from '../integration/kafka-publisher';
+import { KAFKA_TOPICS } from '../integration/kafka-config';
+import { enqueueEvent } from './events/outbox';
 import { requireCapability } from './degraded-operation';
 import type { SqlRow } from '../sql-row';
+import { isUniqueViolation } from '../pg-errors';
 
 // Import schema (will be available after schema update)
 interface SettlementEvent {
@@ -193,9 +195,8 @@ export class SettlementLedgerService {
       try {
         return await this.appendEvent(input);
       } catch (error: any) {
-        // PostgreSQL reports unique violations as SQLSTATE 23505.
         const isChainConflict =
-          error?.code === '23505' ||
+          isUniqueViolation(error) ||
           /duplicate key value violates unique constraint/i.test(String(error?.message ?? ''));
 
         if (!isChainConflict) throw error;
@@ -265,8 +266,13 @@ export class SettlementLedgerService {
       eventData,
     });
 
-    // Insert the event
-    const result = await db.execute<SqlRow>(sql`
+    // The settlement row and the event that announces it are written together:
+    // publishing inline after the commit (which is what this did) lost the event
+    // whenever the broker was away, and paid ~30s of KafkaJS retries on a money
+    // path to find out. The relay publishes it; a broker outage now shows up as a
+    // pending outbox row instead of an event that never existed.
+    const result = await db.transaction(async tx => {
+      const inserted = await tx.execute<SqlRow>(sql`
       INSERT INTO settlement_events (
         event_hash, previous_hash, sequence_number, event_type,
         user_id, counterparty_id, source_type, source_id,
@@ -285,24 +291,31 @@ export class SettlementLedgerService {
       RETURNING id
     `);
 
-    console.log(`[SettlementLedger] Created event ${eventHash.substring(0, 16)}... seq=${sequenceNumber} type=${input.eventType}`);
-
-    // Publish to Kafka for lakehouse analytics
-    try {
-      await kafkaPublisher.publishSettlementEvent({
-        settlementId: eventHash,
-        eventType: input.eventType,
-        assetId: input.sourceType === 'asset' ? input.sourceId.toString() : undefined,
-        quantityKwh: input.energyWh ? input.energyWh / 1000 : undefined,
-        amount: input.netAmount || undefined,
-        currency: input.currency,
-        hashPrev: previousHash,
-        hashCurr: eventHash,
-        timestamp: new Date(),
+      await enqueueEvent(tx, {
+        topic: KAFKA_TOPICS.SETTLEMENT_EVENTS,
+        // The chain hash is the event's identity, so a retried append that lands
+        // the same settlement event enqueues one stream event, not two.
+        eventKey: `settlement.events:${eventHash}`,
+        partitionKey: eventHash,
+        payload: {
+          event_id: eventHash,
+          source: 'settlement-ledger',
+          settlementId: eventHash,
+          eventType: input.eventType,
+          assetId: input.sourceType === 'asset' ? input.sourceId.toString() : undefined,
+          quantityKwh: input.energyWh ? input.energyWh / 1000 : undefined,
+          amount: input.netAmount || undefined,
+          currency: input.currency,
+          hashPrev: previousHash,
+          hashCurr: eventHash,
+          timestamp: new Date().toISOString(),
+        },
       });
-    } catch (error) {
-      console.error('[SettlementLedger] Error publishing to Kafka:', error);
-    }
+
+      return inserted;
+    });
+
+    console.log(`[SettlementLedger] Created event ${eventHash.substring(0, 16)}... seq=${sequenceNumber} type=${input.eventType}`);
 
     return {
       id: Number(result.rows[0].id),

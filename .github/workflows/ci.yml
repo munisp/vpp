@@ -103,6 +103,51 @@ jobs:
         working-directory: services/optimizer
         run: python -m benchmarks.run --quick
 
+  lakehouse:
+    name: Lakehouse ingestion (compileall + pytest against PostgreSQL)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: vpp
+          POSTGRES_PASSWORD: vpp
+          POSTGRES_DB: vpp_lake
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U vpp -d vpp_lake"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: services/lakehouse/requirements.txt
+
+      - name: Install dependencies
+        working-directory: services/lakehouse
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: py_compile all sources
+        working-directory: services/lakehouse
+        run: python -m compileall -q lakehouse tests
+
+      # The DSN is required, not optional: without it the pipeline tests skip, and a
+      # skipped run would report green without having verified that a watermark only
+      # moves after the object was read back.
+      - name: pytest
+        working-directory: services/lakehouse
+        env:
+          LAKEHOUSE_TEST_DSN: postgres://vpp:vpp@127.0.0.1:5432/vpp_lake
+        run: python -m pytest -v
+
   go-orchestrator:
     name: Go orchestrator (build + vet)
     runs-on: ubuntu-latest

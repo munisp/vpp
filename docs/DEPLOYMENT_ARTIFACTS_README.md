@@ -96,19 +96,16 @@ TEST_USERNAME=testuser TEST_PASSWORD=testpass ./scripts/test-keycloak.sh
 - `TEST_PASSWORD` - Test user password (optional)
 
 #### `scripts/test-lakehouse-etl.sh`
-Tests Lakehouse ETL pipeline deployment.
+Runs the `services/lakehouse` ingestion test suite (`pytest`).
 
-**Tests Performed (10 tests):**
-- Python installation
-- ETL script existence
-- Requirements file check
-- Virtual environment verification
-- Python dependencies check
-- Kafka connectivity
-- Iceberg warehouse directory
-- ETL service status (systemd)
-- Kafka consumer group
-- Deployment guide documentation
+**Tests Performed:**
+- Parquet encoding, including the refusal to encode an empty batch
+- Object-store writes with read-back digest verification, and detection of a
+  truncated or corrupted read-back
+- Configuration refusals (no implicit local or unnamed store)
+- With `LAKEHOUSE_TEST_DSN`: the pipeline against real PostgreSQL — watermark
+  advancement, empty second runs, failure recording, advisory locking, tie-breaking
+  on equal timestamps and backlog counting
 
 **Usage:**
 ```bash
@@ -116,8 +113,9 @@ Tests Lakehouse ETL pipeline deployment.
 ```
 
 **Environment Variables:**
-- `KAFKA_BOOTSTRAP_SERVERS` - Kafka bootstrap servers (default: localhost:9092)
-- `ICEBERG_WAREHOUSE_PATH` - Iceberg warehouse path (default: /tmp/iceberg-warehouse)
+- `LAKEHOUSE_TEST_DSN` - PostgreSQL DSN for the pipeline tests. Unset, those tests
+  are skipped and the script says so; it does not report them as passed.
+- `PYTHON` - interpreter to use (default: `python3`)
 
 #### `scripts/run-all-tests.sh`
 Master test runner that executes all test suites.
@@ -440,8 +438,11 @@ pm2 logs vpp-temporal-worker
 # Keycloak logs
 docker logs keycloak
 
-# ETL logs
-journalctl -u vpp-lakehouse-etl -f
+# Lakehouse ingestion: the job records its own runs, including the exact error
+# behind a failure
+psql "$DATABASE_URL" -c "SELECT dataset, state, rows_written, object_key, error
+                          FROM lakehouse_runs ORDER BY id DESC LIMIT 10;"
+kubectl -n lakehouse logs job/lakehouse-ingest-<timestamp>
 ```
 
 **Common issues:**

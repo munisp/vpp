@@ -15,11 +15,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
  */
 function mockDb() {
   let call = 0;
-  const db = {
+  const db: {
+    execute: () => Promise<{ rows: { id: number }[] }>;
+    transaction: <T>(fn: (tx: typeof db) => Promise<T>) => Promise<T>;
+  } = {
     execute: async () => {
       call += 1;
       return call === 1 ? { rows: [] } : { rows: [{ id: 55 }] };
     },
+    // The insert and its outbox row share one transaction; the double runs the
+    // body against the same querier.
+    transaction: async fn => fn(db),
   };
   vi.doMock('./db', () => ({ getDb: async () => db }));
   vi.doMock('./integration/kafka-publisher', () => ({

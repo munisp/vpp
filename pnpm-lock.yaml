@@ -283,6 +283,9 @@ importers:
       tailwindcss-animate:
         specifier: ^1.0.7
         version: 1.0.7(tailwindcss@4.1.14)
+      tigerbeetle-node:
+        specifier: 0.17.9
+        version: 0.17.9
       vaul:
         specifier: ^1.1.2
         version: 1.1.2(@types/react-dom@19.2.1(@types/react@19.2.2))(@types/react@19.2.2)(react-dom@19.2.0(react@19.2.0))(react@19.2.0)
@@ -6824,6 +6827,10 @@ packages:
   thrift@0.11.0:
     resolution: {integrity: sha512-UpsBhOC45a45TpeHOXE4wwYwL8uD2apbHTbtBvkwtUU4dNwCjC7DpQTjw2Q6eIdfNtw+dKthdwq94uLXTJPfFw==}
     engines: {node: '>= 4.1.0'}
+
+  tigerbeetle-node@0.17.9:
+    resolution: {integrity: sha512-jx2V8WtY1IKndEGhNWsUYHh7Sc9uYLylkJUIXwkskUm/q/ziqS3VyKzBCSTkfU4nZxkAXHeVzzbG30ENzGj68w==}
+    engines: {node: '>=18.0.0'}
 
   tiny-inflate@1.0.3:
     resolution: {integrity: sha512-pkY1fj1cKHb2seWDy0B16HeWyczlJA9/WW3u3c4z/NiWDsO3DOU5D7nhTLE9CF0yXv/QZFY7sEJmj24dK+Rrqw==}
@@ -15518,6 +15525,8 @@ snapshots:
     transitivePeerDependencies:
       - bufferutil
       - utf-8-validate
+
+  tigerbeetle-node@0.17.9: {}
 
   tiny-inflate@1.0.3: {}
 

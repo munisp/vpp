@@ -1,0 +1,105 @@
+---
+# The PostgreSQL → object store ingestion job (services/lakehouse).
+#
+# This is what puts platform data in the lake. Without it, MinIO/Hive/Trino in
+# lakehouse-ha.yaml are a query engine over nothing — which is exactly the state
+# the infrastructure audit found, so this manifest exists to make the absence of
+# ingestion visible as a failed CronJob rather than as empty query results.
+#
+# The job is safe to run concurrently with itself (a PostgreSQL advisory lock per
+# dataset means a second runner skips rather than double-extracting), but
+# `concurrencyPolicy: Forbid` keeps the schedule honest anyway. It exits non-zero
+# when any dataset fails, so `failedJobsHistoryLimit` retains the evidence.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: lakehouse-ingest
+  namespace: lakehouse
+  labels:
+    app.kubernetes.io/name: lakehouse-ingest
+    app.kubernetes.io/part-of: vpp-platform
+spec:
+  schedule: "*/15 * * * *"
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 300
+  successfulJobsHistoryLimit: 5
+  failedJobsHistoryLimit: 20
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      # A run that outlives this is killed; the dataset keeps its watermark and the
+      # next run resumes from it, so a timeout loses no rows.
+      activeDeadlineSeconds: 1800
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: lakehouse-ingest
+        spec:
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            fsGroup: 10001
+          containers:
+            - name: ingest
+              image: ${LAKEHOUSE_INGEST_IMAGE}
+              imagePullPolicy: IfNotPresent
+              args: ["--max-batches", "40"]
+              env:
+                # The relational source of truth. A read-only role is enough for
+                # extraction, but the job also records its own runs and watermarks,
+                # so it needs write access to the two lakehouse_* tables.
+                - name: LAKEHOUSE_DATABASE_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: lakehouse-ingest-credentials
+                      key: database_url
+                - name: LAKEHOUSE_STORE
+                  value: "s3"
+                - name: LAKEHOUSE_BUCKET
+                  value: "vpp-lakehouse"
+                - name: LAKEHOUSE_PREFIX
+                  value: "raw"
+                - name: S3_ENDPOINT
+                  value: "http://minio.lakehouse.svc.cluster.local:9000"
+                - name: S3_REGION
+                  value: "us-east-1"
+                - name: S3_ACCESS_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: minio-credentials
+                      key: username
+                - name: S3_SECRET_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: minio-credentials
+                      key: password
+                # Identifies the runner in lakehouse_runs, so an operator can tell
+                # a scheduled run from someone's laptop.
+                - name: LAKEHOUSE_RUNNER
+                  value: "k8s-cronjob"
+                - name: LAKEHOUSE_BATCH_ROWS
+                  value: "20000"
+                # Must match the freshness budget the platform's own status surface
+                # uses (LAKEHOUSE_FRESHNESS_SECONDS on the API), or the console will
+                # call a dataset stale that this schedule considers on time.
+                - name: LAKEHOUSE_FRESHNESS_SECONDS
+                  value: "3600"
+              resources:
+                requests:
+                  cpu: "250m"
+                  memory: "512Mi"
+                limits:
+                  cpu: "2"
+                  memory: "2Gi"
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              volumeMounts:
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: tmp
+              emptyDir: {}

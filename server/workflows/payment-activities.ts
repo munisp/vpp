@@ -8,7 +8,8 @@ import { paymentGatewayService } from '../services/payment-gateway-service';
 import { getDb } from '../db';
 import { payments, billings } from '../../drizzle/schema';
 import { eq } from 'drizzle-orm';
-import { kafkaPublisher } from '../integration/kafka-publisher';
+import { KAFKA_TOPICS } from '../integration/kafka-config';
+import { enqueueEvent } from '../services/events/outbox';
 
 /**
  * Gateway environment for all payment operations. Defaults to 'production' —
@@ -56,29 +57,39 @@ export async function initiatePaymentActivity(
       // Create payment record
       const db = await getDb();
       if (db) {
-        await db.insert(payments).values({
-          userId: input.userId,
-          billingId: input.billingId,
-          paymentType: 'invoice',
-          amount: Math.round(input.amount * 100), // Convert to cents
-          currency: 'TZS',
-          paymentMethod: input.gateway === 'mpesa' ? 'mpesa' : input.gateway === 'airtel' ? 'airtel_money' : 'tigo_pesa',
-          phoneNumber: input.phoneNumber,
-          transactionId: result.transactionId,
-          status: 'pending',
+        // The payment row and its event are written together, so a Temporal retry
+        // of this activity cannot leave one without the other, and the event
+        // survives a broker outage as a pending outbox row.
+        await db.transaction(async tx => {
+          await tx.insert(payments).values({
+            userId: input.userId,
+            billingId: input.billingId,
+            paymentType: 'invoice',
+            amount: Math.round(input.amount * 100), // Convert to cents
+            currency: 'TZS',
+            paymentMethod: input.gateway === 'mpesa' ? 'mpesa' : input.gateway === 'airtel' ? 'airtel_money' : 'tigo_pesa',
+            phoneNumber: input.phoneNumber,
+            transactionId: result.transactionId!,
+            status: 'pending',
+          });
+          await enqueueEvent(tx, {
+            topic: KAFKA_TOPICS.PAYMENTS_INITIATED,
+            eventKey: `payment.initiated:${result.transactionId}`,
+            partitionKey: result.transactionId,
+            payload: {
+              event_id: `payment.initiated:${result.transactionId}`,
+              source: 'payment-workflow',
+              paymentId: result.transactionId,
+              userId: input.userId.toString(),
+              amount: input.amount,
+              currency: 'TZS',
+              gateway: input.gateway,
+              timestamp: new Date().toISOString(),
+              metadata: { billingId: input.billingId },
+            },
+          });
         });
       }
-
-      // Publish Kafka event
-      await kafkaPublisher.publishPaymentInitiated({
-        paymentId: result.transactionId,
-        userId: input.userId.toString(),
-        amount: input.amount,
-        currency: 'TZS',
-        gateway: input.gateway,
-        timestamp: new Date(),
-        metadata: { billingId: input.billingId },
-      });
 
       return {
         success: true,
@@ -147,33 +158,46 @@ export async function updatePaymentStatusActivity(
     .limit(1);
   const payment = paymentRecords[0];
 
-  await db
-    .update(payments)
-    .set({
-      status,
-      updatedAt: new Date(),
-    })
-    .where(eq(payments.transactionId, transactionId));
-
   const amount = details?.amount ?? payment?.amount;
   const gateway = details?.gateway ?? payment?.paymentMethod;
+  const canDescribeEvent = amount !== undefined && Boolean(gateway);
 
-  if (amount === undefined || !gateway) {
+  // The status change and the event that announces it commit together, so a
+  // Temporal retry of this activity cannot produce a second event for a status it
+  // already recorded, and no event describes a status that was rolled back.
+  await db.transaction(async tx => {
+    await tx
+      .update(payments)
+      .set({
+        status,
+        updatedAt: new Date(),
+      })
+      .where(eq(payments.transactionId, transactionId));
+
+    if (!canDescribeEvent) return;
+    await enqueueEvent(tx, {
+      topic: KAFKA_TOPICS.PAYMENTS_COMPLETED,
+      eventKey: `payment.completed:${transactionId}:${status}`,
+      partitionKey: transactionId,
+      payload: {
+        event_id: `payment.completed:${transactionId}:${status}`,
+        source: 'payment-workflow',
+        paymentId: transactionId,
+        completedAt: new Date().toISOString(),
+        transactionId,
+        status,
+        amount,
+        gateway,
+      },
+    });
+  });
+
+  if (!canDescribeEvent) {
     console.warn(
       `[PaymentActivity] Skipping payment-completed event for ${transactionId}: ` +
       'payment record not found and amount/gateway not provided'
     );
-    return;
   }
-
-  // Publish status update event with real values
-  await kafkaPublisher.publishPaymentCompleted({
-    paymentId: transactionId,
-    completedAt: new Date(),
-    transactionId,
-    amount,
-    gateway,
-  });
 }
 
 /**

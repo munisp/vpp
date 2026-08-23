@@ -20,6 +20,13 @@ import { gridProtocolRouter } from "../webhooks/grid-protocols";
 import { webSocketService } from "../integration/websocket-service";
 import { startControlFallbackSweeper } from "../services/control-delivery";
 import { startFleetTelemetryRollup } from "../services/fleet-telemetry";
+import { brokerConfigured, startOutboxRelay } from "../services/events/outbox";
+import { consumerConfigured, startEventConsumer } from "../services/events/consumer";
+import {
+  assertSharedCountersAvailable,
+  createRateLimitStore,
+  SharedCounterUnavailableError,
+} from "../services/rate-limit-store";
 
 function isPortAvailable(port: number): Promise<boolean> {
   return new Promise(resolve => {
@@ -48,6 +55,10 @@ async function startServer() {
   // req.ip, rate limiting and secure-cookie detection work correctly.
   app.set("trust proxy", 1);
 
+  // A limit kept in each replica's memory is multiplied by the replica count,
+  // so production refuses to start without somewhere to keep shared counters.
+  assertSharedCountersAvailable();
+
   // Security headers via helmet defaults (X-Content-Type-Options,
   // X-Frame-Options, Referrer-Policy, HSTS in prod, etc.). CSP is disabled
   // here on purpose: client/index.html ships an inline service-worker
@@ -60,12 +71,20 @@ async function startServer() {
   // /api/grid is excluded and limited separately: it carries machine traffic
   // (charge point heartbeats, meter values, Modbus polls) from a small number
   // of protocol services, and every request is HMAC-authenticated.
+  // Counters are shared across replicas via Redis. If Redis goes away the
+  // general API keeps counting per replica rather than refusing everything,
+  // and says so in the log; the payment limiter below makes the opposite trade.
   const globalLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
     limit: 300,
     standardHeaders: true,
     legacyHeaders: false,
     message: { error: "RATE_LIMITED", message: "Too many requests, please try again later." },
+    store: createRateLimitStore({
+      limiter: "api",
+      windowMs: 15 * 60 * 1000,
+      onRedisFailure: "count_locally",
+    }),
   });
   app.use("/api", (req, res, next) =>
     req.path.startsWith("/grid/") ? next() : globalLimiter(req, res, next)
@@ -77,18 +96,30 @@ async function startServer() {
     standardHeaders: true,
     legacyHeaders: false,
     message: { error: "RATE_LIMITED", message: "Too many grid protocol requests." },
+    store: createRateLimitStore({
+      limiter: "grid",
+      windowMs: 60 * 1000,
+      onRedisFailure: "count_locally",
+    }),
   });
   app.use("/api/grid", gridLimiter);
 
   // Stricter limit for payment webhooks and payment tRPC procedures:
   // 30 requests per 15 minutes per IP. For webhooks it is chained after
   // signature verification so the verify-first order is preserved.
+  // Money paths fail closed: if the shared counter cannot be read, the request
+  // is refused rather than admitted unmetered.
   const paymentLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
     limit: 30,
     standardHeaders: true,
     legacyHeaders: false,
     message: { error: "RATE_LIMITED", message: "Too many requests, please try again later." },
+    store: createRateLimitStore({
+      limiter: "payments",
+      windowMs: 15 * 60 * 1000,
+      onRedisFailure: "refuse",
+    }),
   });
   app.use("/api/trpc/payments", paymentLimiter);
 
@@ -147,6 +178,28 @@ async function startServer() {
       createContext,
     })
   );
+  // An unreadable shared counter on a money path is reported as the platform
+  // being unable to meter the request, not as a client error and not as success.
+  // Registered after the routes so it sees the errors their limiters raise.
+  app.use(
+    (
+      error: unknown,
+      _req: express.Request,
+      res: express.Response,
+      next: express.NextFunction
+    ) => {
+      if (error instanceof SharedCounterUnavailableError) {
+        console.error(`[RateLimit] ${error.message}`);
+        return res.status(503).json({
+          error: error.code,
+          message:
+            "This request cannot be rate limited right now, so it was refused. Please retry shortly.",
+        });
+      }
+      return next(error);
+    }
+  );
+
   // Initialize WebSocket server (single initialization to avoid duplicate handleUpgrade)
   initializeWebSocket(server);
 
@@ -185,6 +238,46 @@ async function startServer() {
         "aggregates will not advance automatically in this process"
     );
   }
+
+  // Publish recorded events to Kafka. Opt-in via EVENT_OUTBOX_RELAY_MS so a
+  // deployment relaying from a worker does not also relay in every API replica;
+  // without it, events are recorded and never published, which is why this warns
+  // rather than staying quiet — a growing outbox is the honest symptom, but only
+  // if somebody is told about it.
+  if (startOutboxRelay()) {
+    console.log(`[EventOutbox] relay started every ${process.env.EVENT_OUTBOX_RELAY_MS}ms`);
+  } else if (brokerConfigured()) {
+    console.warn(
+      "[EventOutbox] EVENT_OUTBOX_RELAY_MS is not set: recorded events will not be " +
+        "published from this process and will accumulate as pending"
+    );
+  } else {
+    console.warn(
+      "[EventOutbox] KAFKA_BROKERS is not set: this deployment has no event stream, " +
+        "so events are recorded in the outbox and never published"
+    );
+  }
+
+  // Consume the topics this deployment reads back. Without EVENT_CONSUMER_TOPICS
+  // the platform publishes events nothing reads, which is what the infrastructure
+  // audit found; say so instead of letting the manifests imply otherwise.
+  void startEventConsumer().then(
+    started => {
+      if (started) {
+        console.log(
+          `[EventConsumer] consuming ${process.env.EVENT_CONSUMER_TOPICS} as group ${
+            process.env.EVENT_CONSUMER_GROUP ?? "vpp-event-inbox"
+          }`
+        );
+      } else if (!consumerConfigured()) {
+        console.warn(
+          "[EventConsumer] EVENT_CONSUMER_TOPICS is empty: no published event is read " +
+            "back by this platform"
+        );
+      }
+    },
+    error => console.error("[EventConsumer] failed to start:", error)
+  );
 
   // Note: webSocketService.initialize removed - using single WebSocket server from initializeWebSocket
   

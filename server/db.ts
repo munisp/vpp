@@ -38,6 +38,28 @@ import { ENV } from './_core/env';
 
 let _db: ReturnType<typeof drizzle> | null = null;
 
+/** A positive integer of milliseconds, or the default when the value is unusable. */
+function timeoutMs(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined) return fallback;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < 0 || !Number.isInteger(parsed)) {
+    console.warn(
+      `[Database] ${name}=${raw} is not a whole number of milliseconds; using ${fallback}ms instead.`
+    );
+    return fallback;
+  }
+  return parsed;
+}
+
+export function statementTimeoutMs(): number {
+  return timeoutMs('PG_STATEMENT_TIMEOUT_MS', 30_000);
+}
+
+export function idleTransactionTimeoutMs(): number {
+  return timeoutMs('PG_IDLE_TRANSACTION_TIMEOUT_MS', 60_000);
+}
+
 export async function getDb() {
   if (!_db && process.env.DATABASE_URL) {
     try {
@@ -45,10 +67,23 @@ export async function getDb() {
       // `timestamp without time zone` holding UTC, and `NOW()` is converted
       // with the *session* time zone. A non-UTC session would silently shift
       // every server-generated timestamp (payment, settlement, DR windows).
+      //
+      // Two timeouts alongside it, because this process holds money paths:
+      // `statement_timeout` stops one pathological query from occupying a
+      // connection until the pool is exhausted, and
+      // `idle_in_transaction_session_timeout` kills a transaction whose client
+      // stopped talking — that is the state that holds row locks on payments and
+      // settlement rows indefinitely and blocks every writer behind it. Both are
+      // deliberately far above normal request work (defaults 30s and 60s) and
+      // overridable, since reporting and migrations legitimately run longer.
       _db = drizzle({
         connection: {
           connectionString: process.env.DATABASE_URL,
-          options: '-c timezone=UTC',
+          options: [
+            '-c timezone=UTC',
+            `-c statement_timeout=${statementTimeoutMs()}`,
+            `-c idle_in_transaction_session_timeout=${idleTransactionTimeoutMs()}`,
+          ].join(' '),
         },
       });
     } catch (error) {

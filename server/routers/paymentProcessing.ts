@@ -5,7 +5,8 @@ import { PaymentGatewayManager } from "../payment-gateways";
 import { getDb } from "../db";
 import { payments, billings } from "../../drizzle/schema";
 import { and, eq } from "drizzle-orm";
-import { kafkaPublisher } from "../integration/kafka-publisher";
+import { KAFKA_TOPICS } from "../integration/kafka-config";
+import { enqueueEvent } from "../services/events/outbox";
 import { temporalClient } from "../integration/temporal-client";
 import { resolveGatewayEnvironment } from "../payment-gateways/environment";
 
@@ -79,22 +80,44 @@ export const paymentProcessingRouter = router({
           });
         }
 
-        // Create payment record
-        const [payment] = await db.insert(payments).values({
-          userId: ctx.user.id,
-          billingId: inv.id,
-          paymentType: "invoice",
-          amount,
-          currency: "TZS",
-          paymentMethod: input.gateway,
-          phoneNumber: input.phoneNumber,
-          transactionId: response.transactionId,
-          status: "pending",
-          metadata: JSON.stringify({
-            checkoutRequestId: response.checkoutRequestId,
+        // The payment row and its event are written together: the gateway has
+        // already been asked for money, so this process must not be able to end
+        // with a payment nobody downstream hears about.
+        const payment = await db.transaction(async tx => {
+          const [row] = await tx.insert(payments).values({
+            userId: ctx.user.id,
             billingId: inv.id,
-          }),
-        }).returning({ id: payments.id });
+            paymentType: "invoice",
+            amount,
+            currency: "TZS",
+            paymentMethod: input.gateway,
+            phoneNumber: input.phoneNumber,
+            transactionId: response.transactionId,
+            status: "pending",
+            metadata: JSON.stringify({
+              checkoutRequestId: response.checkoutRequestId,
+              billingId: inv.id,
+            }),
+          }).returning({ id: payments.id });
+
+          await enqueueEvent(tx, {
+            topic: KAFKA_TOPICS.PAYMENTS_INITIATED,
+            eventKey: `payment.initiated:${row.id}`,
+            partitionKey: row.id.toString(),
+            payload: {
+              event_id: `payment.initiated:${row.id}`,
+              source: 'payment-processing',
+              paymentId: row.id.toString(),
+              userId: ctx.user.id.toString(),
+              amount,
+              currency: 'TZS',
+              gateway: input.gateway,
+              timestamp: new Date().toISOString(),
+            },
+          });
+
+          return row;
+        });
 
         // Start Temporal workflow for payment processing
         try {
@@ -116,15 +139,6 @@ export const paymentProcessingRouter = router({
           // Continue even if Temporal workflow fails (graceful degradation)
         }
 
-        // Publish Kafka event for payment initiation
-        await kafkaPublisher.publishPaymentInitiated({
-          paymentId: payment.id.toString(),
-          userId: ctx.user.id.toString(),
-          amount,
-          currency: 'TZS',
-          gateway: input.gateway,
-          timestamp: new Date(),
-        }).catch(err => console.error('[Kafka] Failed to publish payment.initiated event:', err));
 
         return {
           success: true,

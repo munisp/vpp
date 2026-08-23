@@ -31,6 +31,27 @@ function affectedRows(result: { rowCount: number | null }): number {
 }
 
 /**
+ * A refusal the caller can act on is not a server fault: the client shows a
+ * missing provider or an unreachable one as unavailable, and only tells the
+ * buyer to fix their request when the request is what is wrong.
+ */
+const PAY_FOR_MATCH_CODES: Record<string, TRPCError['code']> = {
+  TRADE_NOT_FOUND: 'NOT_FOUND',
+  NOT_BUYER: 'FORBIDDEN',
+  DATABASE_UNAVAILABLE: 'SERVICE_UNAVAILABLE',
+  GATEWAY_NOT_CONFIGURED: 'SERVICE_UNAVAILABLE',
+  GATEWAY_UNREACHABLE: 'SERVICE_UNAVAILABLE',
+  GATEWAY_REFUSED: 'BAD_GATEWAY',
+  ALREADY_PAID: 'CONFLICT',
+  PAYMENT_IN_FLIGHT: 'CONFLICT',
+  RESERVATION_RACE_LOST: 'CONFLICT',
+};
+
+function payForMatchCode(code: string): TRPCError['code'] {
+  return PAY_FOR_MATCH_CODES[code] ?? 'BAD_REQUEST';
+}
+
+/**
  * Load the caller as a market participant, refusing an unverified business
  * before it can hold a position.
  */
@@ -274,17 +295,7 @@ export const p2pTradingRouter = router({
         });
       } catch (error) {
         if (error instanceof P2pSettlementError) {
-          const code =
-            error.code === 'TRADE_NOT_FOUND'
-              ? 'NOT_FOUND'
-              : error.code === 'NOT_BUYER'
-                ? 'FORBIDDEN'
-                : error.code === 'DATABASE_UNAVAILABLE'
-                  ? 'SERVICE_UNAVAILABLE'
-                  : error.code === 'ALREADY_PAID'
-                    ? 'CONFLICT'
-                    : 'BAD_REQUEST';
-          throw new TRPCError({ code, message: error.message });
+          throw new TRPCError({ code: payForMatchCode(error.code), message: error.message });
         }
         throw new TRPCError({
           code: 'INTERNAL_SERVER_ERROR',

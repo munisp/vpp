@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { publicProcedure, protectedProcedure, router } from '../_core/trpc';
+import { publicProcedure, adminProcedure, router } from '../_core/trpc';
 import { gridOperatorService } from '../integration/grid-operator';
 import { TRPCError } from '@trpc/server';
 
@@ -119,12 +119,12 @@ export const gridOperatorRouter = router({
       };
     }),
 
-  // Admin endpoints (protected by user auth)
+  // Admin endpoints
   
   /**
    * Get grid status (admin view)
    */
-  adminGetStatus: protectedProcedure
+  adminGetStatus: adminProcedure
     .input(z.object({
       region: z.string().optional(),
     }).optional())
@@ -136,7 +136,7 @@ export const gridOperatorRouter = router({
   /**
    * Get pricing signal (admin view)
    */
-  adminGetPricing: protectedProcedure
+  adminGetPricing: adminProcedure
     .input(z.object({
       region: z.string().optional(),
     }).optional())
@@ -148,7 +148,7 @@ export const gridOperatorRouter = router({
   /**
    * Get forecast (admin view)
    */
-  adminGetForecast: protectedProcedure
+  adminGetForecast: adminProcedure
     .input(z.object({
       hoursAhead: z.number().min(1).max(168).default(24),
       region: z.string().optional(),

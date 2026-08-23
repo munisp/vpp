@@ -23,6 +23,9 @@ import { p2pSettlements } from '../../drizzle/innovations-schema';
 import { PaymentGatewayManager } from '../payment-gateways';
 import { resolveGatewayEnvironment } from '../payment-gateways/environment';
 import { isUniqueViolation } from '../pg-errors';
+import { postBuyerPaymentCaptured } from './ledger/postings';
+import { LedgerRefusedError } from './ledger/tigerbeetle';
+import type { LedgerPostingState } from '../../drizzle/ledger-schema';
 
 export type P2pGateway = 'mpesa' | 'airtel_money' | 'tigo_pesa';
 
@@ -331,6 +334,13 @@ export interface BuyerPaymentSettledResult {
   settlement: typeof SETTLEMENT_BUYER_PAID;
   sellerPayoutAvailable: false;
   detail: string;
+  /**
+   * What the double-entry ledger did with this payment. `posted` means the funds
+   * held at the gateway and the amount owed to the seller are both on the ledger;
+   * anything else means the platform's own record of the money is incomplete and
+   * says so, instead of the settlement row implying a balance nobody holds.
+   */
+  ledgerPosting: { state: LedgerPostingState; detail: string };
 }
 
 /**
@@ -348,6 +358,8 @@ export async function recordBuyerPaymentSettled(payment: {
   currency?: string | null;
   transactionId?: string | null;
   p2pTradeId?: number | null;
+  /** The provider that took the money. It names the clearing account it sits in. */
+  paymentMethod?: string | null;
   metadata: string | null;
 }): Promise<BuyerPaymentSettledResult> {
   const db = await getDb();
@@ -500,6 +512,19 @@ export async function recordBuyerPaymentSettled(payment: {
     return { settlementId: settlement.id, settledSellTradeId: sellTradeIdOrNull };
   });
 
+  // The double entry is attempted after the settlement commits, because the money
+  // has already moved at the provider: the entry records that fact, it does not
+  // authorise it. A ledger that is unreachable or that refuses therefore leaves a
+  // visible unposted row for reconciliation instead of discarding a confirmed
+  // payment.
+  const ledgerPosting = await recordCaptureOnLedger({
+    paymentId: payment.id,
+    sellerUserId: buyTrade.counterpartyId as number,
+    gatewayKey: payment.paymentMethod ?? 'unknown_gateway',
+    amountMinor: payment.amount,
+    providerReference,
+  });
+
   return {
     buyTradeId: buyTrade.id,
     sellTradeId: settledSellTradeId,
@@ -507,7 +532,49 @@ export async function recordBuyerPaymentSettled(payment: {
     settlement: SETTLEMENT_BUYER_PAID,
     sellerPayoutAvailable: false,
     detail,
+    ledgerPosting,
   };
+}
+
+/**
+ * Post a confirmed buyer payment to the double-entry ledger, translating every
+ * outcome into a state a reader can act on. Nothing is thrown: the caller has a
+ * provider-confirmed payment recorded, and losing that record because the ledger
+ * was down would be worse than an unposted entry an operator can see.
+ */
+export async function recordCaptureOnLedger(input: {
+  paymentId: number;
+  sellerUserId: number;
+  gatewayKey: string;
+  amountMinor: number;
+  providerReference: string;
+}): Promise<{ state: LedgerPostingState; detail: string }> {
+  try {
+    const result = await postBuyerPaymentCaptured({
+      paymentId: input.paymentId,
+      sellerUserId: input.sellerUserId,
+      gatewayKey: input.gatewayKey,
+      currency: P2P_CURRENCY,
+      amountMinor: input.amountMinor,
+      providerReference: input.providerReference,
+    });
+    return { state: result.state, detail: result.detail };
+  } catch (error) {
+    if (error instanceof LedgerRefusedError) {
+      console.error(
+        `[P2pSettlement] The ledger refused the entry for payment ${input.paymentId} (${error.status}); the payment stands and the entry is recorded as refused`
+      );
+      return { state: 'refused', detail: `The ledger refused this entry: ${error.status}.` };
+    }
+    const reason = error instanceof Error ? error.message : String(error);
+    console.error(
+      `[P2pSettlement] The ledger did not confirm the entry for payment ${input.paymentId}: ${reason}`
+    );
+    return {
+      state: 'pending',
+      detail: `The ledger did not confirm this entry: ${reason}. It will be retried.`,
+    };
+  }
 }
 
 /**

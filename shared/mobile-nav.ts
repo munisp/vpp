@@ -87,6 +87,13 @@ export const MOBILE_NAV_GROUPS: MobileNavGroup[] = [
       { screen: 'TradingStrategies', label: 'Strategies', icon: '⚡', adminOnly: true },
       { screen: 'WorkflowMonitor', label: 'Workflows', icon: '🔄', adminOnly: true },
       { screen: 'MatterLoads', label: 'Home Loads', icon: '🏠', adminOnly: true },
+      {
+        screen: 'LedgerReconciliation',
+        label: 'Ledger',
+        icon: '⚖️',
+        adminOnly: true,
+        keywords: ['balance', 'double entry', 'reconciliation'],
+      },
     ],
   },
 ];

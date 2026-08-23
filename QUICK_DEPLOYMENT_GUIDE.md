@@ -363,24 +363,25 @@ pm2 monit
 
 ```bash
 # Create Python virtual environment
-cd server/integration
+cd services/lakehouse
 python3 -m venv venv
 source venv/bin/activate
-
-# Install dependencies
 pip install -r requirements.txt
 
-# Create Iceberg warehouse directory
-mkdir -p /tmp/iceberg-warehouse
+# Name the source and the destination explicitly; there is no default store
+export LAKEHOUSE_DATABASE_URL="$DATABASE_URL"
+export LAKEHOUSE_STORE=file
+export LAKEHOUSE_LOCAL_PATH=/var/lib/vpp/lake
 
-# Start ETL service (systemd)
-sudo cp /home/ubuntu/vpp_consumer_platform/docs/LAKEHOUSE_ETL_DEPLOYMENT.md /etc/systemd/system/vpp-lakehouse-etl.service
-sudo systemctl enable vpp-lakehouse-etl
-sudo systemctl start vpp-lakehouse-etl
+# One pass over every dataset; exits non-zero if any dataset failed
+python -m lakehouse
 
-# Or run manually
-python lakehouse-etl.py
+# Scheduled instead of by hand (Kubernetes)
+kubectl apply -f infrastructure/k8s/ha/lakehouse-ingest-cronjob.yaml
 ```
+
+See `docs/LAKEHOUSE_ETL_DEPLOYMENT.md` for the S3/MinIO configuration and for what
+a `succeeded` run does and does not prove.
 
 ### Step 11: Run Tests
 

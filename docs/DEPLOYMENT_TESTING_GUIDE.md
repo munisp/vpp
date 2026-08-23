@@ -213,134 +213,113 @@ curl -X POST http://localhost:8080/realms/vpp-platform/protocol/openid-connect/l
 # Expected: 204 No Content
 ```
 
-## 3. Lakehouse ETL Tests
+## 3. Lakehouse Ingestion Tests
 
-### Test 3.1: ETL Service Status
+These replace the previous Kafka/Iceberg tests. The deployed job
+(`services/lakehouse`) extracts from PostgreSQL to Parquet in an object store; it
+does not consume Kafka, and there is no Iceberg catalog to inspect. Kafka reaches
+the lake through the `event_inbox` table, which the platform's own consumer writes
+transactionally and this job ingests like any other table.
 
-```bash
-# Check ETL service
-sudo systemctl status vpp-lakehouse-etl
-
-# Expected: active (running)
-```
-
-### Test 3.2: ETL Logs
+### Test 3.1: The job runs and reports its own outcome
 
 ```bash
-# View ETL logs
-sudo journalctl -u vpp-lakehouse-etl -n 50
+cd services/lakehouse
+python -m lakehouse --datasets telemetry --max-batches 1
+echo "exit status: $?"
 
-# Expected output should include:
-# Starting Lakehouse ETL pipeline...
-# Kafka consumer created, subscribed to 10 topics
-# Iceberg catalog loaded: vpp_lakehouse
+# Expected: exit status 0. A dataset with nothing new logs `empty`, which is not a
+# load. Any dataset failure makes the exit status non-zero.
 ```
 
-### Test 3.3: Kafka Consumer Group
+### Test 3.2: Runs are recorded, with the error behind a failure
 
 ```bash
-# Check consumer group
-docker exec -it nextgen_kafka kafka-consumer-groups \
-  --bootstrap-server localhost:9092 \
-  --describe \
-  --group lakehouse-etl
-
-# Expected: Consumer group with 0 lag on all partitions
+psql "$DATABASE_URL" -c "SELECT dataset, state, rows_written, bytes_written,
+                                object_key, error
+                           FROM lakehouse_runs ORDER BY id DESC LIMIT 10;"
 ```
 
-### Test 3.4: Iceberg Tables Creation
+Expected: one row per dataset attempted. A `succeeded` row **must** carry an
+`object_key` and an `object_digest` — the job records success only after reading the
+object back out of the store and comparing its SHA-256. A `failed` row carries the
+exact database or object-store error, and its dataset's watermark is unchanged.
 
-```python
-from pyiceberg.catalog import load_catalog
-
-catalog = load_catalog('vpp_lakehouse', warehouse='/tmp/iceberg-warehouse')
-
-# List tables
-tables = catalog.list_tables('vpp')
-print("Tables:", tables)
-
-# Expected tables:
-# - vpp.telemetry_raw
-# - vpp.trades_created
-# - vpp.trades_settled
-# - vpp.payments_initiated
-# - vpp.payments_completed
-# - vpp.payments_failed
-# - vpp.dr_events_created
-# - vpp.dr_events_started
-# - vpp.dr_events_completed
-# - vpp.dr_responses
-```
-
-### Test 3.5: Data Ingestion
-
-**Trigger events:**
+### Test 3.3: Ingestion is incremental and resumable
 
 ```bash
-# Create payment (triggers payment event)
-curl -X POST http://localhost:3000/api/trpc/paymentProcessing.initiatePayment \
-  -H "Content-Type: application/json" \
-  -H "Cookie: session=<your-session-cookie>" \
-  -d '{"invoiceId": 1, "gateway": "mpesa", "phoneNumber": "255712345678"}'
+psql "$DATABASE_URL" -c "SELECT dataset, watermark_at, watermark_id, rows_ingested
+                           FROM lakehouse_watermarks ORDER BY dataset;"
 
-# Wait 60 seconds for batch flush
-sleep 60
+# Run again with no new source rows
+python -m lakehouse --datasets telemetry --max-batches 1
 ```
 
-**Verify data in Iceberg:**
+Expected: the second run records `state='empty'` with no object, and the watermark
+is unchanged. Killing a run mid-flight leaves a `running` row and an unmoved
+watermark, so the next run re-reads the same rows rather than skipping them.
+
+### Test 3.4: The object exists where the run says it does
+
+```bash
+# S3 / MinIO
+aws --endpoint-url "$S3_ENDPOINT" s3 ls "s3://$LAKEHOUSE_BUCKET/$LAKEHOUSE_PREFIX/telemetry/" --recursive
+
+# Local store
+find "$LAKEHOUSE_LOCAL_PATH" -name '*.parquet' | head
+```
+
+Expected: an object at exactly the `object_key` from `lakehouse_runs`. Read it back
+and check the digest matches `object_digest`:
+
+```bash
+sha256sum <downloaded-file>
+```
+
+### Test 3.5: The Parquet is readable and carries no subscriber contact details
 
 ```python
-from pyiceberg.catalog import load_catalog
+import pyarrow.parquet as pq
 
-catalog = load_catalog('vpp_lakehouse', warehouse='/tmp/iceberg-warehouse')
-table = catalog.load_table('vpp.payments_initiated')
+table = pq.read_table('<downloaded-file>')
+print(table.num_rows, table.schema.names)
 
-# Query data
-df = table.scan().to_arrow().to_pandas()
-print(f"Total records: {len(df)}")
-print(df.head())
-
-# Expected: At least 1 record with payment details
+# Expected for the payments dataset: no `phoneNumber` and no `accountNumber`.
+# Those columns are excluded by the dataset projection, so they never leave
+# PostgreSQL.
 ```
 
-### Test 3.6: Schema Validation
+### Test 3.6: Concurrent runners do not double-extract
 
-```python
-# Check table schema
-table = catalog.load_table('vpp.payments_initiated')
-schema = table.schema()
-
-print("Schema fields:")
-for field in schema.fields:
-    print(f"  {field.name}: {field.field_type}")
-
-# Expected fields:
-# - payment_id: string
-# - user_id: long
-# - amount: double
-# - currency: string
-# - gateway: string
-# - phone_number: string
-# - timestamp: timestamp
+```bash
+python -m lakehouse --datasets telemetry & python -m lakehouse --datasets telemetry &
+wait
 ```
 
-### Test 3.7: Time Travel Query
+Expected: one runner ingests, the other skips the dataset — each dataset is claimed
+with a PostgreSQL advisory lock. Neither produces a duplicate object for the same
+watermark range.
 
-```python
-# Get table snapshots
-table = catalog.load_table('vpp.payments_initiated')
-snapshots = table.snapshots()
+### Test 3.7: The console reports the real state, not the configuration
 
-print("Snapshots:")
-for snapshot in snapshots:
-    print(f"  {snapshot.snapshot_id}: {snapshot.timestamp_ms}")
+Open `/admin/lakehouse` (admin only), or call `trpc lakehouse.status`.
 
-# Query historical data
-if len(snapshots) > 1:
-    old_snapshot = snapshots[-2]
-    df = table.scan(snapshot_id=old_snapshot.snapshot_id).to_arrow().to_pandas()
-    print(f"Records in snapshot {old_snapshot.snapshot_id}: {len(df)}")
+Expected: per-dataset `ingesting` / `stale` / `failing` / `never ingested`, the
+backlog counted against each source table (`unknown` when it cannot be counted, not
+zero), and the object key behind the newest successful run. A deployment where the
+CronJob was never applied reads `never ingested` — it does not read healthy.
+
+### Test 3.8: The test suite
+
+```bash
+./scripts/test-lakehouse-etl.sh
+
+# With a database, which adds the pipeline tests:
+LAKEHOUSE_TEST_DSN=postgres://vpp:vpp@127.0.0.1:5432/vpp_lake ./scripts/test-lakehouse-etl.sh
 ```
+
+Without `LAKEHOUSE_TEST_DSN` the PostgreSQL pipeline tests are skipped and the run
+says so; they are not reported as passed.
 
 ## 4. Integration Tests
 

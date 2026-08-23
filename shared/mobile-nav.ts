@@ -94,6 +94,13 @@ export const MOBILE_NAV_GROUPS: MobileNavGroup[] = [
         adminOnly: true,
         keywords: ['balance', 'double entry', 'reconciliation'],
       },
+      {
+        screen: 'Lakehouse',
+        label: 'Lakehouse',
+        icon: '🗄️',
+        adminOnly: true,
+        keywords: ['etl', 'ingestion', 'parquet', 'analytics', 'watermark'],
+      },
     ],
   },
 ];

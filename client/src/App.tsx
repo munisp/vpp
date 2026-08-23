@@ -69,6 +69,7 @@ import MatterLoads from "@/pages/MatterLoads";
 import DegradedOperation from "@/pages/DegradedOperation";
 import LedgerReconciliation from "@/pages/LedgerReconciliation";
 import EventStream from "@/pages/EventStream";
+import Lakehouse from "@/pages/Lakehouse";
 import LocationalFlexibility from "@/pages/LocationalFlexibility";
 import V2G from "@/pages/V2G";
 import Wallet from "@/pages/Wallet";
@@ -222,6 +223,11 @@ function Router() {
       <Route path="/admin/event-stream">
         <RouteShell adminOnly chrome={false}>
           <EventStream />
+        </RouteShell>
+      </Route>
+      <Route path="/admin/lakehouse">
+        <RouteShell adminOnly chrome={false}>
+          <Lakehouse />
         </RouteShell>
       </Route>
       <Route path="/admin/cache-monitoring">

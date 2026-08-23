@@ -41,6 +41,7 @@ import LocationalFlexibilityScreen from '../screens/LocationalFlexibilityScreen'
 import MatterLoadsScreen from '../screens/MatterLoadsScreen';
 import ServiceStatusScreen from '../screens/ServiceStatusScreen';
 import LedgerReconciliationScreen from '../screens/LedgerReconciliationScreen';
+import LakehouseScreen from '../screens/LakehouseScreen';
 
 const Stack = createNativeStackNavigator();
 const Tab = createBottomTabNavigator();
@@ -178,6 +179,7 @@ export default function AppNavigator() {
       <Stack.Screen name="MatterLoads" component={MatterLoadsScreen} />
       <Stack.Screen name="ServiceStatus" component={ServiceStatusScreen} />
       <Stack.Screen name="LedgerReconciliation" component={LedgerReconciliationScreen} />
+      <Stack.Screen name="Lakehouse" component={LakehouseScreen} />
           </>
         )}
       </Stack.Navigator>

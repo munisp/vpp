@@ -15,3 +15,4 @@ export { fleetTelemetryRouter } from './fleet-telemetry';
 export { locationalFlexibilityRouter } from './locational-flexibility';
 export { matterLoadsRouter } from './matter-loads';
 export { degradedOperationRouter } from './degraded-operation';
+export { digitalTwinRouter } from './digital-twin';

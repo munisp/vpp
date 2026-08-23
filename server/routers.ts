@@ -83,6 +83,7 @@ import {
   locationalFlexibilityRouter,
   matterLoadsRouter,
   degradedOperationRouter,
+  digitalTwinRouter,
 } from './routers/nextgen';
 
 // Start performance alerting
@@ -178,6 +179,7 @@ export const appRouter = router({
   locationalFlexibility: locationalFlexibilityRouter,
   matterLoads: matterLoadsRouter,
   degradedOperation: degradedOperationRouter,
+  digitalTwin: digitalTwinRouter,
   settlement: settlementRouter,
   edge: edgeRouter,
   carbon: carbonRouter,

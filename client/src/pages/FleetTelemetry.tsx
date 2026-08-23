@@ -12,9 +12,7 @@ import { useState } from "react";
 
 import { trpc } from "@/lib/trpc";
 import { useAuth } from "@/_core/hooks/useAuth";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
@@ -25,10 +23,16 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { toast } from "sonner";
 import { AlertTriangle, Info, RefreshCw } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
+import {
+  FreshnessBadge,
+  MetricTile,
+  PageHeader,
+  PanelCard,
+  ToneBadge,
+} from "@/components/ops";
 import {
   BUCKET_STATE_COPY,
   coverageVerdict,
@@ -37,37 +41,8 @@ import {
   formatFleetKwh,
   formatKwh,
   summariseSeries,
-  type CoverageTone,
   type FleetBucket,
 } from "@/lib/fleet-telemetry";
-
-const TONE_CLASS: Record<CoverageTone, string> = {
-  good: "bg-emerald-100 text-emerald-900 border-emerald-300",
-  warning: "bg-amber-100 text-amber-900 border-amber-300",
-  danger: "bg-red-100 text-red-900 border-red-300",
-  neutral: "bg-muted text-muted-foreground border-border",
-};
-
-function ToneBadge({
-  label,
-  tone,
-  meaning,
-}: {
-  label: string;
-  tone: CoverageTone;
-  meaning?: string;
-}) {
-  return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <Badge variant="outline" className={TONE_CLASS[tone]}>
-          {label}
-        </Badge>
-      </TooltipTrigger>
-      {meaning && <TooltipContent className="max-w-xs">{meaning}</TooltipContent>}
-    </Tooltip>
-  );
-}
 
 const BUCKET_MINUTES = 15;
 const BUCKETS = 24;
@@ -85,7 +60,11 @@ function FleetSeries() {
           bucketMinutes: BUCKET_MINUTES,
           buckets: BUCKETS,
         }
-      : { scopeType: "fleet" as const, bucketMinutes: BUCKET_MINUTES, buckets: BUCKETS },
+      : {
+          scopeType: "fleet" as const,
+          bucketMinutes: BUCKET_MINUTES,
+          buckets: BUCKETS,
+        },
     { refetchInterval: 60000 }
   );
 
@@ -116,12 +95,30 @@ function FleetSeries() {
 
   const buckets = (series.data?.buckets ?? []) as FleetBucket[];
   const summary = summariseSeries(buckets, series.data?.missingBuckets ?? 0);
+  // Open buckets are excluded: an unelapsed bucket would drag the trend toward
+  // zero and read as the fleet falling away.
+  const powerTrend = buckets
+    .filter(bucket => bucket.state !== "open")
+    .map(bucket => ({ value: bucket.meanNetPowerWatts }));
+  const latestCoverage = summary.latest
+    ? coverageVerdict(summary.latest)
+    : undefined;
+  const coverageTone =
+    summary.worstCapacityShare === null
+      ? "neutral"
+      : summary.worstCapacityShare >= 0.9
+        ? "good"
+        : summary.worstCapacityShare >= 0.6
+          ? "warning"
+          : "danger";
 
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-end gap-2">
         <div className="space-y-1">
-          <p className="text-xs text-muted-foreground">Region (blank = whole fleet)</p>
+          <p className="text-xs text-muted-foreground">
+            Region (blank = whole fleet)
+          </p>
           <Input
             value={region}
             onChange={event => setRegion(event.target.value)}
@@ -129,7 +126,11 @@ function FleetSeries() {
             className="w-48"
           />
         </div>
-        <Button size="sm" variant="outline" onClick={() => setAppliedRegion(region.trim())}>
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() => setAppliedRegion(region.trim())}
+        >
           Apply scope
         </Button>
         <Button
@@ -144,12 +145,18 @@ function FleetSeries() {
                     bucketMinutes: BUCKET_MINUTES,
                     buckets: 4,
                   }
-                : { scopeType: "fleet" as const, bucketMinutes: BUCKET_MINUTES, buckets: 4 }
+                : {
+                    scopeType: "fleet" as const,
+                    bucketMinutes: BUCKET_MINUTES,
+                    buckets: 4,
+                  }
             )
           }
           disabled={rollUp.isPending}
         >
-          <RefreshCw className={`mr-2 h-4 w-4 ${rollUp.isPending ? "animate-spin" : ""}`} />
+          <RefreshCw
+            className={`mr-2 h-4 w-4 ${rollUp.isPending ? "animate-spin" : ""}`}
+          />
           Recompute recent buckets
         </Button>
       </div>
@@ -158,9 +165,9 @@ function FleetSeries() {
         <div className="flex items-start gap-2 rounded border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">
           <AlertTriangle className="mt-0.5 h-4 w-4" />
           <span>
-            {summary.missingBuckets} of the last {BUCKETS} buckets have never been computed. That
-            is a gap in the rollup, not a quiet fleet — set FLEET_TELEMETRY_ROLLUP_MS or recompute
-            by hand.
+            {summary.missingBuckets} of the last {BUCKETS} buckets have never
+            been computed. That is a gap in the rollup, not a quiet fleet — set
+            FLEET_TELEMETRY_ROLLUP_MS or recompute by hand.
           </span>
         </div>
       )}
@@ -169,42 +176,76 @@ function FleetSeries() {
         <div className="flex items-start gap-2 text-sm text-muted-foreground">
           <Info className="mt-0.5 h-4 w-4" />
           <span>
-            No aggregate has been computed for this scope. Nothing is inferred from telemetry on
-            read, so the series stays empty until a rollup runs.
+            No aggregate has been computed for this scope. Nothing is inferred
+            from telemetry on read, so the series stays empty until a rollup
+            runs.
           </span>
         </div>
       ) : (
         <>
-          <div className="grid gap-3 sm:grid-cols-4">
-            <div>
-              <p className="text-xs text-muted-foreground">Latest closed power</p>
-              <p className="text-lg font-semibold">
-                {summary.latest ? formatFleetKw(summary.latest.meanNetPowerWatts) : "—"}
-              </p>
-              <p className="text-xs text-muted-foreground">
-                {summary.latest ? `${summary.latest.samples} telemetry rows` : ""}
-              </p>
-            </div>
-            <div>
-              <p className="text-xs text-muted-foreground">Worst measured coverage</p>
-              <p className="text-lg font-semibold">
-                {summary.worstCapacityShare === null
-                  ? "—"
-                  : `${(summary.worstCapacityShare * 100).toFixed(0)}%`}
-              </p>
-              <p className="text-xs text-muted-foreground">of rated capacity, closed buckets</p>
-            </div>
-            <div>
-              <p className="text-xs text-muted-foreground">Buckets with silence</p>
-              <p className="text-lg font-semibold">
-                {summary.bucketsWithSilence} / {buckets.length}
-              </p>
-            </div>
-            <div>
-              <p className="text-xs text-muted-foreground">Still filling</p>
-              <p className="text-lg font-semibold">{summary.openBuckets}</p>
-              <p className="text-xs text-muted-foreground">not evidence yet</p>
-            </div>
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            <MetricTile
+              label="Latest closed power"
+              value={
+                summary.latest
+                  ? formatFleetKw(summary.latest.meanNetPowerWatts)
+                  : null
+              }
+              tone={summary.latest ? "live" : "neutral"}
+              status={summary.latest ? latestCoverage : undefined}
+              evidence={
+                summary.latest ? (
+                  <>
+                    <FreshnessBadge
+                      asOf={summary.latest.bucketStartsAt}
+                      stalenessSeconds={BUCKET_MINUTES * 60 * 2}
+                    />
+                    <span className="text-muted-foreground">
+                      {summary.latest.samples} telemetry rows
+                    </span>
+                  </>
+                ) : (
+                  <span className="text-muted-foreground">
+                    no bucket has closed yet
+                  </span>
+                )
+              }
+              trend={{ points: powerTrend, tone: "live" }}
+            />
+            <MetricTile
+              label="Worst measured coverage"
+              value={
+                summary.worstCapacityShare === null
+                  ? null
+                  : `${(summary.worstCapacityShare * 100).toFixed(0)}%`
+              }
+              tone={coverageTone}
+              evidence={
+                <span className="text-muted-foreground">
+                  of rated capacity, across closed buckets
+                </span>
+              }
+            />
+            <MetricTile
+              label="Buckets with silence"
+              value={`${summary.bucketsWithSilence} / ${buckets.length}`}
+              tone={summary.bucketsWithSilence > 0 ? "warning" : "good"}
+              evidence={
+                <span className="text-muted-foreground">
+                  a silent asset shrinks the fleet, never the claim
+                </span>
+              }
+            />
+            <MetricTile
+              label="Still filling"
+              value={String(summary.openBuckets)}
+              tone={summary.openBuckets > 0 ? "neutral" : "good"}
+              evidence={
+                <span className="text-muted-foreground">
+                  an open bucket is not evidence yet
+                </span>
+              }
+            />
           </div>
 
           <Table>
@@ -228,7 +269,10 @@ function FleetSeries() {
                   <TableRow key={new Date(bucket.bucketStartsAt).toISOString()}>
                     <TableCell className="whitespace-nowrap">
                       {new Date(bucket.bucketStartsAt).toLocaleTimeString()}
-                      <span className="text-muted-foreground"> · {bucket.bucketMinutes}m</span>
+                      <span className="text-muted-foreground">
+                        {" "}
+                        · {bucket.bucketMinutes}m
+                      </span>
                     </TableCell>
                     <TableCell>
                       <ToneBadge {...stateCopy} />
@@ -271,42 +315,33 @@ export default function FleetTelemetry() {
 
   return (
     <DashboardLayout>
-      <TooltipProvider>
-        <div className="space-y-6">
-          <div>
-            <h1 className="text-2xl font-semibold">Rolling fleet telemetry</h1>
-            <p className="text-sm text-muted-foreground">
-              Aggregates in 15-minute buckets with the coverage behind each figure. Energy here is
-              integrated from telemetry samples, not read off a revenue meter — settlement uses the
-              metered paths, not this table.
-            </p>
-          </div>
+      <div>
+        <PageHeader
+          title="Rolling fleet telemetry"
+          description="Aggregates in 15-minute buckets, with the coverage behind each figure."
+          caveat="Energy here is integrated from telemetry samples, not read off a revenue meter — settlement uses the metered paths, not this table."
+        />
 
-          <Card>
-            <CardHeader className="pb-3">
-              <CardTitle className="text-base">Fleet and regional aggregates</CardTitle>
-              <CardDescription>
-                A regional aggregate covers the active members of the communities in that region;
-                assets outside every community appear only in the fleet figure.
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              {user?.role === "admin" ? (
-                <FleetSeries />
-              ) : (
-                <div className="flex items-start gap-2 text-sm text-muted-foreground">
-                  <Info className="mt-0.5 h-4 w-4" />
-                  <span>
-                    Fleet-wide and regional aggregates are an operator view: they describe every
-                    participant's consumption, so they are restricted to administrators. Your own
-                    community's rolling profile is available in the mobile app.
-                  </span>
-                </div>
-              )}
-            </CardContent>
-          </Card>
-        </div>
-      </TooltipProvider>
+        <PanelCard
+          title="Fleet and regional aggregates"
+          description="A regional aggregate covers the active members of the communities in that region; assets outside every community appear only in the fleet figure."
+          footer="Nothing on this page is inferred on read: a bucket the rollup never computed is reported missing rather than filled in."
+        >
+          {user?.role === "admin" ? (
+            <FleetSeries />
+          ) : (
+            <div className="text-muted-foreground flex items-start gap-2 text-sm">
+              <Info className="mt-0.5 h-4 w-4" />
+              <span>
+                Fleet-wide and regional aggregates are an operator view: they
+                describe every participant's consumption, so they are restricted
+                to administrators. Your own community's rolling profile is
+                available in the mobile app.
+              </span>
+            </div>
+          )}
+        </PanelCard>
+      </div>
     </DashboardLayout>
   );
 }

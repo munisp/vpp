@@ -18,7 +18,13 @@ import { trpc } from "@/lib/trpc";
 import { useAuth } from "@/_core/hooks/useAuth";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
@@ -29,9 +35,9 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { AlertTriangle, Info, RefreshCw } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
+import { MetricTile, PageHeader, PanelCard, ToneBadge } from "@/components/ops";
 import {
   OBSERVATION_COPY,
   capabilityCopy,
@@ -46,35 +52,7 @@ import {
   type CapabilityStatus,
   type DegradedAction,
   type DependencyPosture,
-  type StateTone,
 } from "@/lib/degraded-operation";
-
-const TONE_CLASS: Record<StateTone, string> = {
-  good: "bg-emerald-100 text-emerald-900 border-emerald-300",
-  warning: "bg-amber-100 text-amber-900 border-amber-300",
-  danger: "bg-red-100 text-red-900 border-red-300",
-  neutral: "bg-muted text-muted-foreground border-border",
-};
-
-function ToneBadge({ label, tone, meaning }: { label: string; tone: StateTone; meaning?: string }) {
-  const badge = (
-    <Badge variant="outline" className={TONE_CLASS[tone]}>
-      {label}
-    </Badge>
-  );
-  if (!meaning) return badge;
-  return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <span className="inline-flex cursor-help items-center gap-1">
-          {badge}
-          <Info className="h-3 w-3 text-muted-foreground" />
-        </span>
-      </TooltipTrigger>
-      <TooltipContent className="max-w-xs text-xs">{meaning}</TooltipContent>
-    </Tooltip>
-  );
-}
 
 function DependencyRow({ posture }: { posture: DependencyPosture }) {
   const copy = STATE_COPY[posture.state];
@@ -85,7 +63,9 @@ function DependencyRow({ posture }: { posture: DependencyPosture }) {
     <TableRow>
       <TableCell>
         <div className="font-medium">{dependencyLabel(posture.dependency)}</div>
-        <div className="font-mono text-xs text-muted-foreground">{posture.dependency}</div>
+        <div className="font-mono text-xs text-muted-foreground">
+          {posture.dependency}
+        </div>
       </TableCell>
       <TableCell>
         <ToneBadge label={copy.label} tone={copy.tone} meaning={copy.meaning} />
@@ -106,16 +86,25 @@ function DependencyRow({ posture }: { posture: DependencyPosture }) {
         {formatAge(ageSeconds(observation?.observedAt ?? null))}
         <div className="text-muted-foreground">
           {/* The bound, not a guess: past it, the observation stops supporting `up`. */}
-          treated as unobserved after {Math.round(posture.stalenessSeconds / 60)}m
+          treated as unobserved after{" "}
+          {Math.round(posture.stalenessSeconds / 60)}m
           {ratio !== null && ratio > 1 ? " — past it" : ""}
         </div>
       </TableCell>
-      <TableCell className="max-w-md text-xs text-muted-foreground">{posture.reason}</TableCell>
+      <TableCell className="max-w-md text-xs text-muted-foreground">
+        {posture.reason}
+      </TableCell>
     </TableRow>
   );
 }
 
-function ActionRow({ action, onReconciled }: { action: DegradedAction; onReconciled: () => void }) {
+function ActionRow({
+  action,
+  onReconciled,
+}: {
+  action: DegradedAction;
+  onReconciled: () => void;
+}) {
   const [note, setNote] = useState("");
   const reconcile = trpc.degradedOperation.reconcile.useMutation({
     onSuccess: () => {
@@ -128,7 +117,9 @@ function ActionRow({ action, onReconciled }: { action: DegradedAction; onReconci
     <TableRow>
       <TableCell>
         <div className="font-medium">{capabilityLabel(action.capability)}</div>
-        <div className="font-mono text-xs text-muted-foreground">{action.subject}</div>
+        <div className="font-mono text-xs text-muted-foreground">
+          {action.subject}
+        </div>
       </TableCell>
       <TableCell className="text-xs">
         <div className="flex flex-wrap gap-1">
@@ -157,7 +148,9 @@ function ActionRow({ action, onReconciled }: { action: DegradedAction; onReconci
             size="sm"
             variant="outline"
             disabled={note.trim().length < 10 || reconcile.isPending}
-            onClick={() => reconcile.mutate({ id: action.id, note: note.trim() })}
+            onClick={() =>
+              reconcile.mutate({ id: action.id, note: note.trim() })
+            }
           >
             Reconcile
           </Button>
@@ -174,8 +167,12 @@ export default function DegradedOperation() {
   const { user } = useAuth();
   const [refreshing, setRefreshing] = useState(false);
   const isAdmin = user?.role === "admin";
-  const posture = trpc.degradedOperation.posture.useQuery(undefined, { enabled: isAdmin });
-  const actions = trpc.degradedOperation.openActions.useQuery(undefined, { enabled: isAdmin });
+  const posture = trpc.degradedOperation.posture.useQuery(undefined, {
+    enabled: isAdmin,
+  });
+  const actions = trpc.degradedOperation.openActions.useQuery(undefined, {
+    enabled: isAdmin,
+  });
 
   if (!isAdmin) {
     return (
@@ -184,7 +181,8 @@ export default function DegradedOperation() {
           <CardHeader>
             <CardTitle>Platform dependencies</CardTitle>
             <CardDescription>
-              Dependency posture and degraded actions are visible to platform administrators only.
+              Dependency posture and degraded actions are visible to platform
+              administrators only.
             </CardDescription>
           </CardHeader>
         </Card>
@@ -192,24 +190,20 @@ export default function DegradedOperation() {
     );
   }
 
-  const dependencies = (posture.data?.dependencies ?? []) as DependencyPosture[];
+  const dependencies = (posture.data?.dependencies ??
+    []) as DependencyPosture[];
   const capabilities = (posture.data?.capabilities ?? []) as CapabilityStatus[];
   const openActions = (actions.data?.actions ?? []) as DegradedAction[];
   const summary = summarisePosture(dependencies, capabilities);
   const headline = postureHeadline(summary);
 
   return (
-    <TooltipProvider>
-      <DashboardLayout>
-        <div className="space-y-6">
-          <div className="flex flex-wrap items-start justify-between gap-4">
-            <div>
-              <h1 className="text-2xl font-semibold">Degraded operation</h1>
-              <p className="max-w-3xl text-sm text-muted-foreground">
-                Every state here comes from a real call the platform made while doing work, not from
-                a health probe a dependency can answer while every request to it fails.
-              </p>
-            </div>
+    <DashboardLayout>
+      <div className="space-y-6">
+        <PageHeader
+          title="Degraded operation"
+          description="Every state here comes from a real call the platform made while doing work, not from a health probe a dependency can answer while every request to it fails."
+          actions={
             <Button
               variant="outline"
               size="sm"
@@ -223,145 +217,189 @@ export default function DegradedOperation() {
                 }
               }}
             >
-              <RefreshCw className="mr-2 h-4 w-4" />
+              <RefreshCw
+                className={`mr-2 h-4 w-4 ${refreshing || posture.isFetching ? "animate-spin" : ""}`}
+              />
               Refresh
             </Button>
-          </div>
+          }
+          className="mb-0"
+        />
 
-          {posture.isError && (
-            <Card className="border-red-300">
-              <CardHeader>
-                <CardTitle className="flex items-center gap-2 text-base">
-                  <AlertTriangle className="h-4 w-4 text-red-600" />
-                  Posture could not be read
-                </CardTitle>
-                <CardDescription>
-                  {posture.error.message} — this is not an all-clear; nothing is known about the
-                  dependencies right now.
-                </CardDescription>
-              </CardHeader>
-            </Card>
-          )}
+        {posture.isError && (
+          <Card className="border-red-300">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2 text-base">
+                <AlertTriangle className="h-4 w-4 text-red-600" />
+                Posture could not be read
+              </CardTitle>
+              <CardDescription>
+                {posture.error.message} — this is not an all-clear; nothing is
+                known about the dependencies right now.
+              </CardDescription>
+            </CardHeader>
+          </Card>
+        )}
 
-          {posture.isLoading ? (
-            <Skeleton className="h-64 w-full" />
-          ) : (
-            <>
-              <Card className={headline.tone === "good" ? undefined : "border-amber-300"}>
-                <CardHeader className="pb-2">
-                  <CardDescription>Right now</CardDescription>
-                  <CardTitle className="text-xl">{headline.text}</CardTitle>
-                </CardHeader>
-                <CardContent className="text-xs text-muted-foreground">
-                  {summary.up} answering · {summary.unknown} unobserved · {summary.down} in outage.
-                  Guard mode <span className="font-mono">{posture.data?.guardMode}</span>
+        {posture.isLoading ? (
+          <Skeleton className="h-64 w-full" />
+        ) : (
+          <>
+            <PanelCard
+              title={headline.text}
+              description="Right now"
+              className={
+                headline.tone === "good" ? undefined : "border-amber-300"
+              }
+              footer={
+                <>
+                  Guard mode{" "}
+                  <span className="font-mono">{posture.data?.guardMode}</span>
                   {posture.data?.guardMode === "observe"
                     ? " — non-binding capabilities may run degraded; money and market paths are refused regardless."
                     : " — every refused capability throws."}
-                </CardContent>
-              </Card>
+                </>
+              }
+            >
+              <div className="grid gap-3 sm:grid-cols-3">
+                <MetricTile
+                  label="Answering"
+                  value={String(summary.up)}
+                  unit="dependencies"
+                  tone={summary.up > 0 ? "good" : "neutral"}
+                  evidence={
+                    <span className="text-muted-foreground">
+                      a recent call to each succeeded
+                    </span>
+                  }
+                />
+                <MetricTile
+                  label="Unobserved"
+                  value={String(summary.unknown)}
+                  unit="dependencies"
+                  tone={summary.unknown > 0 ? "warning" : "good"}
+                  evidence={
+                    <span className="text-muted-foreground">
+                      blocks the same paths an outage does
+                    </span>
+                  }
+                />
+                <MetricTile
+                  label="In outage"
+                  value={String(summary.down)}
+                  unit="dependencies"
+                  tone={summary.down > 0 ? "danger" : "good"}
+                  evidence={
+                    <span className="text-muted-foreground">
+                      consecutive failures recorded
+                    </span>
+                  }
+                />
+              </div>
+            </PanelCard>
 
-              <Card>
-                <CardHeader>
-                  <CardTitle className="text-base">What the platform will and will not do</CardTitle>
-                  <CardDescription>
-                    A refused capability is not a failure to display; it is the platform declining to
-                    produce a result that would look like the real thing.
-                  </CardDescription>
-                </CardHeader>
-                <CardContent className="grid gap-3 sm:grid-cols-2">
-                  {capabilities.map(capability => {
-                    const copy = capabilityCopy(capability);
-                    return (
-                      <div key={capability.capability} className="rounded-md border p-3">
-                        <div className="flex items-center justify-between gap-2">
-                          <span className="font-medium">{capabilityLabel(capability.capability)}</span>
-                          <ToneBadge label={copy.label} tone={copy.tone} meaning={copy.meaning} />
-                        </div>
-                        <p className="mt-1 text-xs text-muted-foreground">{capability.reason}</p>
-                        {capability.evidenceLimit && (
-                          <p className="mt-1 text-xs text-amber-700">{capability.evidenceLimit}</p>
-                        )}
-                      </div>
-                    );
-                  })}
-                </CardContent>
-              </Card>
-
-              <Card>
-                <CardHeader>
-                  <CardTitle className="text-base">Dependencies</CardTitle>
-                  <CardDescription>
-                    An unobserved dependency blocks the same paths an outage does. An outage opens
-                    after consecutive failures and closes only when a call succeeds.
-                  </CardDescription>
-                </CardHeader>
-                <CardContent>
-                  <Table>
-                    <TableHeader>
-                      <TableRow>
-                        <TableHead>Dependency</TableHead>
-                        <TableHead>State</TableHead>
-                        <TableHead>Last call</TableHead>
-                        <TableHead>Observed</TableHead>
-                        <TableHead>Why</TableHead>
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {dependencies.map(dependency => (
-                        <DependencyRow key={dependency.dependency} posture={dependency} />
-                      ))}
-                    </TableBody>
-                  </Table>
-                </CardContent>
-              </Card>
-
-              <Card className={openActions.length > 0 ? "border-amber-300" : undefined}>
-                <CardHeader>
-                  <CardTitle className="text-base">
-                    Actions taken without evidence ({openActions.length})
-                  </CardTitle>
-                  <CardDescription>
-                    Each row is something the platform did while it could not confirm the outcome.
-                    Reconciling one requires writing down what resolved it.
-                  </CardDescription>
-                </CardHeader>
-                <CardContent>
-                  {openActions.length === 0 ? (
-                    <p className="text-sm text-muted-foreground">
-                      Nothing open. This means no degraded action is outstanding — not that
-                      dependencies are healthy; that is the table above.
+            <PanelCard
+              title="What the platform will and will not do"
+              description="A refused capability is not a failure to display; it is the platform declining to produce a result that would look like the real thing."
+              bodyClassName="grid gap-3 sm:grid-cols-2"
+            >
+              {capabilities.map(capability => {
+                const copy = capabilityCopy(capability);
+                return (
+                  <div
+                    key={capability.capability}
+                    className="bg-muted/30 rounded-lg border p-3"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-sm font-medium">
+                        {capabilityLabel(capability.capability)}
+                      </span>
+                      <ToneBadge
+                        label={copy.label}
+                        tone={copy.tone}
+                        meaning={copy.meaning}
+                      />
+                    </div>
+                    <p className="text-muted-foreground mt-1.5 text-xs leading-relaxed">
+                      {capability.reason}
                     </p>
-                  ) : (
-                    <Table>
-                      <TableHeader>
-                        <TableRow>
-                          <TableHead>Capability</TableHead>
-                          <TableHead>Unavailable</TableHead>
-                          <TableHead>What is not known</TableHead>
-                          <TableHead>Acted</TableHead>
-                          <TableHead>Reconcile</TableHead>
-                        </TableRow>
-                      </TableHeader>
-                      <TableBody>
-                        {openActions.map(action => (
-                          <ActionRow
-                            key={action.id}
-                            action={action}
-                            onReconciled={() => {
-                              void actions.refetch();
-                            }}
-                          />
-                        ))}
-                      </TableBody>
-                    </Table>
-                  )}
-                </CardContent>
-              </Card>
-            </>
-          )}
-        </div>
-      </DashboardLayout>
-    </TooltipProvider>
+                    {capability.evidenceLimit && (
+                      <p className="mt-1 text-xs leading-relaxed text-amber-700 dark:text-amber-300">
+                        {capability.evidenceLimit}
+                      </p>
+                    )}
+                  </div>
+                );
+              })}
+            </PanelCard>
+
+            <PanelCard
+              title="Dependencies"
+              description="An unobserved dependency blocks the same paths an outage does. An outage opens after consecutive failures and closes only when a call succeeds."
+              bodyClassName="px-0 py-0 overflow-x-auto"
+            >
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Dependency</TableHead>
+                    <TableHead>State</TableHead>
+                    <TableHead>Last call</TableHead>
+                    <TableHead>Observed</TableHead>
+                    <TableHead>Why</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {dependencies.map(dependency => (
+                    <DependencyRow
+                      key={dependency.dependency}
+                      posture={dependency}
+                    />
+                  ))}
+                </TableBody>
+              </Table>
+            </PanelCard>
+
+            <PanelCard
+              title={`Actions taken without evidence (${openActions.length})`}
+              description="Each row is something the platform did while it could not confirm the outcome. Reconciling one requires writing down what resolved it."
+              className={
+                openActions.length > 0 ? "border-amber-300" : undefined
+              }
+              bodyClassName="overflow-x-auto"
+            >
+              {openActions.length === 0 ? (
+                <p className="text-sm text-muted-foreground">
+                  Nothing open. This means no degraded action is outstanding —
+                  not that dependencies are healthy; that is the table above.
+                </p>
+              ) : (
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Capability</TableHead>
+                      <TableHead>Unavailable</TableHead>
+                      <TableHead>What is not known</TableHead>
+                      <TableHead>Acted</TableHead>
+                      <TableHead>Reconcile</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {openActions.map(action => (
+                      <ActionRow
+                        key={action.id}
+                        action={action}
+                        onReconciled={() => {
+                          void actions.refetch();
+                        }}
+                      />
+                    ))}
+                  </TableBody>
+                </Table>
+              )}
+            </PanelCard>
+          </>
+        )}
+      </div>
+    </DashboardLayout>
   );
 }

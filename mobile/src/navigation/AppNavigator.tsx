@@ -36,6 +36,7 @@ import ControlWindowsScreen from '../screens/ControlWindowsScreen';
 import ForecastAccuracyScreen from '../screens/ForecastAccuracyScreen';
 import PriceSignalsScreen from '../screens/PriceSignalsScreen';
 import CommunityTelemetryScreen from '../screens/CommunityTelemetryScreen';
+import DigitalTwinScreen from '../screens/DigitalTwinScreen';
 import LocationalFlexibilityScreen from '../screens/LocationalFlexibilityScreen';
 import MatterLoadsScreen from '../screens/MatterLoadsScreen';
 import ServiceStatusScreen from '../screens/ServiceStatusScreen';
@@ -171,6 +172,7 @@ export default function AppNavigator() {
       <Stack.Screen name="ForecastAccuracy" component={ForecastAccuracyScreen} />
       <Stack.Screen name="PriceSignals" component={PriceSignalsScreen} />
       <Stack.Screen name="CommunityTelemetry" component={CommunityTelemetryScreen} />
+      <Stack.Screen name="DigitalTwin" component={DigitalTwinScreen} />
       <Stack.Screen name="LocationalFlexibility" component={LocationalFlexibilityScreen} />
       <Stack.Screen name="MatterLoads" component={MatterLoadsScreen} />
       <Stack.Screen name="ServiceStatus" component={ServiceStatusScreen} />

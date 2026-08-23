@@ -53,7 +53,9 @@ import {
   Coins,
   MapPin,
   House,
-  HeartPulse
+  HeartPulse,
+  Radio,
+  Network
 } from "lucide-react";
 import { CSSProperties, useEffect, useRef, useState } from "react";
 import { useLocation } from "wouter";
@@ -71,6 +73,7 @@ const getMenuSections = (userRole?: string): MenuSection[] => [
       { icon: LayoutDashboard, label: "Dashboard", path: "/" },
       { icon: Zap, label: "My Assets", path: "/assets" },
       { icon: Activity, label: "Monitoring", path: "/monitoring" },
+      { icon: Network, label: "Digital Twin", path: "/digital-twin" },
       { icon: TrendingUp, label: "Trading", path: "/trading" },
       { icon: Zap, label: "Energy Insights", path: "/energy-insights" },
       { icon: Receipt, label: "Billing", path: "/billing" },
@@ -109,6 +112,9 @@ const getMenuSections = (userRole?: string): MenuSection[] => [
     label: "Grid Ops",
     items: [
       { icon: SlidersHorizontal, label: "Control Windows", path: "/grid/control-windows" },
+      ...(userRole === 'admin'
+        ? [{ icon: Radio, label: "Operations Wall", path: "/grid/operations-wall" }]
+        : []),
       { icon: AlertTriangle, label: "Anomalies", path: "/grid/anomalies" },
       { icon: CloudSun, label: "DR Forecast", path: "/grid/dr-forecast" },
       { icon: Target, label: "Forecast Accuracy", path: "/grid/forecast-accuracy" },

@@ -62,6 +62,8 @@ import ControlWindows from "@/pages/ControlWindows";
 import ForecastAccuracy from "@/pages/ForecastAccuracy";
 import PriceSignals from "@/pages/PriceSignals";
 import FleetTelemetry from "@/pages/FleetTelemetry";
+import DigitalTwin from "@/pages/DigitalTwin";
+import OperationsWall from "@/pages/OperationsWall";
 import MatterLoads from "@/pages/MatterLoads";
 import DegradedOperation from "@/pages/DegradedOperation";
 import LocationalFlexibility from "@/pages/LocationalFlexibility";
@@ -134,6 +136,8 @@ function Router() {
       <Route path="/grid/forecast-accuracy" component={ForecastAccuracy} />
       <Route path="/grid/price-signals" component={PriceSignals} />
       <Route path="/grid/fleet-telemetry" component={FleetTelemetry} />
+      <Route path="/digital-twin" component={DigitalTwin} />
+      <Route path="/grid/operations-wall" component={OperationsWall} />
       <Route path="/grid/matter-loads" component={MatterLoads} />
       <Route path="/grid/degraded-operation" component={DegradedOperation} />
       <Route path="/grid/locational-flexibility" component={LocationalFlexibility} />

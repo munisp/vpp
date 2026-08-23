@@ -44,6 +44,7 @@ const PAY_FOR_MATCH_CODES: Record<string, TRPCError['code']> = {
   GATEWAY_REFUSED: 'BAD_GATEWAY',
   ALREADY_PAID: 'CONFLICT',
   PAYMENT_IN_FLIGHT: 'CONFLICT',
+  RESERVATION_RACE_LOST: 'CONFLICT',
 };
 
 function payForMatchCode(code: string): TRPCError['code'] {

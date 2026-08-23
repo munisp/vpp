@@ -223,7 +223,12 @@ export async function startTradePayment(input: StartTradePaymentInput): Promise<
       );
     }
     if (live) return alreadyRequested(live);
-    throw error;
+    // The winner released its reservation between the failed insert and this
+    // read, so no charge is in flight and reserving again would succeed.
+    throw new P2pSettlementError(
+      'RESERVATION_RACE_LOST',
+      'Another payment attempt for this purchase was being resolved. No payment was raised; try again.'
+    );
   }
 
   let response: Awaited<ReturnType<typeof PaymentGatewayManager.initiatePayment>>;

@@ -219,6 +219,24 @@ describe('startTradePayment reserves before it charges', () => {
     expect(result.checkoutRequestId).toBe('CHECKOUT-1');
   });
 
+  it('asks the buyer to retry when the winner released its reservation', async () => {
+    // The winning attempt was refused by the provider and released its row, so
+    // no charge is in flight: the loser must get a retryable refusal, not the
+    // raw unique violation.
+    const store: Store = { trade: tradeRow(), payments: [] };
+    mockDb(store, recorder, { insertError: uniqueViolation });
+    const initiate = mockGateway(recorder, {
+      configured: true,
+      initiate: () => ({ success: true, transactionId: 'SECOND-CHARGE' }),
+    });
+    const { startTradePayment } = await import('./services/p2p-settlement');
+
+    await expect(startTradePayment(input)).rejects.toMatchObject({
+      code: 'RESERVATION_RACE_LOST',
+    });
+    expect(initiate).not.toHaveBeenCalled();
+  });
+
   it('refuses a trade a completed payment already settled', async () => {
     const store: Store = {
       trade: tradeRow(),

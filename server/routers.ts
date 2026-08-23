@@ -85,6 +85,7 @@ import {
   degradedOperationRouter,
   digitalTwinRouter,
   ledgerRouter,
+  eventStreamRouter,
 } from './routers/nextgen';
 
 // Start performance alerting
@@ -182,6 +183,7 @@ export const appRouter = router({
   degradedOperation: degradedOperationRouter,
   digitalTwin: digitalTwinRouter,
   ledger: ledgerRouter,
+  eventStream: eventStreamRouter,
   settlement: settlementRouter,
   edge: edgeRouter,
   carbon: carbonRouter,

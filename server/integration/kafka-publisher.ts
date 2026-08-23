@@ -158,6 +158,21 @@ export class KafkaEventPublisher {
     }
   }
 
+  /**
+   * Publish one already-composed record, for the outbox relay.
+   *
+   * Every other method here composes an event and sends it inline, which is what
+   * lost events when the broker was away. The relay owns durability, so it needs
+   * the raw send and nothing else: it throws on failure, and the caller decides
+   * whether that is a retry or a dead letter.
+   */
+  async publishRecord(
+    topic: string,
+    message: { key?: string | null; value: unknown; headers?: Record<string, string> }
+  ): Promise<void> {
+    await this.publish(topic, [message]);
+  }
+
   // Telemetry events
   async publishTelemetry(data: TelemetryEvent): Promise<void> {
     await this.publish(KAFKA_TOPICS.TELEMETRY_RAW, [{

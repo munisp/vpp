@@ -20,7 +20,7 @@ documentation claims:
 | 2 | TigerBeetle | **deployment_only** (code removed, fails loudly) | yes |
 | 3 | Redis | **wired** (cache + Keycloak token cache) | no, today |
 | 4 | Mojaloop | **absent** | yes — this is the missing payout provider |
-| 5 | Kafka | **wired** (publish-only, no consumer in-repo) | partly — settlement events |
+| 5 | Kafka | **integrated** (transactional outbox + inbox consumer; broker interop unproven) | partly — settlement events |
 | 6 | APISIX | **deployment_only** | yes — it is the auth/rate-limit edge in the manifests |
 | 7 | Keycloak | **client_implemented**, unused | yes — identity |
 | 8 | open-appsec | **deployment_only** | no |
@@ -44,8 +44,10 @@ validated against a live server repeatedly since (`0000_postgres_baseline.sql`, 
 Robustness gaps found and worth fixing:
 - **Pool exhaustion is not surfaced as unavailability.** Fixed for the twin in #35, but the general
   pattern (a backend termination taking the process down) should be a single pool-level policy.
-- **No statement timeout, no `idle_in_transaction_session_timeout`** — a stuck settlement transaction
-  can hold row locks indefinitely.
+- ~~**No statement timeout, no `idle_in_transaction_session_timeout`**~~ **Fixed.** Every session is
+  opened with `statement_timeout=30s` and `idle_in_transaction_session_timeout=60s`
+  (`PG_STATEMENT_TIMEOUT_MS` / `PG_IDLE_TRANSACTION_TIMEOUT_MS` override), so a stuck transaction
+  releases its row locks instead of blocking every writer behind it.
 - **No read/write split and no explicit isolation level** on the settlement chain append; it relies on
   a unique constraint plus retry (which #37 fixed to actually work).
 - Raw SQL must double-quote inherited camelCase identifiers; that is a standing footgun with no lint.
@@ -83,15 +85,36 @@ payout provider** (`payout_status = unavailable_no_provider`), which is the one 
 settlement from ever reaching `complete`. Mojaloop (or a real mobile-money disbursement API) is the
 missing half of the fund flow.
 
-### 5. Kafka — wired, publish-only
-`kafkajs` producer with Prometheus metrics, publishing ~30 topics from real service paths
-(`settlement-ledger.createEvent` publishes synchronously). Gaps:
-- **No consumer exists in this repo.** Every "publish to Kafka for lakehouse analytics" call site
-  writes to a topic nobody reads (the Iceberg ETL script is the intended consumer but is not deployed).
-- `settlement_events` publishing is synchronous with KafkaJS retries, so with no broker every ledger
-  event costs ~30 s. That is a latency landmine on money paths.
-- No outbox: a publish failure after the DB commit loses the event silently.
-- No schema registry; every payload is ad-hoc JSON.
+### 5. Kafka — integrated via a transactional outbox (broker interop still unproven)
+`kafkajs` producer with Prometheus metrics, plus (since the outbox layer) an `event_outbox` /
+`event_inbox` / `event_dead_letters` set of tables, a relay, an inbox consumer and an admin surface at
+`/admin/event-stream`.
+
+What is now true and tested against live PostgreSQL (`server/event-stream.test.ts`):
+- Every producer records its event **in the transaction that writes the fact** —
+  `settlement-ledger.createEvent`, both payment-workflow activities, payment initiation, and trade
+  creation/settlement — so a rolled-back write takes its event with it, and a committed write cannot
+  lose one. `enqueueEventStandalone` remains for facts this process did not write; nothing uses it.
+- Nothing is marked `published` before the broker acknowledges the record; a refusal leaves a
+  `pending` row carrying the broker's own error, retried with 2s→15min backoff.
+- After `MAX_PUBLISH_ATTEMPTS` the event is held as `undeliverable` with a dead letter for an
+  operator — kept with its payload, never dropped — and can be requeued once the cause is fixed.
+- Two relays run concurrently without publishing each other's events (`FOR UPDATE SKIP LOCKED`
+  claim with a 60s lease), so this is safe in a multi-replica deployment.
+- Delivery is at-least-once and the consumer is idempotent: unique `(topic, event_key)` collapses a
+  redelivery, and an unreadable body becomes a `consume` dead letter rather than a silent drop.
+- Every record carries its contract in the payload and headers (`schema`, `schema_version`), which is
+  a documented envelope rather than a schema registry.
+- Settlement no longer publishes synchronously, so a missing broker costs no latency on a money path.
+
+What is still **not** proven or done:
+- No message has been through a real Kafka broker in this work; the relay and consumer are proven
+  against live PostgreSQL with the publish boundary injected. Broker interop needs a cluster.
+- The relay and the consumer are both **opt-in** (`EVENT_OUTBOX_RELAY_MS`, `EVENT_CONSUMER_TOPICS`).
+  Unset, the platform records events and publishes nothing — which the boot log, the health surface and
+  the admin page all say out loud, but it is a deployment step, not a default.
+- Still no schema registry, and the lakehouse ETL is still not the consumer: consumed events land in
+  `event_inbox` and nothing derives anything from them yet.
 
 ### 6. APISIX — deployment_only
 `infrastructure/apisix-config.yaml` + `apisix-ha.yaml` define routes, JWT auth and rate limits at the
@@ -144,11 +167,13 @@ substrate for the ML/Ollama work, so it needs to become real first.
 
 1. **TigerBeetle double-entry ledger** (money correctness) + reconciliation against `settlement_events`.
 2. **Mojaloop / real payout provider** — closes the fund-flow gap that blocks `settlement complete`.
-3. **Kafka outbox + a real consumer**, and make settlement publishing asynchronous.
+3. ~~**Kafka outbox + a real consumer**, and make settlement publishing asynchronous.~~ **Done** —
+   see §5; broker interop and the lakehouse consumer remain.
 4. **Lakehouse for real** — scheduled ETL, Iceberg tables with provenance, a read path.
 5. **Ollama diagnostics on the lakehouse** (advisory only; cannot move money or dispatch).
 6. **Keycloak wired** (with the `exp`/plaintext-token fixes) and **Permify** for the relation model.
-7. **Redis-backed rate limiting**, Postgres timeouts, APISIX header trust, and dependency observations
+7. ~~**Redis-backed rate limiting**~~ (done), ~~Postgres timeouts~~ (done: `statement_timeout` 30s and
+   `idle_in_transaction_session_timeout` 60s on every session, overridable), APISIX header trust, and dependency observations
    for Redis/Kafka/Postgres so their outages are visible to the degraded-operation layer.
 8. **OpenSearch** for audit/settlement search; **Dapr** either used or removed; **Fluvio** proven
    against a cluster.

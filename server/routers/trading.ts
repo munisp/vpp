@@ -4,7 +4,8 @@ import { TRPCError } from '@trpc/server';
 import * as db from '../db';
 import { trades, marketPrices } from '../../drizzle/schema';
 import { and, desc, eq, inArray, sql } from 'drizzle-orm';
-import { kafkaPublisher } from '../integration/kafka-publisher';
+import { KAFKA_TOPICS } from '../integration/kafka-config';
+import { enqueueEvent } from '../services/events/outbox';
 import { temporalClient } from '../integration/temporal-client';
 import { sendPushNotification } from '../_core/sendNotification';
 import { createAlert } from '../db';
@@ -46,32 +47,61 @@ export const tradingRouter = router({
       try {
         const totalAmount = Math.floor((input.energy * input.price) / 1000);
 
-        const trade = await db.createTrade({
-          userId: ctx.user.id,
-          tradeType: input.tradeType,
-          tradingMode: input.tradingMode,
-          energy: input.energy,
-          price: input.price,
-          totalAmount,
-          timestamp: new Date(),
-          status: 'pending',
-          counterpartyId: input.counterpartyId,
+        const conn = await db.getDb();
+        if (!conn) {
+          throw new TRPCError({
+            code: 'INTERNAL_SERVER_ERROR',
+            message: 'Database not available',
+          });
+        }
+
+        // The trade row and its stream event are written together, so the trade
+        // cannot exist without the event that announces it and vice versa. The
+        // event is published from the outbox afterwards, so a broker outage
+        // delays it rather than deciding whether the trade happened.
+        const tradeId = await conn.transaction(async tx => {
+          const [row] = await tx
+            .insert(trades)
+            .values({
+              userId: ctx.user.id,
+              tradeType: input.tradeType,
+              tradingMode: input.tradingMode,
+              energy: input.energy,
+              price: input.price,
+              totalAmount,
+              timestamp: new Date(),
+              status: 'pending',
+              counterpartyId: input.counterpartyId,
+            })
+            .returning({ id: trades.id });
+
+          const id = Number(row.id);
+          await enqueueEvent(tx, {
+            topic: KAFKA_TOPICS.TRADES_CREATED,
+            eventKey: `trades.created:${id}`,
+            partitionKey: id.toString(),
+            payload: {
+              event_id: `trades.created:${id}`,
+              source: 'trading',
+              tradeId: id.toString(),
+              userId: ctx.user.id.toString(),
+              type: input.tradeType.includes('sell') || input.tradeType === 'export' ? 'sell' : 'buy',
+              quantity: input.energy,
+              price: input.price,
+              timestamp: new Date().toISOString(),
+              status: 'pending',
+            },
+          });
+
+          return id;
         });
 
-        // Publish trade created event to Kafka
-        try {
-          await kafkaPublisher.publishTradeCreated({
-            tradeId: trade.id.toString(),
-            userId: ctx.user.id.toString(),
-            type: input.tradeType.includes('sell') || input.tradeType === 'export' ? 'sell' : 'buy',
-            quantity: input.energy,
-            price: input.price,
-            timestamp: new Date(),
-            status: 'pending',
+        const trade = await db.getTradeById(tradeId);
+        if (!trade) {
+          throw new TRPCError({
+            code: 'INTERNAL_SERVER_ERROR',
+            message: 'Trade was written but could not be read back.',
           });
-        } catch (kafkaError) {
-          console.error('[Trading] Failed to publish trade created event:', kafkaError);
-          // Continue even if Kafka publish fails (graceful degradation)
         }
 
         // Start Temporal workflow for trade execution
@@ -155,11 +185,44 @@ export const tradingRouter = router({
           });
         }
 
-        const transitioned = await db.updateTradeStatus(
-          input.tradeId,
-          input.status,
-          trade.status
-        );
+        const conn = await db.getDb();
+        if (!conn) {
+          throw new TRPCError({
+            code: 'INTERNAL_SERVER_ERROR',
+            message: 'Database not available',
+          });
+        }
+
+        // The settlement event belongs to the transition that caused it, so both
+        // are one write: whoever wins the conditional update owns the event, and
+        // a rolled-back transition takes its event with it.
+        const transitioned = await conn.transaction(async tx => {
+          const result = await tx
+            .update(trades)
+            .set({ status: input.status })
+            .where(and(eq(trades.id, input.tradeId), eq(trades.status, trade.status)));
+
+          if ((result.rowCount ?? 0) === 0) return false;
+
+          if (input.status === 'executed') {
+            await enqueueEvent(tx, {
+              topic: KAFKA_TOPICS.TRADES_SETTLED,
+              // One settlement per trade, so a repeated execution enqueues once.
+              eventKey: `trades.settled:${input.tradeId}`,
+              partitionKey: input.tradeId.toString(),
+              payload: {
+                event_id: `trades.settled:${input.tradeId}`,
+                source: 'trading',
+                tradeId: input.tradeId.toString(),
+                settledAt: new Date().toISOString(),
+                finalPrice: trade.price,
+                finalQuantity: trade.energy,
+              },
+            });
+          }
+
+          return true;
+        });
 
         if (!transitioned) {
           throw new TRPCError({
@@ -212,19 +275,6 @@ export const tradingRouter = router({
               subject: '✅ Trade Executed Successfully',
               html: emailHtml,
             });
-          }
-
-          // Publish trade status update event to Kafka
-          try {
-            await kafkaPublisher.publishTradeSettled({
-              tradeId: input.tradeId.toString(),
-              settledAt: new Date(),
-              finalPrice: trade.price,
-              finalQuantity: trade.energy,
-            });
-          } catch (kafkaError) {
-            console.error('[Trading] Failed to publish trade settled event:', kafkaError);
-            // Continue even if Kafka publish fails
           }
 
           // Create audit log for executed trade

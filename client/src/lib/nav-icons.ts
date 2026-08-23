@@ -108,6 +108,7 @@ export const NAV_ICONS: Record<string, LucideIcon> = {
   '/admin/payment-credentials': CreditCard,
   '/admin/reconciliation': Receipt,
   '/admin/ledger': Scale,
+  '/admin/event-stream': Radio,
   '/admin/webhook-config': Globe,
   '/admin/analytics': BarChart3,
   '/admin/analytics-dashboard': BarChart3,

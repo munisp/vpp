@@ -20,7 +20,10 @@ pub struct Config {
     /// poller growing without limit on a field gateway.
     #[serde(default = "default_spool_max_readings")]
     pub spool_max_readings: usize,
-    /// Readings sent per delivery attempt, including replayed ones.
+    /// Readings sent per delivery attempt, including replayed ones. A batch
+    /// overshoots this rather than cut through an instant: the platform groups
+    /// registers into one sample per device per instant within a request, so a
+    /// split instant would be stored as two half-populated rows.
     #[serde(default = "default_publish_batch_size")]
     pub publish_batch_size: usize,
     #[serde(default)]

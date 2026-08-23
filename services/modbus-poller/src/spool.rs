@@ -11,7 +11,7 @@
 //! there is a hole in the meter history; a spool that silently overwrote itself
 //! would leave a settlement gap that looks like a quiet device.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 
 use crate::platform::Reading;
 
@@ -63,12 +63,30 @@ impl Spool {
         dropped
     }
 
-    /// Removes up to `max` of the oldest readings for a delivery attempt. They
+    /// Removes the oldest readings for a delivery attempt, `max` of them plus
+    /// however many more belong to an instant the batch already carries. They
     /// are only truly gone once the platform has accepted them, so a failed
     /// attempt must hand them back through [`Spool::requeue`].
+    ///
+    /// The overshoot is deliberate: the platform groups readings into one
+    /// telemetry sample per device per instant *within a request*, so cutting a
+    /// batch mid-instant stores that instant twice, each row holding only the
+    /// registers that happened to land in its request. An instant therefore
+    /// leaves whole even when it is larger than `max`.
     pub fn take(&mut self, max: usize) -> Vec<Reading> {
         let count = max.min(self.queue.len());
-        self.queue.drain(..count).collect()
+        let mut batch: Vec<Reading> = self.queue.drain(..count).collect();
+        let instants: HashSet<(String, i64)> = batch
+            .iter()
+            .map(|reading| (reading.device_id.clone(), reading.timestamp_ms))
+            .collect();
+        while let Some(next) = self.queue.front() {
+            if !instants.contains(&(next.device_id.clone(), next.timestamp_ms)) {
+                break;
+            }
+            batch.push(self.queue.pop_front().expect("front was just observed"));
+        }
+        batch
     }
 
     /// Returns readings a failed delivery still owns to the front of the spool,
@@ -161,6 +179,58 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![1, 2, 3, 4]
         );
+    }
+
+    fn register(device_id: &str, name: &str, timestamp_ms: i64) -> Reading {
+        Reading {
+            device_id: device_id.to_string(),
+            name: name.to_string(),
+            ..reading(timestamp_ms)
+        }
+    }
+
+    #[test]
+    fn never_cuts_a_batch_through_the_middle_of_an_instant() {
+        // The platform groups registers into one sample per device per instant
+        // within a request, so splitting an instant across two requests stores
+        // it as two half-populated rows.
+        let mut spool = Spool::new(10);
+        spool.push(vec![
+            register("meter-1", "active_power", 1),
+            register("meter-1", "total_energy", 1),
+            register("meter-1", "active_power", 2),
+            register("meter-1", "total_energy", 2),
+        ]);
+
+        let batch = spool.take(1);
+        assert_eq!(
+            batch
+                .iter()
+                .map(|r| (r.timestamp_ms, r.name.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(1, "active_power"), (1, "total_energy")]
+        );
+        // …and it stops at the instant boundary rather than draining the spool.
+        assert_eq!(spool.len(), 2);
+    }
+
+    #[test]
+    fn keeps_a_shared_instant_of_different_devices_separable() {
+        let mut spool = Spool::new(10);
+        spool.push(vec![
+            register("meter-1", "active_power", 1),
+            register("meter-2", "active_power", 1),
+        ]);
+        // Different devices are different samples, so the cut is legitimate.
+        assert_eq!(
+            spool
+                .take(1)
+                .iter()
+                .map(|r| r.device_id.clone())
+                .collect::<Vec<_>>(),
+            vec!["meter-1".to_string()]
+        );
+        assert_eq!(spool.len(), 1);
     }
 
     #[test]

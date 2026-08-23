@@ -101,7 +101,7 @@ def load_config() -> Config:
     return Config(
         dsn=dsn,
         store=store,
-        batch_rows=_positive_int("LAKEHOUSE_BATCH_ROWS", 50_000),
+        batch_rows=_positive_int("LAKEHOUSE_BATCH_ROWS", 10_000),
         freshness_seconds=_positive_int("LAKEHOUSE_FRESHNESS_SECONDS", 3_600),
         runner=os.getenv("LAKEHOUSE_RUNNER", "").strip() or os.uname().nodename,
     )

@@ -117,18 +117,52 @@ describe('orchestrator.getWorkflowStatus', () => {
     const caller = await orchestratorCaller(8, 'user');
 
     await expect(
-      caller.getWorkflowStatus({ workflowId: 'payment-processing-9-1700000000' })
+      caller.getWorkflowStatus({ workflowId: 'auto-trading-9-3-1700000000' })
     ).rejects.toThrow(/only read your own/);
     expect(queryCalls).toEqual([]);
   });
 
   it('serves the owner and an admin', async () => {
     const owner = await orchestratorCaller(8, 'user');
-    await owner.getWorkflowStatus({ workflowId: 'payment-processing-8-1700000000' });
+    await owner.getWorkflowStatus({ workflowId: 'auto-trading-8-3-1700000000' });
 
     const admin = await orchestratorCaller(1, 'admin');
-    await admin.getWorkflowStatus({ workflowId: 'payment-processing-9-1700000000' });
+    await admin.getWorkflowStatus({ workflowId: 'auto-trading-9-3-1700000000' });
 
     expect(queryCalls).toEqual(['getWorkflowDetails', 'getWorkflowDetails']);
+  });
+});
+
+/**
+ * Ownership used to be `workflowId.includes('-' + userId + '-')`, which the id
+ * conventions here do not support: the second numeric segment is an asset, trade
+ * or counterparty id, and several id shapes encode no user at all.
+ */
+describe('workflow ownership parsing', () => {
+  it('reads the owner by position, not by finding the number anywhere in the id', async () => {
+    const { workflowOwnerId, ownsWorkflow } = await import('./services/workflows/ownership');
+
+    expect(workflowOwnerId('auto-trading-7-42-1700000000')).toBe(7);
+    // `-42-` appears in the id as the asset, so user 42 must not be the owner.
+    expect(ownsWorkflow('auto-trading-7-42-1700000000', 42)).toBe(false);
+    expect(workflowOwnerId('manual-trade-3-91-1700000000')).toBe(3);
+    expect(workflowOwnerId('p2p-trade-5-11-1700000000')).toBe(5);
+    expect(workflowOwnerId('notification-1700000000-12')).toBe(12);
+  });
+
+  it('leaves ids that encode no user unowned, so a non-admin is refused rather than guessed at', async () => {
+    const { workflowOwnerId } = await import('./services/workflows/ownership');
+
+    for (const id of [
+      'payment-42',
+      'trade-42',
+      'dr-event-42',
+      'reconciliation-2026-08-22-mpesa',
+      'batch-notification-1700000000',
+      '',
+      'auto-trading-abc-1-2',
+    ]) {
+      expect(workflowOwnerId(id)).toBeNull();
+    }
   });
 });

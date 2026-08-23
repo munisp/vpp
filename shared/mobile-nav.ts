@@ -101,6 +101,13 @@ export const MOBILE_NAV_GROUPS: MobileNavGroup[] = [
         adminOnly: true,
         keywords: ['etl', 'ingestion', 'parquet', 'analytics', 'watermark'],
       },
+      {
+        screen: 'Diagnostics',
+        label: 'Diagnostics',
+        icon: '🩺',
+        adminOnly: true,
+        keywords: ['ollama', 'local llm', 'ai', 'troubleshoot', 'root cause', 'evidence'],
+      },
     ],
   },
 ];

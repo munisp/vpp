@@ -32,6 +32,8 @@ class StoredObject:
 class Store(Protocol):
     def put(self, key: str, body: bytes) -> StoredObject: ...
 
+    def get(self, key: str) -> bytes: ...
+
     def describe(self) -> str: ...
 
 
@@ -66,6 +68,19 @@ class LocalStore:
                 f"({len(written)} of {len(body)} bytes)"
             )
         return StoredObject(key=key, bytes_written=len(body), digest=expected)
+
+    def get(self, key: str) -> bytes:
+        """Read an object back. A missing or unreadable object raises: a reader that
+        treated it as empty would compute a baseline from part of the data."""
+        # Keys recorded by `put` are already prefixed relative to the root.
+        path = os.path.join(self._root, key)
+        if not os.path.exists(path):
+            path = self._path(key)
+        try:
+            with open(path, "rb") as handle:
+                return handle.read()
+        except OSError as exc:
+            raise StoreError(f"reading {path}: {exc}") from exc
 
     def describe(self) -> str:
         return f"file://{os.path.join(self._root, self._prefix)}"
@@ -114,6 +129,16 @@ class S3ObjectStore:
                 f"was written ({len(read_back)} of {len(body)} bytes)"
             )
         return StoredObject(key=full_key, bytes_written=len(body), digest=expected)
+
+    def get(self, key: str) -> bytes:
+        """Read an object back by the key `lakehouse_runs` recorded, which already
+        includes the prefix."""
+        from botocore.exceptions import BotoCoreError, ClientError  # noqa: PLC0415
+
+        try:
+            return self._client.get_object(Bucket=self._bucket, Key=key)["Body"].read()
+        except (ClientError, BotoCoreError) as exc:
+            raise StoreError(f"s3://{self._bucket}/{key}: {exc}") from exc
 
     def describe(self) -> str:
         location = self._endpoint or "s3"

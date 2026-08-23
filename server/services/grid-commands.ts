@@ -285,20 +285,30 @@ export async function remoteStartTransaction(input: {
   chargePointId: string;
   connectorId: number;
   idTag: string;
+  // Required to reach an OCPP 2.0.1 station, where id tokens are typed; the
+  // protocol service refuses the command rather than guessing a token type.
+  idTokenType?: string;
+  remoteStartId?: number;
 }): Promise<{ status: string }> {
   return call<{ status: string }>('/admin/remote-start', {
     charge_point_id: input.chargePointId,
     request: { connectorId: input.connectorId, idTag: input.idTag },
+    id_token_type: input.idTokenType,
+    remote_start_id: input.remoteStartId,
   });
 }
 
 export async function remoteStopTransaction(input: {
   chargePointId: string;
   transactionId: number;
+  // An OCPP 2.0.1 station only recognises the transaction id it generated
+  // itself; the platform's integer id means nothing to it.
+  stationTransactionId?: string;
 }): Promise<{ status: string }> {
   return call<{ status: string }>('/admin/remote-stop', {
     charge_point_id: input.chargePointId,
     request: { transactionId: input.transactionId },
+    transaction_id_201: input.stationTransactionId,
   });
 }
 

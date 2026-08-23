@@ -84,6 +84,18 @@ def test_a_version_whose_weights_changed_cannot_be_promoted(connection, tmp_path
     assert registry.production_version(connection, "asset_power_forecast") is None
 
 
+def test_repromoting_the_production_version_still_verifies_its_weights(connection, tmp_path):
+    """Re-promoting is idempotent, but only if the weights are still the recorded ones:
+    reporting success here would be an all-clear for an artifact nothing can serve."""
+    _, stored = register(connection, tmp_path, version="v1", mae=180.0)
+    registry.promote(connection, "asset_power_forecast", "v1", actor="pytest")
+    with open(stored.path, "r+b") as handle:
+        handle.seek(64)
+        handle.write(b"\x00\x01\x02\x03")
+    with pytest.raises(RegistryError, match="digests to"):
+        registry.promote(connection, "asset_power_forecast", "v1", actor="pytest")
+
+
 def test_rollback_returns_the_named_version_and_records_where_it_came_from(connection, tmp_path):
     register(connection, tmp_path, version="v1", mae=180.0)
     register(connection, tmp_path, version="v2", mae=150.0)

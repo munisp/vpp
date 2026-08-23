@@ -13,7 +13,7 @@ import {
   MobileNavGroup,
   getMobileNavGroups,
   searchMobileNav,
-} from '../navigation/nav-model';
+} from '../../../shared/mobile-nav';
 import { LineChart } from 'react-native-chart-kit';
 import { Dimensions } from 'react-native';
 

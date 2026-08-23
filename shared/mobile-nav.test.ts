@@ -4,7 +4,7 @@ import {
   MOBILE_NAV_GROUPS,
   getMobileNavGroups,
   searchMobileNav,
-} from './nav-model';
+} from './mobile-nav';
 
 // Vitest runs from the repository root (see vitest.config.ts).
 const navigator = readFileSync('mobile/src/navigation/AppNavigator.tsx', 'utf8');

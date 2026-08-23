@@ -17,7 +17,8 @@ export default function MonitoringScreen() {
   const [selectedAsset, setSelectedAsset] = useState<number | null>(null);
   const [refreshing, setRefreshing] = useState(false);
 
-  const { data: assets } = trpc.assets.list.useQuery();
+  const { data: assetList } = trpc.assets.list.useQuery();
+  const assets = assetList?.assets;
 
   // telemetry.getLatest returns the single most recent reading (or null);
   // telemetry.getHistorical returns the readings in a time range.

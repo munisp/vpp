@@ -206,7 +206,7 @@ export default function OnboardingScreen({ navigation }: any) {
         <TouchableOpacity
           style={[styles.button, styles.buttonPrimary]}
           onPress={handleNext}
-          disabled={registerAsset.isLoading || updateOnboarding.isLoading || completeOnboarding.isLoading}
+          disabled={registerAsset.isPending || updateOnboarding.isPending || completeOnboarding.isPending}
         >
           <Text style={styles.buttonText}>
             {currentStep === 3 ? 'Complete' : 'Continue'}

@@ -343,10 +343,10 @@ export default function PaymentsScreen({ navigation }: any) {
               <TouchableOpacity
                 style={styles.submitButton}
                 onPress={handleInitiatePayment}
-                disabled={initiatePaymentMutation.isLoading}
+                disabled={initiatePaymentMutation.isPending}
               >
                 <Text style={styles.submitButtonText}>
-                  {initiatePaymentMutation.isLoading ? 'Processing...' : 'Pay Now'}
+                  {initiatePaymentMutation.isPending ? 'Processing...' : 'Pay Now'}
                 </Text>
               </TouchableOpacity>
             </View>

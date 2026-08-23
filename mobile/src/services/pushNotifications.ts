@@ -1,7 +1,10 @@
 import * as Notifications from 'expo-notifications';
 import * as Device from 'expo-device';
 import { Platform } from 'react-native';
-import { trpcClient } from './trpc';
+
+// Expo needs the project id to mint a remote push token, and the server has no
+// endpoint to store one, so remote push stays unregistered until both exist.
+const EXPO_PROJECT_ID = process.env.EXPO_PUBLIC_EXPO_PROJECT_ID;
 
 /**
  * Push Notifications Service
@@ -51,13 +54,6 @@ export class PushNotificationsService {
         return null;
       }
 
-      // Get push token
-      const token = await Notifications.getExpoPushTokenAsync({
-        projectId: 'your-expo-project-id', // Replace with actual project ID
-      });
-
-      this.pushToken = token.data;
-
       // Configure Android channel
       if (Platform.OS === 'android') {
         await Notifications.setNotificationChannelAsync('default', {
@@ -92,26 +88,30 @@ export class PushNotificationsService {
         });
       }
 
-      // Register token with backend
-      await this.registerTokenWithBackend(token.data);
+      if (!EXPO_PROJECT_ID) {
+        console.warn(
+          '[Push] EXPO_PUBLIC_EXPO_PROJECT_ID is unset, so no remote push token was ' +
+            'requested. Local notifications work; remote push does not.'
+        );
+        return null;
+      }
 
-      console.log('Push notification token:', token.data);
+      const token = await Notifications.getExpoPushTokenAsync({
+        projectId: EXPO_PROJECT_ID,
+      });
+
+      this.pushToken = token.data;
+
+      // The server exposes no procedure to store a device token, so nothing on
+      // the platform can send to this token yet.
+      console.warn(
+        '[Push] Holding a device push token locally; the server has no endpoint ' +
+          'to register it, so the platform cannot send remote notifications.'
+      );
       return token.data;
     } catch (error) {
       console.error('Error registering for push notifications:', error);
       return null;
-    }
-  }
-
-  /**
-   * Register push token with backend
-   */
-  private static async registerTokenWithBackend(token: string): Promise<void> {
-    try {
-      await trpcClient.system.registerPushToken.mutate({ token });
-      console.log('Push token registered with backend');
-    } catch (error) {
-      console.error('Failed to register push token with backend:', error);
     }
   }
 

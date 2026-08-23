@@ -183,10 +183,10 @@ export default function QRPaymentScreen({ navigation }: any) {
             <TouchableOpacity
               style={styles.confirmButton}
               onPress={handleConfirmPayment}
-              disabled={initiatePaymentMutation.isLoading}
+              disabled={initiatePaymentMutation.isPending}
             >
               <Text style={styles.confirmButtonText}>
-                {initiatePaymentMutation.isLoading ? 'Processing...' : 'Confirm Payment'}
+                {initiatePaymentMutation.isPending ? 'Processing...' : 'Confirm Payment'}
               </Text>
             </TouchableOpacity>
 

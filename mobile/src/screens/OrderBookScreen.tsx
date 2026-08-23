@@ -35,7 +35,7 @@ export default function OrderBookScreen({ navigation }: any) {
     onSuccess: async (result) => {
       await HapticService.success();
       const fillText =
-        result.status === 'executed'
+        result.status === 'filled'
           ? `Fully filled (${kwhDisplay(result.filledEnergyWh)} kWh in ${result.matches.length} match${
               result.matches.length === 1 ? '' : 'es'
             }).`
@@ -45,7 +45,7 @@ export default function OrderBookScreen({ navigation }: any) {
             )} kWh resting on the book.`
           : 'No immediate match — your order is resting on the book.';
       Alert.alert(
-        result.status === 'executed' ? 'Order Executed' : 'Order Placed',
+        result.status === 'filled' ? 'Order Filled' : 'Order Placed',
         fillText
       );
       setModalVisible(false);
@@ -282,10 +282,10 @@ export default function OrderBookScreen({ navigation }: any) {
             <TouchableOpacity
               style={styles.saveButton}
               onPress={handleSubmit}
-              disabled={submitOrderMutation.isLoading}
+              disabled={submitOrderMutation.isPending}
             >
               <Text style={styles.saveButtonText}>
-                {submitOrderMutation.isLoading ? 'Submitting…' : 'Submit Order'}
+                {submitOrderMutation.isPending ? 'Submitting…' : 'Submit Order'}
               </Text>
             </TouchableOpacity>
             <TouchableOpacity

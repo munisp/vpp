@@ -119,10 +119,10 @@ export default function DRParticipationScreen() {
           <TouchableOpacity
             style={styles.enrollButton}
             onPress={handleEnroll}
-            disabled={enrollMutation.isLoading}
+            disabled={enrollMutation.isPending}
           >
             <Text style={styles.enrollButtonText}>
-              {enrollMutation.isLoading ? 'Enrolling...' : 'Enroll Now'}
+              {enrollMutation.isPending ? 'Enrolling...' : 'Enroll Now'}
             </Text>
           </TouchableOpacity>
         </View>

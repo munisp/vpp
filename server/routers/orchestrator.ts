@@ -363,7 +363,18 @@ export const orchestratorRouter = router({
     .input(z.object({
       workflowId: z.string(),
     }))
-    .query(async ({ input }) => {
+    .query(async ({ ctx, input }) => {
+      // A workflow execution carries its input, which for payment and trading
+      // workflows means amounts, phone numbers and counterparties. User
+      // workflow IDs embed the user id, so ownership is read from there.
+      const userMarker = `-${ctx.user.id}-`;
+      if (!input.workflowId.includes(userMarker) && ctx.user.role !== "admin") {
+        throw new TRPCError({
+          code: "FORBIDDEN",
+          message: "You can only read your own workflows",
+        });
+      }
+
       let execution;
       try {
         execution = await temporalQueryService.getWorkflowDetails(input.workflowId);

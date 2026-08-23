@@ -169,7 +169,7 @@ export async function storeBatch(
     const inserted = await db.execute(sql`
       INSERT INTO event_inbox (topic, event_key, partition, message_offset, payload, produced_at)
       VALUES (
-        ${topic}, ${eventKey}, ${partition}, ${Number(message.offset)},
+        ${topic}, ${eventKey}, ${partition}, ${message.offset}::bigint,
         ${JSON.stringify(payload)}::jsonb,
         ${producedAt && Number.isFinite(producedAt.getTime()) ? producedAt : null}
       )
@@ -181,6 +181,26 @@ export async function storeBatch(
   }
 
   return { received: messages.length, stored, duplicates, deadLettered };
+}
+
+/**
+ * The offsets to commit for a batch this consumer has stored.
+ *
+ * A committed offset in Kafka is the *next* offset the group will read, not the
+ * last one it read, so committing `lastOffset` would redeliver the final message
+ * of every batch forever. `commitOffsetsIfNecessary()` with no argument does not
+ * commit at all when `autoCommit` is false — kafkajs only honours the autoCommit
+ * interval and threshold there, and both are unset in that mode — so the offsets
+ * have to be named explicitly or the group never records a position and a restart
+ * resumes at the log's end, skipping everything produced while it was down.
+ */
+export function nextOffsets(
+  topic: string,
+  partition: number,
+  lastOffset: string
+): { topics: { topic: string; partitions: { partition: number; offset: string }[] }[] } {
+  const next = BigInt(lastOffset) + 1n;
+  return { topics: [{ topic, partitions: [{ partition, offset: next.toString() }] }] };
 }
 
 /**
@@ -196,7 +216,12 @@ export async function startEventConsumer(): Promise<boolean> {
   consumer = kafka.consumer({ groupId: GROUP_ID(), allowAutoTopicCreation: false });
   await consumer.connect();
   for (const topic of topics) {
-    await consumer.subscribe({ topic, fromBeginning: false });
+    // Only applies to a group with no committed offset, i.e. the first time this
+    // deployment consumes at all. Starting at the log's end there would silently
+    // discard every event published before the consumer existed, and the insert
+    // is idempotent, so reading the retained log from the start costs duplicates
+    // that collapse rather than events that vanish.
+    await consumer.subscribe({ topic, fromBeginning: true });
   }
 
   await consumer.run({
@@ -210,11 +235,14 @@ export async function startEventConsumer(): Promise<boolean> {
         batch.partition,
         batch.messages as unknown as RawMessage[]
       );
+      const lastOffset = batch.messages[batch.messages.length - 1]?.offset;
       for (const message of batch.messages) {
         resolveOffset(message.offset);
       }
       await heartbeat();
-      await commitOffsetsIfNecessary();
+      if (lastOffset !== undefined) {
+        await commitOffsetsIfNecessary(nextOffsets(batch.topic, batch.partition, lastOffset));
+      }
       if (result.stored > 0 || result.deadLettered > 0) {
         console.log(
           `[EventConsumer] ${batch.topic}/${batch.partition} stored=${result.stored} duplicate=${result.duplicates} dead=${result.deadLettered}`

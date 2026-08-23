@@ -35,6 +35,7 @@ import {
   configuredTopics,
   consumerStatus,
   identityFor,
+  nextOffsets,
   inboxHealth,
   storeBatch,
 } from './services/events/consumer';
@@ -120,6 +121,20 @@ describe('consumed event identity', () => {
   it('uses the message coordinates for a foreign producer that declares no identity at all', () => {
     expect(identityFor('foreign.topic', 2, { ...base, key: 'k' })).toBe('k:2:42');
     expect(identityFor('foreign.topic', 2, base)).toBe('foreign.topic:2:42');
+  });
+});
+
+describe('offset commits', () => {
+  it('commits the offset after the batch, so a restarted consumer reads on rather than re-reading', () => {
+    expect(nextOffsets('trades.created', 2, '41')).toEqual({
+      topics: [{ topic: 'trades.created', partitions: [{ partition: 2, offset: '42' }] }],
+    });
+  });
+
+  it('keeps offsets exact past 2^53, where a busy topic leaves floating point behind', () => {
+    expect(nextOffsets('telemetry', 0, '9007199254740993').topics[0].partitions[0].offset).toBe(
+      '9007199254740994'
+    );
   });
 });
 

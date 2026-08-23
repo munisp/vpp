@@ -11,7 +11,13 @@ import { mkdtemp, rm, writeFile } from 'fs/promises';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { afterAll, beforeAll, describe as suite, expect, it } from 'vitest';
-import { describeArtifact, describeDataset, verifyArtifact } from './services/ml/model-health';
+import {
+  describeAccuracy,
+  describeArtifact,
+  describeDataset,
+  MIN_SCORED_PREDICTIONS,
+  verifyArtifact,
+} from './services/ml/model-health';
 import {
   ARTIFACT_STATE_COPY,
   ORIGIN_COPY,
@@ -125,6 +131,52 @@ suite('dataset provenance wording', () => {
     expect(detail).toContain('unknown');
     expect(ORIGIN_COPY.unknown.tone).toBe('danger');
     expect(provenanceLine('unknown', {})).toBe('no dataset recorded');
+  });
+});
+
+suite('live accuracy wording', () => {
+  const base = {
+    scoredPredictions: 0,
+    unscoredPredictions: 0,
+    liveMae: null as number | null,
+    heldOutMae: 120,
+    ratio: null as number | null,
+    degraded: false,
+  };
+
+  it('does not claim zero actuals when some predictions are scored but too few to judge', () => {
+    const detail = describeAccuracy({
+      ...base,
+      state: 'too_few_scored',
+      scoredPredictions: 10,
+      unscoredPredictions: 3,
+    });
+    expect(detail).toContain('Only 10 prediction(s) carry an actual');
+    expect(detail).toContain(String(MIN_SCORED_PREDICTIONS));
+    expect(detail).not.toContain('No prediction has been scored');
+    expect(detail).toContain('not good');
+  });
+
+  it('says nothing is scored only when nothing is', () => {
+    expect(describeAccuracy({ ...base, state: 'no_actuals' })).toContain(
+      'No prediction has been scored'
+    );
+    const waiting = describeAccuracy({ ...base, state: 'no_actuals', unscoredPredictions: 40 });
+    expect(waiting).toContain('40 prediction(s) have no actual');
+    expect(waiting).toContain('none has been scored');
+  });
+
+  it('calls a measured degradation a retraining trigger', () => {
+    const detail = describeAccuracy({
+      ...base,
+      state: 'measured',
+      scoredPredictions: 50,
+      liveMae: 240,
+      ratio: 2,
+      degraded: true,
+    });
+    expect(detail).toContain('2.00x');
+    expect(detail).toContain('retraining trigger');
   });
 });
 

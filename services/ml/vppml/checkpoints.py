@@ -2,10 +2,15 @@
 
 A registry row saying `artifact_path=/models/x.pt` is not evidence that weights
 exist. So `save()` writes, fsyncs, re-reads and hashes the file, and returns the
-digest that goes into the registry; `load()` re-hashes before unpickling and
+digest that goes into the registry; `load()` re-hashes before reading and
 refuses on a mismatch. A promoted version whose file was replaced, truncated or
 never written therefore fails loudly at load rather than serving whatever is
 there now.
+
+The file is also never unpickled: metadata travels as a JSON string beside the
+tensors so `load()` can use `weights_only=True`. A digest match proves the bytes
+are the ones evaluated, not that they are safe to execute, and a checkpoint
+written in any other shape is refused rather than trusted.
 """
 
 from __future__ import annotations
@@ -68,11 +73,18 @@ def save(
     os.makedirs(directory, exist_ok=True)
     path = os.path.join(directory, filename)
     payload = {
-        "kind": kind,
-        "hyperparameters": hyperparameters,
-        "feature_spec": feature_spec,
-        "provenance": provenance,
-        "torch_version": torch.__version__,
+        # JSON, not objects: `load()` reads with `weights_only=True`, so nothing in
+        # this file can execute on the serving host.
+        "meta_json": json.dumps(
+            {
+                "kind": kind,
+                "hyperparameters": hyperparameters,
+                "feature_spec": feature_spec,
+                "provenance": provenance,
+                "torch_version": torch.__version__,
+            },
+            sort_keys=True,
+        ),
         "state_dict": model.state_dict(),
     }
     try:
@@ -99,10 +111,24 @@ def load(path: str, expected_digest: str) -> dict[str, Any]:
             f"{path} digests to {actual} but the registry recorded {expected_digest}; "
             "these are not the weights that were evaluated"
         )
-    # `weights_only=False` is required because the payload carries the config dicts
-    # needed to rebuild the module; the file is only reached after its digest
-    # matched a row this platform wrote.
-    return torch.load(path, map_location="cpu", weights_only=False)
+    try:
+        raw = torch.load(path, map_location="cpu", weights_only=True)
+    except Exception as exc:
+        # Anything the safe loader refuses — arbitrary pickled objects, a torchscript
+        # archive, a corrupt zip — is a refusal, not something to retry unsafely.
+        raise CheckpointError(f"{path} could not be read as weights only: {exc}") from exc
+    if not isinstance(raw, dict) or "meta_json" not in raw or "state_dict" not in raw:
+        raise CheckpointError(
+            f"{path} is not a checkpoint this service wrote (no meta_json/state_dict); "
+            "it will not be unpickled, so the model must be retrained"
+        )
+    try:
+        meta = json.loads(raw["meta_json"])
+    except (TypeError, ValueError) as exc:
+        raise CheckpointError(f"{path} carries unreadable metadata: {exc}") from exc
+    if not isinstance(meta, dict):
+        raise CheckpointError(f"{path} carries metadata that is not an object")
+    return {**meta, "state_dict": raw["state_dict"]}
 
 
 def load_for_serving(

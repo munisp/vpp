@@ -4,10 +4,16 @@ import {
   Text,
   StyleSheet,
   ScrollView,
+  TextInput,
   TouchableOpacity,
   RefreshControl,
 } from 'react-native';
 import { trpc } from '../services/trpc';
+import {
+  MobileNavGroup,
+  getMobileNavGroups,
+  searchMobileNav,
+} from '../navigation/nav-model';
 import { LineChart } from 'react-native-chart-kit';
 import { Dimensions } from 'react-native';
 
@@ -211,168 +217,12 @@ export default function DashboardScreen({ navigation }: any) {
         </View>
       )}
 
-      {/* Quick Actions */}
-      <View style={styles.actionsCard}>
-        <Text style={styles.sectionTitle}>Quick Actions</Text>
-        <View style={styles.actionsGrid}>
-          <ActionButton
-            icon="➕"
-            label="Add Asset"
-            onPress={() => navigation.navigate('Assets')}
-          />
-          <ActionButton
-            icon="💱"
-            label="Trade Energy"
-            onPress={() => navigation.navigate('Trading')}
-          />
-          <ActionButton
-            icon="💳"
-            label="Payments"
-            onPress={() => navigation.navigate('Payments')}
-          />
-          <ActionButton
-            icon="⚙️"
-            label="Settings"
-            onPress={() => navigation.navigate('Settings')}
-          />
-        </View>
-      </View>
-
-      {/* Insights & Tools */}
-      <View style={styles.actionsCard}>
-        <Text style={styles.sectionTitle}>Insights & Tools</Text>
-        <View style={styles.actionsGrid}>
-          <ActionButton
-            icon="👛"
-            label="Wallet"
-            onPress={() => navigation.navigate('Wallet')}
-          />
-          <ActionButton
-            icon="🤖"
-            label="Advisor"
-            onPress={() => navigation.navigate('Advisor')}
-          />
-          <ActionButton
-            icon="🌱"
-            label="Carbon"
-            onPress={() => navigation.navigate('Carbon')}
-          />
-          <ActionButton
-            icon="🔋"
-            label="Battery"
-            onPress={() => navigation.navigate('BatteryHealth')}
-          />
-          <ActionButton
-            icon="☀️"
-            label="Solar Yield"
-            onPress={() => navigation.navigate('SolarYield')}
-          />
-          <ActionButton
-            icon="🔔"
-            label="Price Alerts"
-            onPress={() => navigation.navigate('PriceAlerts')}
-          />
-          <ActionButton
-            icon="🕸️"
-            label="Digital Twin"
-            onPress={() => navigation.navigate('DigitalTwin')}
-          />
-          <ActionButton
-            icon="🎛️"
-            label="Controls"
-            onPress={() => navigation.navigate('ControlWindows')}
-          />
-          <ActionButton
-            icon="🎯"
-            label="Forecasts"
-            onPress={() => navigation.navigate('ForecastAccuracy')}
-          />
-          <ActionButton
-            icon="🏷️"
-            label="Price Signals"
-            onPress={() => navigation.navigate('PriceSignals')}
-          />
-          <ActionButton
-            icon="👥"
-            label="Community"
-            onPress={() => navigation.navigate('CommunityTelemetry')}
-          />
-          <ActionButton
-            icon="📍"
-            label="Local Grid"
-            onPress={() => navigation.navigate('LocationalFlexibility')}
-          />
-          <ActionButton
-            icon="📖"
-            label="Order Book"
-            onPress={() => navigation.navigate('OrderBook')}
-          />
-          <ActionButton
-            icon="🤝"
-            label="P2P Market"
-            onPress={() => navigation.navigate('P2PTrading')}
-          />
-          <ActionButton
-            icon="📷"
-            label="QR Payment"
-            onPress={() => navigation.navigate('QRPayment')}
-          />
-          <ActionButton
-            icon="📲"
-            label="Register Device"
-            onPress={() => navigation.navigate('QRDeviceRegistration')}
-          />
-          <ActionButton
-            icon="🏆"
-            label="Rewards"
-            onPress={() => navigation.navigate('Gamification')}
-          />
-          <ActionButton
-            icon="🩺"
-            label="Service Status"
-            onPress={() => navigation.navigate('ServiceStatus')}
-          />
-        </View>
-      </View>
-
-      {/* Admin Actions (only for admins) */}
-      {currentUser?.role === 'admin' && (
-        <View style={styles.actionsCard}>
-          <Text style={styles.sectionTitle}>Admin Tools</Text>
-          <View style={styles.actionsGrid}>
-            <ActionButton
-              icon="📊"
-              label="Analytics"
-              onPress={() => navigation.navigate('AdminAnalytics')}
-            />
-            <ActionButton
-              icon="📝"
-              label="Audit Logs"
-              onPress={() => navigation.navigate('AuditLogs')}
-            />
-            <ActionButton
-              icon="👥"
-              label="Users"
-              onPress={() => navigation.navigate('Settings')}
-            />
-            <ActionButton
-              icon="⚡"
-              label="Strategies"
-              onPress={() => navigation.navigate('TradingStrategies')}
-            />
-            <ActionButton
-              icon="🔄"
-              label="Workflows"
-              onPress={() => navigation.navigate('WorkflowMonitor')}
-            />
-            <ActionButton
-              icon="🏠"
-              label="Home Loads"
-              onPress={() => navigation.navigate('MatterLoads')}
-            />
-          </View>
-        </View>
-      )}
+      {/* Destinations, grouped and collapsed so the dashboard does not become
+          one long scroll of buttons. */}
+      <NavigatorSection
+        role={currentUser?.role}
+        onNavigate={screen => navigation.navigate(screen)}
+      />
 
       {/* Recent Activity (real payments and trades) */}
       <View style={styles.activityCard}>
@@ -422,6 +272,104 @@ function StatCard({
       <Text style={styles.statIcon}>{icon}</Text>
       <Text style={styles.statValue}>{value}</Text>
       <Text style={styles.statTitle}>{title}</Text>
+    </View>
+  );
+}
+
+
+/**
+ * Groups every destination behind collapsed section headers with a filter, so
+ * reaching a page is a search or two taps rather than a long scroll. Only the
+ * quick actions start expanded.
+ */
+function NavigatorSection({
+  role,
+  onNavigate,
+}: {
+  role?: string;
+  onNavigate: (screen: string) => void;
+}) {
+  const groups = React.useMemo(() => getMobileNavGroups(role), [role]);
+  const [query, setQuery] = React.useState('');
+  const [openGroups, setOpenGroups] = React.useState<string[]>(() =>
+    getMobileNavGroups(role)
+      .filter(group => group.defaultOpen)
+      .map(group => group.id)
+  );
+  const matches = React.useMemo(() => searchMobileNav(groups, query), [groups, query]);
+
+  const toggle = (group: MobileNavGroup) =>
+    setOpenGroups(previous =>
+      previous.includes(group.id)
+        ? previous.filter(id => id !== group.id)
+        : [...previous, group.id]
+    );
+
+  const go = (screen: string) => {
+    setQuery('');
+    onNavigate(screen);
+  };
+
+  return (
+    <View style={styles.actionsCard}>
+      <Text style={styles.sectionTitle}>Go to</Text>
+      <TextInput
+        style={styles.navSearch}
+        value={query}
+        onChangeText={setQuery}
+        placeholder="Find a page"
+        placeholderTextColor="#9ca3af"
+        autoCorrect={false}
+        accessibilityLabel="Find a page"
+      />
+
+      {query.trim() ? (
+        matches.length === 0 ? (
+          <Text style={styles.navEmpty}>No page matches “{query.trim()}”.</Text>
+        ) : (
+          matches.map(({ item, groupLabel }) => (
+            <TouchableOpacity
+              key={item.screen}
+              style={styles.navRow}
+              onPress={() => go(item.screen)}
+            >
+              <Text style={styles.navRowIcon}>{item.icon}</Text>
+              <Text style={styles.navRowLabel}>{item.label}</Text>
+              <Text style={styles.navRowGroup}>{groupLabel}</Text>
+            </TouchableOpacity>
+          ))
+        )
+      ) : (
+        groups.map(group => {
+          const isOpen = openGroups.includes(group.id);
+          return (
+            <View key={group.id}>
+              <TouchableOpacity
+                style={styles.navGroupHeader}
+                onPress={() => toggle(group)}
+                accessibilityRole="button"
+                accessibilityState={{ expanded: isOpen }}
+              >
+                <Text style={styles.navGroupChevron}>{isOpen ? '\u2304' : '\u203A'}</Text>
+                <Text style={styles.navGroupLabel}>{group.label}</Text>
+                <Text style={styles.navGroupCount}>{group.items.length}</Text>
+              </TouchableOpacity>
+              {isOpen && (
+                <View style={styles.actionsGrid}>
+                  {group.items.map(item => (
+                    <ActionButton
+                      key={item.screen}
+                      icon={item.icon}
+                      label={item.label}
+                      onPress={() => go(item.screen)}
+                    />
+                  ))}
+                </View>
+              )}
+            </View>
+          );
+        })
+      )}
     </View>
   );
 }
@@ -579,6 +527,64 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     color: '#111827',
     marginBottom: 16,
+  },
+  navSearch: {
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    fontSize: 14,
+    color: '#111827',
+    marginBottom: 12,
+  },
+  navEmpty: {
+    fontSize: 14,
+    color: '#6b7280',
+    paddingVertical: 12,
+  },
+  navRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f3f4f6',
+  },
+  navRowIcon: {
+    fontSize: 18,
+    marginRight: 10,
+  },
+  navRowLabel: {
+    flex: 1,
+    fontSize: 14,
+    fontWeight: '500',
+    color: '#111827',
+  },
+  navRowGroup: {
+    fontSize: 11,
+    color: '#9ca3af',
+  },
+  navGroupHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 10,
+    borderTopWidth: 1,
+    borderTopColor: '#f3f4f6',
+  },
+  navGroupChevron: {
+    fontSize: 16,
+    color: '#6b7280',
+    width: 18,
+  },
+  navGroupLabel: {
+    flex: 1,
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#374151',
+  },
+  navGroupCount: {
+    fontSize: 12,
+    color: '#9ca3af',
   },
   actionsGrid: {
     flexDirection: 'row',

@@ -194,7 +194,7 @@ export const adminAnalyticsRouter = router({
 
       const usersByDate = await db
         .select({
-          date: sql<string>`DATE(${users.createdAt})`,
+          date: sql<string>`DATE(${users.createdAt})::text`,
           count: count(),
         })
         .from(users)
@@ -245,7 +245,7 @@ export const adminAnalyticsRouter = router({
         .groupBy(trades.tradeType);
 
       const tradesByDate = await db
-        .select({ date: sql<string>`DATE(${trades.createdAt})`, count: count(), totalEnergy: sum(trades.energy) })
+        .select({ date: sql<string>`DATE(${trades.createdAt})::text`, count: count(), totalEnergy: sum(trades.energy) })
         .from(trades)
         .where(and(gte(trades.createdAt, startDate), lte(trades.createdAt, endDate), eq(trades.status, 'executed')))
         .groupBy(sql`DATE(${trades.createdAt})`)
@@ -284,7 +284,7 @@ export const adminAnalyticsRouter = router({
       const totalPayments = revenueResult[0]?.count || 0;
 
       const revenueByDate = await db
-        .select({ date: sql<string>`DATE(${payments.createdAt})`, revenue: sum(payments.amount), count: count() })
+        .select({ date: sql<string>`DATE(${payments.createdAt})::text`, revenue: sum(payments.amount), count: count() })
         .from(payments)
         .where(and(gte(payments.createdAt, startDate), lte(payments.createdAt, endDate), eq(payments.status, 'completed')))
         .groupBy(sql`DATE(${payments.createdAt})`)

@@ -128,7 +128,7 @@ export async function getPaymentMetrics(
   // Daily revenue
   const dailyStats = await db
     .select({
-      date: sql<string>`DATE(${payments.createdAt})`,
+      date: sql<string>`DATE(${payments.createdAt})::text`,
       revenue: sum(payments.amount),
       transactions: count(payments.id),
     })
@@ -232,7 +232,7 @@ export async function getDREventMetrics(
   // Performance over time
   const dailyPerformance = await db
     .select({
-      date: sql<string>`DATE(${demandResponseEvents.startTime})`,
+      date: sql<string>`DATE(${demandResponseEvents.startTime})::text`,
       events: count(demandResponseEvents.id),
       participants: sql<number>`COUNT(DISTINCT ${drResponses.userId})`,
       reduction: sum(drResponses.actualReduction),
@@ -319,7 +319,7 @@ export async function getForecastingMetrics(
   // Accuracy over time
   const dailyAccuracy = await db
     .select({
-      date: sql<string>`DATE(${drForecasts.forecastDate})`,
+      date: sql<string>`DATE(${drForecasts.forecastDate})::text`,
       accuracy: avg(drForecasts.confidence),
       forecasts: count(drForecasts.id),
     })

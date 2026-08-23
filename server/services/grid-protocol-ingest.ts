@@ -732,6 +732,10 @@ export interface ModbusReading {
  * minutes of history is stored as that history rather than collapsed into its
  * newest value. `samples` counts the rows written and `readings` the registers
  * they were built from — a caller is told what was persisted, not what arrived.
+ *
+ * A batch is all-or-nothing: every device is resolved before the first write and
+ * the writes share one transaction, so a rejected batch leaves nothing behind
+ * for a retry to duplicate.
  */
 export async function handleModbusReadings(
   readings: ModbusReading[]
@@ -755,8 +759,13 @@ export async function handleModbusReadings(
     else samples.set(reading.timestamp_ms, [reading]);
   }
 
-  let samplesStored = 0;
-  for (const [deviceId, samplesByInstant] of byDevice) {
+  // Every device in the batch is resolved before anything is written. A batch
+  // naming one unregistered device is rejected whole: were it rejected part way
+  // through, the poller's retry would append the accepted devices' samples a
+  // second time, and telemetry that feeds settlement has no unique constraint
+  // to catch it.
+  const resolved = new Map<string, typeof devices.$inferSelect>();
+  for (const deviceId of byDevice.keys()) {
     const rows = await db
       .select()
       .from(devices)
@@ -772,37 +781,48 @@ export async function handleModbusReadings(
     if (!device.enabled) {
       throw new GridProtocolError(409, `device ${deviceId} is disabled`);
     }
-
-    let latest = 0;
-    for (const [timestampMs, sampleReadings] of [...samplesByInstant].sort(
-      (a, b) => a[0] - b[0]
-    )) {
-      const timestamp = new Date(timestampMs);
-      await db.insert(telemetry).values({
-        assetId: device.assetId,
-        timestamp,
-        ...mapReadings(sampleReadings),
-        metadata: JSON.stringify({
-          source: 'modbus',
-          deviceId,
-          registers: sampleReadings.map(reading => ({
-            name: reading.name,
-            address: reading.address,
-            value: reading.value,
-            unit: reading.unit,
-          })),
-        }),
-      });
-      samplesStored += 1;
-      latest = Math.max(latest, timestampMs);
-    }
-
-    const lastSeen = new Date(latest);
-    await db
-      .update(devices)
-      .set({ status: 'online', lastSeen, lastMessageAt: lastSeen })
-      .where(eq(devices.id, device.id));
+    resolved.set(deviceId, device);
   }
+
+  let samplesStored = 0;
+  await db.transaction(async tx => {
+    for (const [deviceId, samplesByInstant] of byDevice) {
+      const device = resolved.get(deviceId);
+      if (!device) {
+        throw new GridProtocolError(500, `device ${deviceId} was not resolved`);
+      }
+
+      let latest = 0;
+      for (const [timestampMs, sampleReadings] of [...samplesByInstant].sort(
+        (a, b) => a[0] - b[0]
+      )) {
+        const timestamp = new Date(timestampMs);
+        await tx.insert(telemetry).values({
+          assetId: device.assetId,
+          timestamp,
+          ...mapReadings(sampleReadings),
+          metadata: JSON.stringify({
+            source: 'modbus',
+            deviceId,
+            registers: sampleReadings.map(reading => ({
+              name: reading.name,
+              address: reading.address,
+              value: reading.value,
+              unit: reading.unit,
+            })),
+          }),
+        });
+        samplesStored += 1;
+        latest = Math.max(latest, timestampMs);
+      }
+
+      const lastSeen = new Date(latest);
+      await tx
+        .update(devices)
+        .set({ status: 'online', lastSeen, lastMessageAt: lastSeen })
+        .where(eq(devices.id, device.id));
+    }
+  });
 
   // Stored measurements are the only honest evidence that the meter path works,
   // so the arrival of real samples is what marks `meter_telemetry` reachable —

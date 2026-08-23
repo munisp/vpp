@@ -19,20 +19,37 @@ interface InsertedRow {
   metadata: string;
 }
 
-function mockDb(device: { id: number; assetId: number; enabled: boolean } | null) {
+type Device = { id: number; assetId: number; enabled: boolean };
+
+/**
+ * `lookups` answers the device queries in the order the handler makes them —
+ * one per distinct `device_id` in the batch, in first-seen order — so a batch
+ * whose second device is unregistered is expressed as `[device, null]`.
+ */
+function mockDb(...lookups: (Device | null)[]) {
   const inserted: InsertedRow[] = [];
-  const db = {
-    select: () => ({
-      from: () => ({
-        where: () => ({ limit: async () => (device ? [device] : []) }),
-      }),
-    }),
+  const remaining = [...lookups];
+  const writer = {
     insert: () => ({
       values: async (row: InsertedRow) => {
         inserted.push(row);
       },
     }),
     update: () => ({ set: () => ({ where: async () => undefined }) }),
+  };
+  const db = {
+    ...writer,
+    select: () => ({
+      from: () => ({
+        where: () => ({
+          limit: async () => {
+            const device = remaining.length > 1 ? remaining.shift() : remaining[0];
+            return device ? [device] : [];
+          },
+        }),
+      }),
+    }),
+    transaction: async <T>(fn: (tx: typeof writer) => Promise<T>) => fn(writer),
   };
   vi.doMock('./db', () => ({ getDb: async () => db }));
   return inserted;
@@ -117,6 +134,41 @@ describe('handleModbusReadings', () => {
     expect(result).toEqual({ samples: 1, readings: 2 });
     expect(inserted).toHaveLength(1);
     expect(JSON.parse(inserted[0].metadata).registers).toHaveLength(2);
+  });
+
+  it('writes nothing when a later device in the batch is not registered', async () => {
+    // Rejecting part way through would let the poller's retry append the
+    // accepted device's samples twice, and telemetry has no unique constraint.
+    const inserted = mockDb({ id: 3, assetId: 9, enabled: true }, null);
+    mockObservations();
+    const { handleModbusReadings, GridProtocolError } = await import(
+      './services/grid-protocol-ingest'
+    );
+
+    await expect(
+      handleModbusReadings([
+        reading({ value: 111, timestamp_ms: 1_700_000_000_000 }),
+        reading({ device_id: 'meter-2', value: 222, timestamp_ms: 1_700_000_000_000 }),
+      ])
+    ).rejects.toBeInstanceOf(GridProtocolError);
+    expect(inserted).toHaveLength(0);
+  });
+
+  it('writes nothing when a later device in the batch is disabled', async () => {
+    const inserted = mockDb(
+      { id: 3, assetId: 9, enabled: true },
+      { id: 4, assetId: 10, enabled: false }
+    );
+    mockObservations();
+    const { handleModbusReadings } = await import('./services/grid-protocol-ingest');
+
+    await expect(
+      handleModbusReadings([
+        reading({ value: 111, timestamp_ms: 1_700_000_000_000 }),
+        reading({ device_id: 'meter-2', value: 222, timestamp_ms: 1_700_000_000_000 }),
+      ])
+    ).rejects.toThrow(/disabled/);
+    expect(inserted).toHaveLength(0);
   });
 
   it('refuses a whole batch whose device is not registered rather than reporting stored rows', async () => {

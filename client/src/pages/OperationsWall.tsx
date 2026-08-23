@@ -102,16 +102,29 @@ function FleetTwinPanel() {
     <div className="space-y-4">
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <MetricTile
-          label="Measured net power"
-          value={graph.coverage.measured > 0 ? formatWatts(graph.measuredNetPowerWatts) : null}
-          tone={graph.coverage.measured > 0 ? 'live' : 'neutral'}
+          label="Net behind the meter"
+          value={graph.measuredBehindMeter > 0 ? formatWatts(graph.measuredNetPowerWatts) : null}
+          tone={graph.measuredBehindMeter > 0 ? 'live' : 'neutral'}
           status={{
             label: `${graph.coverage.measured}/${graph.coverage.assets} reporting`,
             tone: coverageTone,
             meaning:
-              'Silent equipment is excluded rather than counted as zero, so with partial coverage this is a floor, not the fleet total.',
+              'Generation, load and storage only: a meter measures the boundary, not another load behind it. Silent equipment is excluded rather than counted as zero, so with partial coverage this is a floor, not the fleet total.',
           }}
           evidence={<FreshnessBadge asOf={graph.generatedAt} stalenessSeconds={60} />}
+        />
+        <MetricTile
+          label="Metered grid exchange"
+          value={
+            graph.meteredGridPowerWatts === null ? null : formatWatts(graph.meteredGridPowerWatts)
+          }
+          tone={graph.meteredGridPowerWatts === null ? 'neutral' : 'live'}
+          status={{
+            label: graph.meteredGridPowerWatts === null ? 'no meter reporting' : 'metered',
+            tone: graph.meteredGridPowerWatts === null ? 'neutral' : 'live',
+            meaning:
+              'With no meter reporting, the exchange with the grid is unknown rather than zero.',
+          }}
         />
         <MetricTile
           label="Stale"

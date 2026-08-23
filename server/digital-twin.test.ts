@@ -130,6 +130,50 @@ describe('digital twin graph', () => {
     expect(site?.detail).toContain('not assumed idle');
   });
 
+  it('does not add the meter to the equipment behind it', () => {
+    // A 3 kW array exporting 1.5 kW through the meter: summing both would
+    // report 1.5 kW of nothing physical.
+    const graph = graphOf([
+      asset({ id: 1, assetType: 'solar', observation: observation({ powerWatts: 3000 }) }),
+      asset({
+        id: 2,
+        name: 'Main meter',
+        assetType: 'meter',
+        observation: observation({ powerWatts: -1500 }),
+      }),
+    ]);
+
+    expect(graph.measuredNetPowerWatts).toBe(3000);
+    expect(graph.measuredBehindMeter).toBe(1);
+    expect(graph.meteredGridPowerWatts).toBe(-1500);
+    expect(graph.coverage.measured).toBe(2);
+  });
+
+  it('reports the grid exchange as unknown when only equipment behind the meter is reporting', () => {
+    const graph = graphOf([
+      asset({ id: 1, assetType: 'solar', observation: observation({ powerWatts: 3000 }) }),
+    ]);
+
+    expect(graph.meteredGridPowerWatts).toBeNull();
+    expect(graph.measuredNetPowerWatts).toBe(3000);
+  });
+
+  it('leaves the behind-the-meter net unknown when only the meter is reporting', () => {
+    const graph = graphOf([
+      asset({
+        id: 1,
+        name: 'Main meter',
+        assetType: 'meter',
+        observation: observation({ powerWatts: 900 }),
+      }),
+    ]);
+
+    expect(graph.measuredBehindMeter).toBe(0);
+    expect(graph.meteredGridPowerWatts).toBe(900);
+    const site = graph.nodes.find(node => node.id === 'site');
+    expect(site?.powerWatts).toBeNull();
+  });
+
   it('says the grid exchange is unmeasured when no meter is reporting', () => {
     const graph = graphOf([asset()]);
     const grid = graph.nodes.find(node => node.id === 'grid');

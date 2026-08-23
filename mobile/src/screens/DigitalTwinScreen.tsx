@@ -189,12 +189,26 @@ export default function DigitalTwinScreen() {
 
       <View style={styles.summary}>
         <View style={styles.summaryTile}>
-          <Text style={styles.summaryLabel}>Measured net power</Text>
+          <Text style={styles.summaryLabel}>Net behind the meter</Text>
           <Text style={styles.summaryValue}>
-            {graph.coverage.measured > 0 ? watts(graph.measuredNetPowerWatts) : 'unknown'}
+            {graph.measuredBehindMeter > 0 ? watts(graph.measuredNetPowerWatts) : 'unknown'}
           </Text>
           <Text style={styles.summaryMeta}>
-            {graph.coverage.measured}/{graph.coverage.assets} components reporting
+            {graph.coverage.measured}/{graph.coverage.assets} components reporting; meters measure
+            the boundary and are not added in
+          </Text>
+        </View>
+        <View style={styles.summaryTile}>
+          <Text style={styles.summaryLabel}>Grid exchange</Text>
+          <Text style={styles.summaryValue}>
+            {graph.meteredGridPowerWatts === null
+              ? 'unknown'
+              : watts(graph.meteredGridPowerWatts)}
+          </Text>
+          <Text style={styles.summaryMeta}>
+            {graph.meteredGridPowerWatts === null
+              ? 'no meter is reporting, so import and export are unknown, not zero'
+              : 'measured at the meter'}
           </Text>
         </View>
         <View style={styles.summaryTile}>

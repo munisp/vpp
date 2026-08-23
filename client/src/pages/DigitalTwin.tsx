@@ -122,18 +122,35 @@ export default function DigitalTwin() {
           <>
             <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
               <MetricTile
-                label="Measured net power"
-                value={graph.coverage.measured > 0 ? formatWatts(graph.measuredNetPowerWatts) : null}
-                tone={graph.coverage.measured > 0 ? 'live' : 'neutral'}
+                label="Net behind the meter"
+                value={
+                  graph.measuredBehindMeter > 0 ? formatWatts(graph.measuredNetPowerWatts) : null
+                }
+                tone={graph.measuredBehindMeter > 0 ? 'live' : 'neutral'}
                 status={{
                   label: `${graph.coverage.measured}/${graph.coverage.assets} reporting`,
                   tone: coverageTone,
                   meaning:
-                    'Only currently reporting components are summed. Silent equipment is left out rather than counted as zero, so this figure is a floor when coverage is partial.',
+                    'Generation, load and storage that is currently reporting, summed. Meters are excluded because a meter measures the boundary, not another load behind it. Silent equipment is left out rather than counted as zero, so this figure is a floor when coverage is partial.',
                 }}
                 evidence={
                   <FreshnessBadge asOf={graph.generatedAt} stalenessSeconds={60} />
                 }
+              />
+              <MetricTile
+                label="Grid exchange at the meter"
+                value={
+                  graph.meteredGridPowerWatts === null
+                    ? null
+                    : formatWatts(graph.meteredGridPowerWatts)
+                }
+                tone={graph.meteredGridPowerWatts === null ? 'neutral' : 'live'}
+                status={{
+                  label: graph.meteredGridPowerWatts === null ? 'no meter reporting' : 'metered',
+                  tone: graph.meteredGridPowerWatts === null ? 'neutral' : 'live',
+                  meaning:
+                    'Import and export are only shown when a meter measured them. With no meter reporting, the exchange with the grid is unknown, not zero.',
+                }}
               />
               <MetricTile
                 label="Stale components"

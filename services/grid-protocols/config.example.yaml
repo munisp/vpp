@@ -59,3 +59,16 @@ sep2:
   client_key_file: "/etc/vpp/sep2-client.key"
   ca_file: "/etc/vpp/sep2-ca.pem"
   poll_interval: 300s
+
+matter:
+  enabled: false
+  # A Matter controller exposing the WebSocket controller API (for example
+  # matter-server on :5580). This service embeds no Matter stack: without a
+  # controller it refuses to start rather than reporting commissioned nodes.
+  url: "ws://matter-server:5580/ws"
+  call_timeout: 30s
+  reconnect_interval: 10s
+  # The controller's synthetic nodes (id >= 900000) acknowledge commands that no
+  # device performs. Leave this off outside a development fabric: those
+  # acknowledgements are indistinguishable from a dispatched load.
+  allow_test_nodes: false

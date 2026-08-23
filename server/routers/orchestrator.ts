@@ -269,7 +269,10 @@ export const orchestratorRouter = router({
       billingId: z.number().int().positive().optional(),
     }))
     .mutation(async ({ ctx, input }) => {
-      const paymentRef = `${ctx.user.id}-${Date.now()}`;
+      // `payment-user-<userId>-<epochMs>` once the client prefixes it: the `user`
+      // segment is what lets `workflowOwnerId` read the owner without mistaking a
+      // payment row id for a user id (see services/workflows/ownership.ts).
+      const paymentRef = `user-${ctx.user.id}-${Date.now()}`;
 
       try {
         // Dispatches the registered 'processPayment' workflow type on the

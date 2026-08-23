@@ -19,7 +19,16 @@
  * Patterns whose second segment group is the owning user id, as produced in
  * `server/routers/orchestrator.ts`.
  */
-const OWNER_AFTER_PREFIX = ['auto-trading', 'manual-trade', 'p2p-trade'] as const;
+const OWNER_AFTER_PREFIX = [
+  'auto-trading',
+  'manual-trade',
+  'p2p-trade',
+  // `payment-user-<userId>-<epochMs>` from the member-facing orchestrator route.
+  // The `user` segment is what separates it from `payment-<paymentId>`, which
+  // encodes a payment row id and no owner at all; that shape stays unowned, so a
+  // payment id that happens to equal a user id grants nothing.
+  'payment-user',
+] as const;
 
 /**
  * `notification-<epochMs>-<userId>` from `server/integration/temporal-client.ts`

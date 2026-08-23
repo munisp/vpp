@@ -150,6 +150,19 @@ describe('workflow ownership parsing', () => {
     expect(workflowOwnerId('notification-1700000000-12')).toBe(12);
   });
 
+  it('reads the owner of a payment workflow started by the member-facing route', async () => {
+    const { workflowOwnerId, ownsWorkflow } = await import('./services/workflows/ownership');
+
+    // `orchestrator.processPayment` builds `user-<userId>-<epochMs>` and the
+    // Temporal client prefixes it, so the member keeps sight of their own payment.
+    expect(workflowOwnerId('payment-user-8-1700000000000')).toBe(8);
+    expect(ownsWorkflow('payment-user-8-1700000000000', 8)).toBe(true);
+    expect(ownsWorkflow('payment-user-8-1700000000000', 1700000000000)).toBe(false);
+    // `payment-<paymentId>` from the billing route encodes a payment row, not a
+    // user: payment 8 must not become user 8's workflow.
+    expect(workflowOwnerId('payment-8')).toBeNull();
+  });
+
   it('leaves ids that encode no user unowned, so a non-admin is refused rather than guessed at', async () => {
     const { workflowOwnerId } = await import('./services/workflows/ownership');
 

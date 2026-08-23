@@ -64,7 +64,7 @@ export async function getRevenueData(
 
     const result = await db
       .select({
-        date: sql<string>`DATE(${payments.createdAt})`,
+        date: sql<string>`DATE(${payments.createdAt})::text`,
         revenue: sql<number>`SUM(${payments.amount})`,
         transactions: sql<number>`COUNT(*)`,
       })
@@ -305,7 +305,7 @@ export async function getTradingVolumeData(
 
     const result = await db
       .select({
-        date: sql<string>`DATE(${trades.createdAt})`,
+        date: sql<string>`DATE(${trades.createdAt})::text`,
         volume: sql<number>`SUM(${trades.energy})`,
         count: sql<number>`COUNT(*)`,
       })

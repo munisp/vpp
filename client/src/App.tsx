@@ -9,6 +9,7 @@ import DRAutomation from "@/pages/admin/DRAutomation";
 import WebhookConfig from "@/pages/admin/WebhookConfig";
 import { Route, Switch } from "wouter";
 import ErrorBoundary from "./components/ErrorBoundary";
+import { RouteShell } from "./components/RouteShell";
 import { ThemeProvider } from "./contexts/ThemeContext";
 import Home from "./pages/Home";
 import Assets from "./pages/Assets";
@@ -80,49 +81,177 @@ function Router() {
   return (
     <Switch>
       <Route path={"/"} component={Home} />
-      <Route path="/energy-insights" component={EnergyInsights} />
-      <Route path="/admin/dr-automation" component={DRAutomation} />
-      <Route path="/admin/webhook-config" component={WebhookConfig} />     <Route path="/assets" component={Assets} />
+      <Route path="/energy-insights">
+        <RouteShell>
+          <EnergyInsights />
+        </RouteShell>
+      </Route>
+      <Route path="/admin/dr-automation">
+        <RouteShell adminOnly>
+          <DRAutomation />
+        </RouteShell>
+      </Route>
+      <Route path="/admin/webhook-config">
+        <RouteShell adminOnly>
+          <WebhookConfig />
+        </RouteShell>
+      </Route>     <Route path="/assets" component={Assets} />
       <Route path="/monitoring" component={Monitoring} />
       <Route path="/trading" component={Trading} />
       <Route path="/billing" component={Billing} />
       <Route path="/payments" component={Payments} />
       <Route path="/alerts" component={Alerts} />
       <Route path={"/settings"} component={Settings} />
-      <Route path="/notifications" component={NotificationSettings} />
-      <Route path="/notification-settings" component={NotificationSettings} />
+      <Route path="/notifications">
+        <RouteShell>
+          <NotificationSettings />
+        </RouteShell>
+      </Route>
+      <Route path="/notification-settings">
+        <RouteShell>
+          <NotificationSettings />
+        </RouteShell>
+      </Route>
       <Route path="/trading/strategies" component={TradingStrategies} />
-      <Route path="/trading/templates" component={StrategyTemplates} />
+      <Route path="/trading/templates">
+        <RouteShell>
+          <StrategyTemplates />
+        </RouteShell>
+      </Route>
       <Route path="/trading/price-alerts" component={PriceAlerts} />
       <Route path="/trading/comparison" component={StrategyComparison} />
-      <Route path="/qr-payment" component={QRPayment} />
-      <Route path="/qr-device" component={QRDeviceRegistration} />
-      <Route path="/qr-scanner" component={QRScanner} />
-      <Route path="/qr-generator" component={QRGenerator} />
+      <Route path="/qr-payment">
+        <RouteShell>
+          <QRPayment />
+        </RouteShell>
+      </Route>
+      <Route path="/qr-device">
+        <RouteShell>
+          <QRDeviceRegistration />
+        </RouteShell>
+      </Route>
+      <Route path="/qr-scanner">
+        <RouteShell>
+          <QRScanner />
+        </RouteShell>
+      </Route>
+      <Route path="/qr-generator">
+        <RouteShell>
+          <QRGenerator />
+        </RouteShell>
+      </Route>
       <Route path="/qr-history" component={QRHistory} />
       <Route path="/analytics" component={UserAnalyticsDashboard} />
-      <Route path="/referrals" component={Referrals} />
-      <Route path="/referral-leaderboard" component={ReferralLeaderboard} />
-      <Route path="/biometric-settings" component={BiometricSettings} />
-      <Route path={"/demand-response"} component={DemandResponse} />
-      <Route path="/admin" component={AdminDashboard} />
-      <Route path="/admin/users" component={UserManagement} />
-      <Route path="/admin/assets" component={AssetApproval} />
-      <Route path="/admin/pricing" component={MarketPricing} />
-      <Route path="/admin/devices" component={DeviceManagement} />
-      <Route path="/admin/demand-response" component={DRManagement} />
-      <Route path="/admin/payment-credentials" component={PaymentCredentials} />
-      <Route path="/admin/analytics" component={AdminAnalytics} />
-      <Route path="/admin/analytics-dashboard" component={AnalyticsDashboard} />
-      <Route path="/admin/reconciliation" component={ReconciliationDashboard} />
-      <Route path="/admin/cache-monitoring" component={CacheMonitoring} />
-      <Route path="/admin/audit-logs" component={AuditLogs} />
-      <Route path="/admin/ml-predictions" component={MLPredictions} />
-      <Route path="/admin/workflows" component={WorkflowMonitoring} />
-      <Route path="/admin/grid-operator" component={GridOperator} />
-      <Route path="/admin/performance" component={PerformanceDashboard} />
-      <Route path="/admin/iot-devices" component={IoTDeviceMonitoring} />
-      <Route path="/leaderboard" component={Leaderboard} />
+      <Route path="/referrals">
+        <RouteShell>
+          <Referrals />
+        </RouteShell>
+      </Route>
+      <Route path="/referral-leaderboard">
+        <RouteShell>
+          <ReferralLeaderboard />
+        </RouteShell>
+      </Route>
+      <Route path="/biometric-settings">
+        <RouteShell>
+          <BiometricSettings />
+        </RouteShell>
+      </Route>
+      <Route path={"/demand-response"}>
+        <RouteShell>
+          <DemandResponse />
+        </RouteShell>
+      </Route>
+      <Route path="/admin">
+        <RouteShell adminOnly chrome={false}>
+          <AdminDashboard />
+        </RouteShell>
+      </Route>
+      <Route path="/admin/users">
+        <RouteShell adminOnly chrome={false}>
+          <UserManagement />
+        </RouteShell>
+      </Route>
+      <Route path="/admin/assets">
+        <RouteShell adminOnly chrome={false}>
+          <AssetApproval />
+        </RouteShell>
+      </Route>
+      <Route path="/admin/pricing">
+        <RouteShell adminOnly chrome={false}>
+          <MarketPricing />
+        </RouteShell>
+      </Route>
+      <Route path="/admin/devices">
+        <RouteShell adminOnly>
+          <DeviceManagement />
+        </RouteShell>
+      </Route>
+      <Route path="/admin/demand-response">
+        <RouteShell adminOnly>
+          <DRManagement />
+        </RouteShell>
+      </Route>
+      <Route path="/admin/payment-credentials">
+        <RouteShell adminOnly chrome={false}>
+          <PaymentCredentials />
+        </RouteShell>
+      </Route>
+      <Route path="/admin/analytics">
+        <RouteShell adminOnly>
+          <AdminAnalytics />
+        </RouteShell>
+      </Route>
+      <Route path="/admin/analytics-dashboard">
+        <RouteShell adminOnly chrome={false}>
+          <AnalyticsDashboard />
+        </RouteShell>
+      </Route>
+      <Route path="/admin/reconciliation">
+        <RouteShell adminOnly>
+          <ReconciliationDashboard />
+        </RouteShell>
+      </Route>
+      <Route path="/admin/cache-monitoring">
+        <RouteShell adminOnly>
+          <CacheMonitoring />
+        </RouteShell>
+      </Route>
+      <Route path="/admin/audit-logs">
+        <RouteShell adminOnly>
+          <AuditLogs />
+        </RouteShell>
+      </Route>
+      <Route path="/admin/ml-predictions">
+        <RouteShell adminOnly>
+          <MLPredictions />
+        </RouteShell>
+      </Route>
+      <Route path="/admin/workflows">
+        <RouteShell adminOnly>
+          <WorkflowMonitoring />
+        </RouteShell>
+      </Route>
+      <Route path="/admin/grid-operator">
+        <RouteShell adminOnly>
+          <GridOperator />
+        </RouteShell>
+      </Route>
+      <Route path="/admin/performance">
+        <RouteShell adminOnly>
+          <PerformanceDashboard />
+        </RouteShell>
+      </Route>
+      <Route path="/admin/iot-devices">
+        <RouteShell adminOnly>
+          <IoTDeviceMonitoring />
+        </RouteShell>
+      </Route>
+      <Route path="/leaderboard">
+        <RouteShell>
+          <Leaderboard />
+        </RouteShell>
+      </Route>
       <Route path="/insights/advisor" component={EnergyAdvisor} />
       <Route path="/insights/solar-yield" component={SolarYield} />
       <Route path="/insights/battery-health" component={BatteryHealth} />
@@ -137,7 +266,11 @@ function Router() {
       <Route path="/grid/price-signals" component={PriceSignals} />
       <Route path="/grid/fleet-telemetry" component={FleetTelemetry} />
       <Route path="/digital-twin" component={DigitalTwin} />
-      <Route path="/grid/operations-wall" component={OperationsWall} />
+      <Route path="/grid/operations-wall">
+        <RouteShell adminOnly chrome={false}>
+          <OperationsWall />
+        </RouteShell>
+      </Route>
       <Route path="/grid/matter-loads" component={MatterLoads} />
       <Route path="/grid/degraded-operation" component={DegradedOperation} />
       <Route path="/grid/locational-flexibility" component={LocationalFlexibility} />

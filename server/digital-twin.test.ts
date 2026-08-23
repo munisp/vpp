@@ -175,7 +175,7 @@ describe('digital twin graph', () => {
     // A reporting meter says nothing about the equipment behind the bus, so the
     // bus is not drawn live off it.
     expect(site?.evidence).toBe('never');
-    expect(site?.detail).toContain('Only a meter is registered');
+    expect(site?.detail).toContain('Only meters are registered');
   });
 
   it('calls the bus stale when the only equipment behind it is stale, meter or not', () => {
@@ -207,6 +207,16 @@ describe('digital twin graph', () => {
     expect(site?.evidence).toBe('measured');
     expect(site?.powerWatts).toBeNull();
     expect(graph.measuredBehindMeter).toBe(0);
+  });
+
+  it('says an empty scope is an empty registry, not an idle plant', () => {
+    const graph = graphOf([]);
+    const site = graph.nodes.find(node => node.id === 'site');
+
+    expect(site?.evidence).toBe('never');
+    expect(site?.powerWatts).toBeNull();
+    expect(site?.detail).toContain('empty registry');
+    expect(graph.coverage.assets).toBe(0);
   });
 
   it('says the grid exchange is unmeasured when no meter is reporting', () => {

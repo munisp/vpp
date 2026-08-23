@@ -458,9 +458,11 @@ export function buildTwinGraph(input: TwinInput): TwinGraph {
     detail:
       measuredBehindMeter > 0
         ? `Net ${formatWatts(measuredNetPowerWatts)} across the ${measuredBehindMeter} of ${coverage.assets} assets reporting behind the meter. Meters are not added in — they measure the boundary, not another load — and the ${coverage.assets - measured} silent assets contribute nothing and are not assumed idle.`
-        : assetsBehindMeter === 0
-          ? 'Only a meter is registered here, so nothing is known about the equipment behind the bus.'
-          : 'No asset behind this bus is currently reporting, so the net flow is unknown rather than zero.',
+        : input.assets.length === 0
+          ? 'No asset is registered in this scope at all, so this is an empty registry rather than an idle plant.'
+          : assetsBehindMeter === 0
+            ? 'Only meters are registered here, so nothing is known about the equipment behind the bus.'
+            : 'No asset behind this bus is currently reporting, so the net flow is unknown rather than zero.',
   });
 
   nodes.push({

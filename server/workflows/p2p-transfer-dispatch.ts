@@ -18,6 +18,25 @@ import { dispatchDeviceSetpoint } from '../services/control-delivery';
 import { mqttBrokerService } from '../integration/mqtt-broker';
 import { MIN_VALIDITY_SECONDS, maxValiditySeconds } from '../services/control-validity';
 
+/**
+ * Dispatch adds to a trade's evidence; it does not replace it. The prior keys
+ * hold the match and the buyer's confirmed payment, and settlement reads them
+ * later, so overwriting the whole document would erase the payment evidence.
+ */
+function mergeTradeMetadata(existing: string | null, patch: Record<string, unknown>): string {
+  let base: Record<string, unknown> = {};
+  if (existing) {
+    try {
+      const parsed = JSON.parse(existing);
+      if (parsed && typeof parsed === 'object') base = parsed as Record<string, unknown>;
+    } catch {
+      // A malformed document is kept out of the way rather than silently dropped.
+      base = { unparsedMetadata: existing };
+    }
+  }
+  return JSON.stringify({ ...base, ...patch });
+}
+
 export interface EnergyTransferInput {
   tradeId: number;
   sellerId: number;
@@ -62,11 +81,17 @@ export async function executeEnergyTransfer(
   const db = await getDb();
   if (!db) throw new Error('Database not available');
 
+  const [tradeRow] = await db
+    .select({ metadata: trades.metadata })
+    .from(trades)
+    .where(eq(trades.id, input.tradeId));
+  const priorMetadata = tradeRow?.metadata ?? null;
+
   const markDispatchFailed = async (error: string): Promise<EnergyTransferResult> => {
     console.error(`[TradingActivity] Dispatch failed for trade ${input.tradeId}: ${error}`);
     await db.update(trades).set({
       status: 'pending', // escrow stays held — never settle an undispatched trade
-      metadata: JSON.stringify({
+      metadata: mergeTradeMetadata(priorMetadata, {
         transferStatus: 'dispatch_failed',
         dispatchError: error,
         stage: 'dispatch',
@@ -168,7 +193,7 @@ export async function executeEnergyTransfer(
   const transferId = `dispatch-${input.tradeId}-${dispatch.assignmentId ?? Date.now()}`;
   await db.update(trades).set({
     status: 'pending', // still pending until settlement verifies delivery
-    metadata: JSON.stringify({
+    metadata: mergeTradeMetadata(priorMetadata, {
       transferId,
       // The broker took the message; the device never acknowledges, so this is
       // not evidence the seller's asset exported anything.
@@ -185,6 +210,7 @@ export async function executeEnergyTransfer(
       stage: 'executing',
     }),
   }).where(eq(trades.id, input.tradeId));
+
 
   console.log(
     `[TradingActivity] Bounded setpoint queued for device ${deviceId}: ` +

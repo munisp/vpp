@@ -7,6 +7,7 @@ import {
   getOrderBook,
   submitOrder,
 } from '../services/p2p-matching';
+import { ParticipantError, loadTradingParticipant } from '../services/p2p-participants';
 
 const SubmitOrderSchema = z.object({
   side: z.enum(['buy', 'sell']),
@@ -15,6 +16,12 @@ const SubmitOrderSchema = z.object({
 });
 
 function toError(error: unknown, fallback: string): TRPCError {
+  if (error instanceof ParticipantError) {
+    return new TRPCError({
+      code: error.code === 'BUSINESS_NOT_VERIFIED' ? 'FORBIDDEN' : 'NOT_FOUND',
+      message: error.message,
+    });
+  }
   const message = error instanceof Error ? error.message : '';
   if (message === 'ORDER_VALUE_TOO_SMALL') {
     return new TRPCError({ code: 'BAD_REQUEST', message: 'Order total value must be greater than zero; increase energy or price.' });
@@ -32,8 +39,10 @@ function toError(error: unknown, fallback: string): TRPCError {
  * Complements routers/p2p-trading.ts (manual offer/accept flow) with a real
  * price-time priority matcher: orders rest on the trades table as pending
  * p2p_buy/p2p_sell rows, fills (including partial fills) are recorded in
- * p2p_matches, and fully-filled orders flip to 'executed' atomically inside
- * one DB transaction.
+ * p2p_matches, all inside one DB transaction.
+ *
+ * A fill is not a settlement: a fully filled order stays pending and awaiting
+ * payment, because nobody has been paid at the moment the quantities match.
  */
 export const p2pMatchingRouter = router({
   // Create an order and immediately run the matcher against the book.
@@ -41,7 +50,16 @@ export const p2pMatchingRouter = router({
     .input(SubmitOrderSchema)
     .mutation(async ({ ctx, input }) => {
       try {
-        return await submitOrder(ctx.user.id, input.side, input.energyWh, input.priceCentsPerKwh);
+        // An unverified business cannot hold a position: refused before the
+        // order reaches the book.
+        const participant = await loadTradingParticipant(ctx.user.id);
+        return await submitOrder(
+          participant.userId,
+          input.side,
+          input.energyWh,
+          input.priceCentsPerKwh,
+          participant.participantType
+        );
       } catch (error) {
         throw toError(error, 'Failed to submit order.');
       }

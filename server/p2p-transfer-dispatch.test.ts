@@ -19,9 +19,15 @@ interface AssetRow {
 
 const tradeUpdates: Array<Record<string, unknown>> = [];
 
-function mockDb(rows: AssetRow[]) {
+function mockDb(rows: AssetRow[], tradeMetadata: string | null = null) {
   const db = {
-    select: () => ({ from: () => ({ where: async () => rows }) }),
+    // The projected select reads the trade's existing metadata; the bare select
+    // lists the seller's assets.
+    select: (fields?: Record<string, unknown>) => ({
+      from: () => ({
+        where: async () => (fields ? [{ metadata: tradeMetadata }] : rows),
+      }),
+    }),
     update: () => ({
       set: (values: Record<string, unknown>) => ({
         where: async () => {
@@ -147,6 +153,23 @@ describe('executeEnergyTransfer', () => {
     expect(metadata.transferStatus).toBe('broker_queued');
     expect(metadata.controlAssignmentId).toBe(42);
     expect(metadata.fallbackPolicy).toBe('resume_local');
+  });
+
+  it('keeps the payment evidence already on the trade', async () => {
+    mockDb(
+      [activeAsset],
+      JSON.stringify({ sellOfferId: 12, buyerPaymentId: 99, settlement: 'buyer_paid_awaiting_seller_payout' })
+    );
+    mockDelivery(true);
+    mockBroker(true);
+    const { executeEnergyTransfer } = await import('./workflows/p2p-transfer-dispatch');
+
+    await executeEnergyTransfer({ tradeId: 11, sellerId: 7, buyerId: 8, energyAmount: 2000 });
+
+    const metadata = JSON.parse(String(tradeUpdates.at(-1)?.metadata));
+    expect(metadata.buyerPaymentId).toBe(99);
+    expect(metadata.sellOfferId).toBe(12);
+    expect(metadata.transferStatus).toBe('broker_queued');
   });
 
   it('refuses an export rate the asset is not rated for', async () => {

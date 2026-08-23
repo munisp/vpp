@@ -12,6 +12,7 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import { trpc } from '../services/trpc';
 import ShareButton from '../components/ShareButton';
+import SettlementEvidenceList from '../components/SettlementEvidenceList';
 import { ShareService } from '../services/shareService';
 import { HapticService } from '../services/hapticService';
 
@@ -444,6 +445,8 @@ export default function P2PTradingScreen({ navigation }: any) {
                 </Text>
               </View>
             )}
+
+            <SettlementEvidenceList />
           </View>
         )}
       </ScrollView>

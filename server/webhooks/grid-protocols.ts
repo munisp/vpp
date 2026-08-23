@@ -28,6 +28,7 @@ import {
 } from '../services/grid-protocol-ingest';
 import {
   handleMatterAttribute,
+  handleMatterNode,
   handleMatterNodeRemoved,
   handleMatterNodes,
 } from '../services/matter-ingest';
@@ -277,17 +278,24 @@ const modbusSchema = z.object({
 
 const matterIdentifier = z.string().regex(/^\d{1,20}$/);
 
+const matterNodeSchema = z.object({
+  node_id: matterIdentifier,
+  available: z.boolean(),
+  is_bridge: z.boolean(),
+  is_test_node: z.boolean(),
+  attributes: z.record(z.string(), z.unknown()).nullable(),
+});
+
 const matterNodesSchema = z.object({
   fabric_id: matterIdentifier,
-  nodes: z.array(
-    z.object({
-      node_id: matterIdentifier,
-      available: z.boolean(),
-      is_bridge: z.boolean(),
-      is_test_node: z.boolean(),
-      attributes: z.record(z.string(), z.unknown()).nullable(),
-    })
-  ),
+  nodes: z.array(matterNodeSchema),
+});
+
+// One announced node. Separate from the inventory endpoint because that one
+// retires whatever it was not sent, which a single-node event cannot state.
+const matterSingleNodeSchema = z.object({
+  fabric_id: matterIdentifier,
+  node: matterNodeSchema,
 });
 
 const matterAttributeSchema = z.object({
@@ -429,6 +437,10 @@ gridProtocolRouter.post(
 gridProtocolRouter.post(
   '/matter/nodes',
   handler(matterNodesSchema, input => handleMatterNodes(input))
+);
+gridProtocolRouter.post(
+  '/matter/node',
+  handler(matterSingleNodeSchema, input => handleMatterNode(input))
 );
 gridProtocolRouter.post(
   '/matter/attribute',

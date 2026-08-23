@@ -30,18 +30,41 @@ type matterNodesBody struct {
 	Nodes    []matterNode `json:"nodes"`
 }
 
+func toMatterNode(node matter.NodeData) matterNode {
+	return matterNode{
+		NodeID:     strconv.FormatInt(node.NodeID, 10),
+		Available:  node.Available,
+		IsBridge:   node.IsBridge,
+		IsTestNode: node.NodeID >= matter.TestNodeIDStart,
+		Attributes: node.Attributes,
+	}
+}
+
+// MatterNodesReported sends a complete inventory. The platform reconciles
+// against it, so every node the controller currently reports must be present:
+// one the caller omits is taken to have left the fabric.
 func (c *Client) MatterNodesReported(ctx context.Context, fabricID uint64, nodes []matter.NodeData) error {
 	body := matterNodesBody{FabricID: strconv.FormatUint(fabricID, 10), Nodes: make([]matterNode, 0, len(nodes))}
 	for _, node := range nodes {
-		body.Nodes = append(body.Nodes, matterNode{
-			NodeID:     strconv.FormatInt(node.NodeID, 10),
-			Available:  node.Available,
-			IsBridge:   node.IsBridge,
-			IsTestNode: node.NodeID >= matter.TestNodeIDStart,
-			Attributes: node.Attributes,
-		})
+		body.Nodes = append(body.Nodes, toMatterNode(node))
 	}
 	return c.post(ctx, "/api/grid/matter/nodes", body, nil)
+}
+
+type matterNodeBody struct {
+	FabricID string     `json:"fabric_id"`
+	Node     matterNode `json:"node"`
+}
+
+// MatterNodeReported sends one node the controller announced or updated. It says
+// nothing about the rest of the fabric, so it must not go to the inventory
+// endpoint: that would read as an inventory of one and retire every other
+// commissioned load.
+func (c *Client) MatterNodeReported(ctx context.Context, fabricID uint64, node matter.NodeData) error {
+	return c.post(ctx, "/api/grid/matter/node", matterNodeBody{
+		FabricID: strconv.FormatUint(fabricID, 10),
+		Node:     toMatterNode(node),
+	}, nil)
 }
 
 type matterAttributeBody struct {

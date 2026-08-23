@@ -184,6 +184,45 @@ describe('handleMatterNodes', () => {
   });
 });
 
+describe('handleMatterNode', () => {
+  it('upserts the announced node without retiring the rest of the fabric', async () => {
+    mockDb();
+    state.updateReturns = [{ id: 7 }];
+    const { handleMatterNode } = await import('./services/matter-ingest');
+
+    const result = await handleMatterNode({
+      fabric_id: '1',
+      node: {
+        node_id: '6',
+        available: true,
+        is_bridge: false,
+        is_test_node: false,
+        attributes: { '1/6/0': true },
+      },
+    });
+
+    expect(result.stored).toBe(1);
+    expect(state.inserted).toHaveLength(1);
+    expect(state.inserted[0].values).toMatchObject({ fabricId: '1', nodeId: '6', available: true });
+    // A node event says nothing about the other nodes, so nothing is reconciled:
+    // an update here would mark every load the event omitted as removed.
+    expect(state.updated).toHaveLength(0);
+  });
+
+  it('refuses an identifier that is not a decimal Matter id', async () => {
+    mockDb();
+    const { GridProtocolError } = await import('./services/grid-protocol-ingest');
+    const { handleMatterNode } = await import('./services/matter-ingest');
+
+    await expect(
+      handleMatterNode({
+        fabric_id: '1',
+        node: { node_id: 'six', available: true, is_bridge: false, is_test_node: false, attributes: null },
+      })
+    ).rejects.toThrow(GridProtocolError);
+  });
+});
+
 describe('handleMatterAttribute', () => {
   it('stores a null reading as null, because unknown is not zero', async () => {
     mockDb();

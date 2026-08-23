@@ -96,6 +96,60 @@ export function capabilitiesFromAttributes(
   );
 }
 
+/** Stores one reported node without touching any other node on the fabric. */
+async function upsertNode(
+  db: Awaited<ReturnType<typeof requireDb>>,
+  fabricId: string,
+  node: MatterNodeReport,
+  now: Date
+): Promise<string> {
+  const nodeId = requireIdentifier(node.node_id, 'node_id');
+  await db
+    .insert(matterNodes)
+    .values({
+      fabricId,
+      nodeId,
+      available: node.available,
+      isBridge: node.is_bridge,
+      isTestNode: node.is_test_node,
+      reportedAttributes: node.attributes ?? null,
+      firstSeenAt: now,
+      lastReportedAt: now,
+      removedAt: null,
+    })
+    .onConflictDoUpdate({
+      target: [matterNodes.fabricId, matterNodes.nodeId],
+      set: {
+        available: node.available,
+        isBridge: node.is_bridge,
+        isTestNode: node.is_test_node,
+        reportedAttributes: node.attributes ?? null,
+        lastReportedAt: now,
+        removedAt: null,
+        updatedAt: now,
+      },
+    });
+  return nodeId;
+}
+
+/**
+ * Records one node the controller announced or updated.
+ *
+ * This is deliberately not the inventory path. A `node_added`/`node_updated`
+ * event says nothing about the other nodes on the fabric, so reconciling against
+ * it would retire every load the event did not mention — a single new plug would
+ * read as the fabric having lost all its other appliances.
+ */
+export async function handleMatterNode(input: {
+  fabric_id: string;
+  node: MatterNodeReport;
+}): Promise<{ stored: 1 }> {
+  const fabricId = requireIdentifier(input.fabric_id, 'fabric_id');
+  const db = await requireDb();
+  await upsertNode(db, fabricId, input.node, new Date());
+  return { stored: 1 };
+}
+
 /**
  * Replaces the inventory for a fabric with what the controller just reported.
  *
@@ -113,33 +167,7 @@ export async function handleMatterNodes(input: {
 
   const reportedIds: string[] = [];
   for (const node of input.nodes) {
-    const nodeId = requireIdentifier(node.node_id, 'node_id');
-    reportedIds.push(nodeId);
-    await db
-      .insert(matterNodes)
-      .values({
-        fabricId,
-        nodeId,
-        available: node.available,
-        isBridge: node.is_bridge,
-        isTestNode: node.is_test_node,
-        reportedAttributes: node.attributes ?? null,
-        firstSeenAt: now,
-        lastReportedAt: now,
-        removedAt: null,
-      })
-      .onConflictDoUpdate({
-        target: [matterNodes.fabricId, matterNodes.nodeId],
-        set: {
-          available: node.available,
-          isBridge: node.is_bridge,
-          isTestNode: node.is_test_node,
-          reportedAttributes: node.attributes ?? null,
-          lastReportedAt: now,
-          removedAt: null,
-          updatedAt: now,
-        },
-      });
+    reportedIds.push(await upsertNode(db, fabricId, node, now));
   }
 
   // Nodes absent from a full inventory report are no longer commissioned on this

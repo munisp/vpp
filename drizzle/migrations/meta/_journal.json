@@ -71,6 +71,27 @@
       "when": 1787510000000,
       "tag": "0009_degraded_operation",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1787516000000,
+      "tag": "0010_p2p_trade_payments",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1787517000000,
+      "tag": "0011_market_participant_types",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1787518000000,
+      "tag": "0012_p2p_settlement_records",
+      "breakpoints": true
     }
   ]
 }

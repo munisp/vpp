@@ -7,6 +7,24 @@
 
 import { NativeConnection, Worker } from '@temporalio/worker';
 
+/**
+ * Trade metadata carries match, payment, dispatch and control-window evidence.
+ * Activities merge into it: replacing it wholesale erased the evidence written
+ * by the step before.
+ */
+function mergeTradeMetadata(existing: string | null, patch: Record<string, unknown>): string {
+  let base: Record<string, unknown> = {};
+  if (existing) {
+    try {
+      const parsed = JSON.parse(existing);
+      if (parsed && typeof parsed === 'object') base = parsed as Record<string, unknown>;
+    } catch {
+      base = {};
+    }
+  }
+  return JSON.stringify({ ...base, ...patch });
+}
+
 // Trading activities - inline since trading-workflow.ts has activities embedded
 const tradingActivities = {
   async validateTradeActivity(input: {
@@ -61,21 +79,55 @@ const tradingActivities = {
   }): Promise<{ success: boolean; escrowId?: string; error?: string }> {
     try {
       const { getDb } = await import('../db');
-      const { trades } = await import('../../drizzle/schema');
-      const { eq } = await import('drizzle-orm');
+      const { payments, trades } = await import('../../drizzle/schema');
+      const { and, eq } = await import('drizzle-orm');
 
       const db = await getDb();
       if (!db) throw new Error('Database not available');
 
-      // Create escrow record (update trade with pending status and escrow metadata)
-      const escrowId = `ESC-${Date.now()}-${input.tradeId}`;
-      
+      // The platform holds no client funds: there is no custody account and no
+      // ledger that can debit a buyer. Writing an escrow id into metadata held
+      // nothing while reporting success, so the only honest hold is a buyer
+      // payment the provider has already confirmed.
+      const [payment] = await db
+        .select({ id: payments.id, amount: payments.amount })
+        .from(payments)
+        .where(
+          and(
+            eq(payments.p2pTradeId, input.tradeId),
+            eq(payments.userId, input.buyerId),
+            eq(payments.status, 'completed')
+          )
+        )
+        .limit(1);
+
+      if (!payment) {
+        return {
+          success: false,
+          error: `No confirmed buyer payment exists for trade ${input.tradeId}; the platform cannot hold funds it never received.`,
+        };
+      }
+      if (payment.amount !== input.amount) {
+        return {
+          success: false,
+          error: `Buyer payment ${payment.id} settled ${payment.amount} cents but trade ${input.tradeId} owes ${input.amount} cents.`,
+        };
+      }
+
+      const escrowId = `PAYMENT-${payment.id}`;
+      const [existing] = await db.select({ metadata: trades.metadata }).from(trades).where(eq(trades.id, input.tradeId)).limit(1);
       await db.update(trades).set({
-        status: 'pending', // Keep pending while in escrow
-        metadata: JSON.stringify({ escrowId, escrowAmount: input.amount, escrowCreatedAt: new Date(), stage: 'escrow' }),
+        status: 'pending', // Paid by the buyer, not yet complete: the seller is unpaid.
+        metadata: mergeTradeMetadata(existing?.metadata ?? null, {
+          escrowId,
+          escrowKind: 'provider_confirmed_buyer_payment',
+          escrowAmount: input.amount,
+          buyerPaymentId: payment.id,
+          stage: 'buyer_paid',
+        }),
       }).where(eq(trades.id, input.tradeId));
 
-      console.log(`[TradingActivity] Escrow created: ${escrowId} for trade ${input.tradeId}`);
+      console.log(`[TradingActivity] Buyer payment ${payment.id} recognised as the hold for trade ${input.tradeId}`);
       return { success: true, escrowId };
     } catch (error) {
       console.error('[TradingActivity] Escrow error:', error);
@@ -107,22 +159,37 @@ const tradingActivities = {
       const { getDb } = await import('../db');
       const { trades } = await import('../../drizzle/schema');
       const { eq } = await import('drizzle-orm');
+      const { assertSellerPayoutAvailable } = await import('../services/p2p-settlement');
 
       const db = await getDb();
       if (!db) throw new Error('Database not available');
 
-      // Release escrow to seller (mark as executed - trade complete)
+      // Paying the seller moves real money out of the platform and no
+      // disbursement provider is wired to do it. Marking the trade 'executed'
+      // here paid nobody while booking the seller's earnings, so the trade
+      // records what it owes and the activity refuses.
+      const [existing] = await db
+        .select({ metadata: trades.metadata })
+        .from(trades)
+        .where(eq(trades.id, input.tradeId))
+        .limit(1);
       await db.update(trades).set({
-        status: 'executed', // Use 'executed' as the completed state per schema
-        metadata: JSON.stringify({ 
-          escrowReleasedAt: new Date(),
-          escrowReleasedTo: input.sellerId,
-          stage: 'completed',
+        metadata: mergeTradeMetadata(existing?.metadata ?? null, {
+          escrowId: input.escrowId,
+          sellerPayout: 'unavailable_no_provider',
+          sellerPayoutOwedTo: input.sellerId,
+          stage: 'buyer_paid_awaiting_seller_payout',
         }),
       }).where(eq(trades.id, input.tradeId));
 
-      console.log(`[TradingActivity] Escrow released: ${input.escrowId} to seller ${input.sellerId}`);
-      return { success: true };
+      try {
+        assertSellerPayoutAvailable({ tradeId: input.tradeId, sellerId: input.sellerId });
+      } catch (refusal) {
+        const error = refusal instanceof Error ? refusal.message : String(refusal);
+        console.error(`[TradingActivity] ${error}`);
+        return { success: false, error };
+      }
+      return { success: false, error: 'Seller payout unavailable' };
     } catch (error) {
       console.error('[TradingActivity] Escrow release error:', error);
       return { success: false, error: error instanceof Error ? error.message : 'Unknown error' };

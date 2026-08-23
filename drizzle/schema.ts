@@ -57,7 +57,7 @@ export const tokensStatusEnum = pgEnum("tokens_status", ["active", "used", "expi
 export const paymentsStatusEnum = pgEnum("payments_status", ["pending", "completed", "failed", "refunded"]);
 export const paymentsPaymentMethodEnum = pgEnum("payments_payment_method", ["mpesa", "airtel_money", "tigo_pesa", "bank_transfer", "card"]);
 export const paymentsCurrencyEnum = pgEnum("payments_currency", ["NGN", "TZS", "USD"]);
-export const paymentsPaymentTypeEnum = pgEnum("payments_payment_type", ["invoice", "token_purchase", "monthly_fee"]);
+export const paymentsPaymentTypeEnum = pgEnum("payments_payment_type", ["invoice", "token_purchase", "monthly_fee", "p2p_trade"]);
 export const billingsStatusEnum = pgEnum("billings_status", ["draft", "issued", "paid", "overdue", "cancelled"]);
 export const billingsBillingTypeEnum = pgEnum("billings_billing_type", ["postpaid", "prepaid"]);
 export const marketPricesPriceTypeEnum = pgEnum("marketPrices_price_type", ["off_peak", "shoulder", "peak", "super_peak"]);
@@ -74,6 +74,7 @@ export const usersLanguageEnum = pgEnum("users_language", ["en", "ha", "yo", "ig
 export const usersCurrencyEnum = pgEnum("users_currency", ["NGN", "TZS", "USD"]);
 export const usersCountryEnum = pgEnum("users_country", ["nigeria", "tanzania"]);
 export const usersRoleEnum = pgEnum("users_role", ["user", "admin"]);
+export const usersParticipantTypeEnum = pgEnum("users_participant_type", ["person", "business"]);
 
 
 /**
@@ -87,6 +88,22 @@ export const users = pgTable("users", {
   phone: varchar("phone", { length: 20 }),
   loginMethod: varchar("loginMethod", { length: 64 }),
   role: usersRoleEnum("role").default("user").notNull(),
+  /**
+   * Who this participant is in the market. Trading is bilateral across types
+   * (person-person, person-business, business-business), and the type of each
+   * side is recorded on the trade: a business counterparty carries different
+   * invoicing, tax and exposure treatment than a household, so "unknown" is
+   * not an acceptable answer at settlement time.
+   *
+   * A business may only trade once its identity is verified
+   * (`businessVerifiedAt`): an unverified business is refused rather than
+   * silently traded as if it were a household.
+   */
+  participantType: usersParticipantTypeEnum("participantType").default("person").notNull(),
+  businessLegalName: varchar("businessLegalName", { length: 255 }),
+  businessRegistrationNumber: varchar("businessRegistrationNumber", { length: 100 }),
+  businessVerifiedAt: timestamp("businessVerifiedAt"),
+  businessVerifiedBy: int("businessVerifiedBy"),
   country: usersCountryEnum("country").default("nigeria").notNull(),
   currency: usersCurrencyEnum("currency").default("NGN").notNull(),
   language: usersLanguageEnum("language").default("en").notNull(),
@@ -254,6 +271,10 @@ export const payments = pgTable("payments", {
   accountNumber: varchar("accountNumber", { length: 100 }),
   transactionId: varchar("transactionId", { length: 255 }),
   status: paymentsStatusEnum("status").default("pending").notNull(),
+  // The P2P purchase this payment settles. A partial unique index
+  // (payments_p2p_trade_live_uq) allows only one live payment per trade, so a
+  // double-submitted purchase cannot charge a buyer twice.
+  p2pTradeId: int("p2pTradeId"),
   metadata: text("metadata"), // JSON string for payment details
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().$onUpdate(() => new Date()).notNull(),

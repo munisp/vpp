@@ -337,6 +337,45 @@ async function executePostPaymentActions(
         break;
       }
 
+      case 'p2p_trade': {
+        // A confirmed buyer payment is recorded against its trade. The trade is
+        // still not complete: the seller cannot be paid, so the state written
+        // is 'buyer paid, seller unpaid' rather than executed.
+        const { recordBuyerPaymentSettled } = await import('../services/p2p-settlement');
+        try {
+          const result = await recordBuyerPaymentSettled({
+            id: payment.id,
+            amount: payment.amount,
+            currency: payment.currency ?? null,
+            transactionId: payment.transactionId ?? null,
+            metadata: payment.metadata ?? null,
+          });
+          console.log(
+            `[PostPayment] Trade ${result.buyTradeId} recorded as ${result.settlement} in settlement ${result.settlementId}; seller payout unavailable`
+          );
+        } catch (error) {
+          // The buyer's money moved and the platform cannot say which trade it
+          // paid for. Logging alone would lose that, so the unattributed
+          // payment is marked on the row itself for reconciliation.
+          const reason = error instanceof Error ? error.message : String(error);
+          console.error(
+            `[PostPayment] P2P payment ${payment.id} could not be attributed to a trade:`,
+            error
+          );
+          await db
+            .update(payments)
+            .set({
+              metadata: JSON.stringify({
+                ...metadata,
+                settlementUnresolved: reason,
+                settlementUnresolvedAt: new Date().toISOString(),
+              }),
+            })
+            .where(eq(payments.id, payment.id));
+        }
+        break;
+      }
+
       case 'subscription':
         // Update user's last activity (subscription tracking via metadata)
         console.log(`[PostPayment] Subscription payment processed for user ${payment.userId}`);
@@ -346,12 +385,17 @@ async function executePostPaymentActions(
         console.log(`[PostPayment] Unknown payment type: ${paymentType}`);
     }
 
-    // Send success notification to user
+    // Send confirmation to the user. A P2P purchase is deliberately not called
+    // successful here: the buyer has paid, but the seller has not been paid and
+    // the energy has not been evidenced, so the trade is not done.
     await sendPushNotification(
       payment.userId,
       {
-        title: 'Payment Successful',
-        body: `Your payment of ${payment.amount} ${payment.currency || 'TZS'} has been processed successfully.`,
+        title: paymentType === 'p2p_trade' ? 'Payment received' : 'Payment Successful',
+        body:
+          paymentType === 'p2p_trade'
+            ? `Your payment of ${payment.amount} ${payment.currency || 'TZS'} was confirmed by your provider. The trade completes once the energy delivery and the seller's payout are recorded.`
+            : `Your payment of ${payment.amount} ${payment.currency || 'TZS'} has been processed successfully.`,
         data: {
           type: 'payment_success',
           paymentId: payment.id,

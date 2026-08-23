@@ -164,6 +164,85 @@ export const p2pMatches = pgTable("p2p_matches", {
 export type P2pMatch = typeof p2pMatches.$inferSelect;
 export type InsertP2pMatch = typeof p2pMatches.$inferInsert;
 
+export const p2pSettlementsStateEnum = pgEnum("p2p_settlements_state", [
+  "buyer_paid_seller_unpaid",
+  "delivery_evidenced",
+  "complete",
+  "unresolved",
+]);
+
+export const p2pSettlementsDeliveryEnum = pgEnum("p2p_settlements_delivery", [
+  "unmeasured",
+  "unverified",
+  "measured",
+  "not_delivered",
+]);
+
+export const p2pSettlementsPayoutEnum = pgEnum("p2p_settlements_payout", [
+  "unavailable_no_provider",
+  "requested",
+  "evidenced",
+]);
+
+export const p2pSettlementsReconciliationEnum = pgEnum("p2p_settlements_reconciliation", [
+  "pending",
+  "matched",
+  "mismatch",
+]);
+
+/**
+ * P2P settlement records — the independent evidence trail for a trade, kept
+ * outside the trade rows it settles so that reconciliation never compares a
+ * record against itself.
+ *
+ * Every money and energy claim here names the evidence behind it: a payment
+ * confirmed by the provider, energy measured from telemetry, a payout the
+ * platform can prove it made. A settlement reaches 'complete' only when all
+ * three exist; until then its state says which one is missing.
+ */
+export const p2pSettlements = pgTable("p2p_settlements", {
+  id: serial("id").primaryKey(),
+  buyTradeId: int("buyTradeId").notNull().unique(), // trades.id of the p2p_buy leg
+  sellTradeId: int("sellTradeId"),
+  buyerId: int("buyerId").notNull(),
+  sellerId: int("sellerId").notNull(),
+  energyWh: int("energyWh").notNull(),
+  amountCents: int("amountCents").notNull(),
+  currency: varchar("currency", { length: 3 }).notNull(),
+
+  // Buyer payment evidence: the provider's own reference, not our row id.
+  buyerPaymentId: int("buyerPaymentId"),
+  buyerPaymentReference: varchar("buyerPaymentReference", { length: 191 }),
+  buyerPaidAt: timestamp("buyerPaidAt"),
+
+  // Energy delivery evidence, measured from telemetry.
+  delivery: p2pSettlementsDeliveryEnum("delivery").default("unmeasured").notNull(),
+  deliveredEnergyWh: int("deliveredEnergyWh"),
+  deliverySamples: int("deliverySamples"),
+  deliveryMeasuredAt: timestamp("deliveryMeasuredAt"),
+  deliveryNote: text("deliveryNote"),
+
+  // Seller payout evidence.
+  sellerPayout: p2pSettlementsPayoutEnum("sellerPayout")
+    .default("unavailable_no_provider")
+    .notNull(),
+  sellerPayoutReference: varchar("sellerPayoutReference", { length: 191 }),
+  sellerPaidAt: timestamp("sellerPaidAt"),
+
+  state: p2pSettlementsStateEnum("state").notNull(),
+  reconciliation: p2pSettlementsReconciliationEnum("reconciliation")
+    .default("pending")
+    .notNull(),
+  reconciliationNote: text("reconciliationNote"),
+  reconciledAt: timestamp("reconciledAt"),
+
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().notNull(),
+});
+
+export type P2pSettlement = typeof p2pSettlements.$inferSelect;
+export type InsertP2pSettlement = typeof p2pSettlements.$inferInsert;
+
 /**
  * Carbon certificates — one certificate minted per 100 kWh of verified
  * solar generation. certificateHash is a deterministic SHA-256 over the

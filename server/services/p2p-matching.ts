@@ -8,15 +8,21 @@
  *  - incoming buy  matches the LOWEST ask <= the buyer's maximum price
  * Ties break by earliest createdAt (time priority). Execution price is the
  * maker's (resting order's) price. Partial fills are supported: filled
- * quantities are tracked in `p2p_matches`, and an order flips to 'executed'
- * (via a status-conditional update, same convention as routers/p2p-trading.ts)
- * only when fully filled. Fully-filled incoming orders also flip atomically.
+ * quantities are tracked in `p2p_matches`.
+ *
+ * A fill is not a settlement. `trades.status = 'executed'` is read as revenue by
+ * analytics and as earnings by the seller, so a fill never sets it: a fully
+ * filled order keeps status 'pending', carries its counterparty, and records
+ * `settlement: 'awaiting_payment'` until the buyer's payment is confirmed by the
+ * provider (server/services/p2p-settlement.ts).
  */
 
 import { and, asc, desc, eq, inArray, ne, or, sql } from 'drizzle-orm';
+import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { getDb } from '../db';
 import { trades } from '../../drizzle/schema';
 import { p2pMatches } from '../../drizzle/innovations-schema';
+import type { ParticipantType } from './p2p-participants';
 
 function affectedRows(result: { rowCount: number | null }): number {
   return result.rowCount ?? 0;
@@ -25,6 +31,19 @@ function affectedRows(result: { rowCount: number | null }): number {
 function insertedId(returned: { id: number }[]): number | null {
   const id = Number(returned[0]?.id);
   return Number.isFinite(id) && id > 0 ? id : null;
+}
+
+function withSettlement(existing: string | null, patch: Record<string, unknown>): string {
+  let base: Record<string, unknown> = {};
+  if (existing) {
+    try {
+      const parsed = JSON.parse(existing);
+      if (parsed && typeof parsed === 'object') base = parsed as Record<string, unknown>;
+    } catch {
+      base = {};
+    }
+  }
+  return JSON.stringify({ ...base, ...patch });
 }
 
 export type OrderSide = 'buy' | 'sell';
@@ -43,14 +62,23 @@ export interface MatchExecution {
 export interface SubmitOrderResult {
   orderId: number;
   side: OrderSide;
-  status: 'pending' | 'executed';
+  /**
+   * 'open' still has unfilled energy; 'filled' is fully matched but unpaid and
+   * therefore still a pending trade row.
+   */
+  status: 'open' | 'filled';
+  settlement: 'awaiting_payment' | 'unmatched';
   requestedEnergyWh: number;
   filledEnergyWh: number;
   remainingEnergyWh: number;
   matches: MatchExecution[];
 }
 
-async function filledEnergyWh(tx: any, orderId: number, side: OrderSide): Promise<number> {
+type MatchingTx = Parameters<
+  Parameters<NodePgDatabase<Record<string, unknown>>['transaction']>[0]
+>[0];
+
+async function filledEnergyWh(tx: MatchingTx, orderId: number, side: OrderSide): Promise<number> {
   const col = side === 'buy' ? p2pMatches.buyOrderId : p2pMatches.sellOrderId;
   const rows = await tx
     .select({ filled: sql<number>`COALESCE(SUM(${p2pMatches.energyWh}), 0)` })
@@ -63,7 +91,13 @@ async function filledEnergyWh(tx: any, orderId: number, side: OrderSide): Promis
  * Submit an order and run the matcher atomically. The order row and all of
  * its fills commit or roll back together.
  */
-export async function submitOrder(userId: number, side: OrderSide, energyWh: number, priceCentsPerKwh: number): Promise<SubmitOrderResult> {
+export async function submitOrder(
+  userId: number,
+  side: OrderSide,
+  energyWh: number,
+  priceCentsPerKwh: number,
+  participantType: ParticipantType
+): Promise<SubmitOrderResult> {
   const db = await getDb();
   if (!db) throw new Error('Database not available');
 
@@ -71,6 +105,12 @@ export async function submitOrder(userId: number, side: OrderSide, energyWh: num
   if (totalAmount <= 0) {
     throw new Error('ORDER_VALUE_TOO_SMALL');
   }
+
+  const ownMetadata = JSON.stringify(
+    side === 'sell'
+      ? { sellerParticipantType: participantType }
+      : { buyerParticipantType: participantType }
+  );
 
   return db.transaction(async (tx) => {
     // 1. Create the resting order.
@@ -83,6 +123,7 @@ export async function submitOrder(userId: number, side: OrderSide, energyWh: num
       totalAmount,
       timestamp: new Date(),
       status: 'pending',
+      metadata: ownMetadata,
     }).returning({ id: trades.id });
     const orderId = insertedId(orderInsert);
     if (!orderId) throw new Error('Failed to create order');
@@ -156,12 +197,22 @@ export async function submitOrder(userId: number, side: OrderSide, energyWh: num
         totalAmountCents: fillAmount,
       });
 
-      // Fully filled opposing order -> executed (status-conditional so a
-      // concurrent matcher cannot double-execute it; failure rolls back).
+      // Fully filled opposing order -> matched but unpaid. The status stays
+      // 'pending' (status-conditional so a concurrent matcher cannot re-match
+      // it; failure rolls back) because nobody has paid for this energy yet.
       if (fill === oppRemaining) {
         const upd = await tx
           .update(trades)
-          .set({ status: 'executed', counterpartyId: userId })
+          .set({
+            counterpartyId: userId,
+            metadata: withSettlement(opp.metadata, {
+              settlement: 'awaiting_payment',
+              matchedAt: new Date().toISOString(),
+              ...(side === 'sell'
+                ? { sellerParticipantType: participantType }
+                : { buyerParticipantType: participantType }),
+            }),
+          })
           .where(and(eq(trades.id, opp.id), eq(trades.status, 'pending')));
         if (affectedRows(upd) === 0) {
           throw new Error(`MATCH_CONFLICT: opposing order ${opp.id} changed state concurrently`);
@@ -171,24 +222,38 @@ export async function submitOrder(userId: number, side: OrderSide, energyWh: num
       remaining -= fill;
     }
 
-    // 4. Flip the incoming order if fully filled.
+    // 4. Mark the incoming order matched if fully filled — still unpaid, so
+    //    still a pending trade.
     const filledWh = energyWh - remaining;
-    let finalStatus: 'pending' | 'executed' = 'pending';
+    // counterpartyId can only name one party, so it is set only when the order
+    // was filled by exactly one: a multi-counterparty fill records the list in
+    // metadata rather than naming an arbitrary one of them.
+    const counterparties = matches.map(m => (side === 'buy' ? m.sellerId : m.buyerId));
+    const soleCounterparty = new Set(counterparties).size === 1 ? counterparties[0] : null;
+    let finalStatus: 'open' | 'filled' = 'open';
     if (remaining === 0) {
       const upd = await tx
         .update(trades)
-        .set({ status: 'executed' })
+        .set({
+          counterpartyId: soleCounterparty,
+          metadata: withSettlement(ownMetadata, {
+            settlement: 'awaiting_payment',
+            matchedAt: new Date().toISOString(),
+            counterpartyIds: [...new Set(counterparties)],
+          }),
+        })
         .where(and(eq(trades.id, orderId), eq(trades.status, 'pending')));
       if (affectedRows(upd) === 0) {
         throw new Error(`MATCH_CONFLICT: order ${orderId} changed state concurrently`);
       }
-      finalStatus = 'executed';
+      finalStatus = 'filled';
     }
 
     return {
       orderId,
       side,
       status: finalStatus,
+      settlement: filledWh > 0 ? 'awaiting_payment' : 'unmatched',
       requestedEnergyWh: energyWh,
       filledEnergyWh: filledWh,
       remainingEnergyWh: remaining,
@@ -217,7 +282,9 @@ export async function getOrderBook(): Promise<{ bids: OrderBookLevel[]; asks: Or
       tradeType: trades.tradeType,
       energy: trades.energy,
       price: trades.price,
-      filled: sql<number>`COALESCE((SELECT SUM(m.energyWh) FROM p2p_matches m WHERE m.buyOrderId = ${trades.id} OR m.sellOrderId = ${trades.id}), 0)`,
+      // Quoted identifiers: p2p_matches columns are camelCase, and PostgreSQL
+      // folds unquoted names to lowercase, which made this read throw.
+      filled: sql<number>`COALESCE((SELECT SUM(m."energyWh") FROM p2p_matches m WHERE m."buyOrderId" = ${trades.id} OR m."sellOrderId" = ${trades.id}), 0)`,
     })
     .from(trades)
     .where(and(inArray(trades.tradeType, ['p2p_buy', 'p2p_sell']), eq(trades.status, 'pending')));
@@ -269,7 +336,7 @@ export async function getMyOpenOrders(userId: number) {
       price: trades.price,
       status: trades.status,
       createdAt: trades.createdAt,
-      filled: sql<number>`COALESCE((SELECT SUM(m.energyWh) FROM p2p_matches m WHERE m.buyOrderId = ${trades.id} OR m.sellOrderId = ${trades.id}), 0)`,
+      filled: sql<number>`COALESCE((SELECT SUM(m."energyWh") FROM p2p_matches m WHERE m."buyOrderId" = ${trades.id} OR m."sellOrderId" = ${trades.id}), 0)`,
     })
     .from(trades)
     .where(

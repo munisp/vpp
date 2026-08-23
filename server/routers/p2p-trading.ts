@@ -1,9 +1,16 @@
 import { z } from 'zod';
-import { router, publicProcedure, protectedProcedure } from '../_core/trpc';
+import { router, protectedProcedure } from '../_core/trpc';
 import { TRPCError } from '@trpc/server';
 import { getDb } from '../db';
-import { trades, users } from '../../drizzle/schema';
-import { and, desc, eq, inArray, isNull, ne } from 'drizzle-orm';
+import { assets, trades, users } from '../../drizzle/schema';
+import { p2pSettlements } from '../../drizzle/innovations-schema';
+import { and, desc, eq, inArray, isNull, ne, or } from 'drizzle-orm';
+import { P2pSettlementError, startTradePayment } from '../services/p2p-settlement';
+import {
+  ParticipantError,
+  counterpartyFacts,
+  loadTradingParticipant,
+} from '../services/p2p-participants';
 
 /**
  * Peer-to-peer energy trading router.
@@ -23,14 +30,33 @@ function affectedRows(result: { rowCount: number | null }): number {
   return result.rowCount ?? 0;
 }
 
+/**
+ * Load the caller as a market participant, refusing an unverified business
+ * before it can hold a position.
+ */
+async function toParticipant(userId: number) {
+  try {
+    return await loadTradingParticipant(userId);
+  } catch (error) {
+    if (error instanceof ParticipantError) {
+      throw new TRPCError({
+        code: error.code === 'BUSINESS_NOT_VERIFIED' ? 'FORBIDDEN' : 'NOT_FOUND',
+        message: error.message,
+      });
+    }
+    throw error;
+  }
+}
+
 const CreateOfferSchema = z.object({
   energy: z.number().int().positive(), // watt-hours
   price: z.number().int().positive(), // cents per kWh
 });
 
 export const p2pTradingRouter = router({
-  // Open sell offers on the marketplace (excludes the caller's own offers)
-  getOffers: publicProcedure
+  // Open sell offers on the marketplace (excludes the caller's own offers).
+  // Authenticated: the listing carries seller identity, which is not public.
+  getOffers: protectedProcedure
     .input(z.object({ limit: z.number().int().positive().max(100).default(50) }).optional())
     .query(async ({ ctx, input }) => {
       const db = await getDb();
@@ -43,9 +69,7 @@ export const p2pTradingRouter = router({
         // trade stays pending until settlement.
         isNull(trades.counterpartyId),
       ];
-      if (ctx.user) {
-        conditions.push(ne(trades.userId, ctx.user.id));
-      }
+      conditions.push(ne(trades.userId, ctx.user.id));
 
       const offers = await db
         .select({
@@ -57,6 +81,11 @@ export const p2pTradingRouter = router({
           timestamp: trades.timestamp,
           createdAt: trades.createdAt,
           sellerName: users.name,
+          // A buyer is entitled to know whether the counterparty is a household
+          // or a business trading under a registered name.
+          sellerParticipantType: users.participantType,
+          sellerBusinessLegalName: users.businessLegalName,
+          sellerBusinessRegistrationNumber: users.businessRegistrationNumber,
         })
         .from(trades)
         .leftJoin(users, eq(trades.userId, users.id))
@@ -92,6 +121,23 @@ export const p2pTradingRouter = router({
       const db = await getDb();
       if (!db) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Database not available' });
 
+      // An offer is a promise to deliver energy from equipment. A seller with
+      // no active asset cannot deliver anything, so the offer is refused here
+      // rather than discovered at dispatch time by the buyer who paid for it.
+      const sellerAssets = await db
+        .select({ id: assets.id })
+        .from(assets)
+        .where(and(eq(assets.userId, ctx.user.id), eq(assets.status, 'active')))
+        .limit(1);
+
+      if (sellerAssets.length === 0) {
+        throw new TRPCError({
+          code: 'PRECONDITION_FAILED',
+          message:
+            'You have no active asset that could deliver this energy, so the offer cannot be published.',
+        });
+      }
+
       const totalAmount = Math.floor((input.energy * input.price) / 1000);
       if (totalAmount <= 0) {
         throw new TRPCError({
@@ -99,6 +145,8 @@ export const p2pTradingRouter = router({
           message: 'Offer total amount must be greater than zero; increase energy or price.',
         });
       }
+
+      const seller = await toParticipant(ctx.user.id);
 
       const insertResult = await db.insert(trades).values({
         userId: ctx.user.id,
@@ -109,11 +157,13 @@ export const p2pTradingRouter = router({
         totalAmount,
         timestamp: new Date(),
         status: 'pending',
+        metadata: JSON.stringify({ sellerParticipantType: seller.participantType }),
       }).returning({ id: trades.id });
 
       return {
         success: true,
         offerId: Number(insertResult[0].id),
+        sellerParticipantType: seller.participantType,
         message: 'P2P sell offer created.',
       };
     }),
@@ -124,6 +174,8 @@ export const p2pTradingRouter = router({
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Database not available' });
+
+      const buyer = await toParticipant(ctx.user.id);
 
       return db.transaction(async (tx) => {
         const [offer] = await tx
@@ -142,6 +194,9 @@ export const p2pTradingRouter = router({
           throw new TRPCError({ code: 'CONFLICT', message: 'This offer has already been taken or cancelled.' });
         }
 
+        const seller = await toParticipant(offer.userId);
+        const parties = counterpartyFacts(seller, buyer);
+
         // Conditional update on both status and counterparty: only one buyer
         // can win the offer, and the offer is not settled here.
         const updateResult = await tx
@@ -152,6 +207,7 @@ export const p2pTradingRouter = router({
               ...(offer.metadata ? JSON.parse(offer.metadata) : {}),
               settlement: 'awaiting_payment',
               matchedAt: new Date().toISOString(),
+              ...parties,
             }),
           })
           .where(
@@ -181,6 +237,7 @@ export const p2pTradingRouter = router({
             settlement: 'awaiting_payment',
             sellOfferId: offer.id,
             matchedAt: new Date().toISOString(),
+            ...parties,
           }),
         }).returning({ id: trades.id });
 
@@ -189,12 +246,95 @@ export const p2pTradingRouter = router({
           offerId: offer.id,
           buyTradeId: Number(buyInsert[0].id),
           settlement: 'awaiting_payment' as const,
+          relation: parties.relation,
           amountDueCents: offer.totalAmount,
           message:
             'Offer matched. The trade settles once your payment clears and the energy transfer is confirmed.',
         };
       });
     }),
+
+  // Pay for a matched purchase. The provider is asked for the money; the
+  // trade settles only when the provider's callback confirms it.
+  payForMatch: protectedProcedure
+    .input(
+      z.object({
+        buyTradeId: z.number().int().positive(),
+        gateway: z.enum(['mpesa', 'airtel_money', 'tigo_pesa']),
+        phoneNumber: z.string().min(10, 'Invalid phone number'),
+      })
+    )
+    .mutation(async ({ ctx, input }) => {
+      try {
+        return await startTradePayment({
+          buyTradeId: input.buyTradeId,
+          buyerId: ctx.user.id,
+          gateway: input.gateway,
+          phoneNumber: input.phoneNumber,
+        });
+      } catch (error) {
+        if (error instanceof P2pSettlementError) {
+          const code =
+            error.code === 'TRADE_NOT_FOUND'
+              ? 'NOT_FOUND'
+              : error.code === 'NOT_BUYER'
+                ? 'FORBIDDEN'
+                : error.code === 'DATABASE_UNAVAILABLE'
+                  ? 'SERVICE_UNAVAILABLE'
+                  : error.code === 'ALREADY_PAID'
+                    ? 'CONFLICT'
+                    : 'BAD_REQUEST';
+          throw new TRPCError({ code, message: error.message });
+        }
+        throw new TRPCError({
+          code: 'INTERNAL_SERVER_ERROR',
+          message: 'The payment request could not be sent to the provider.',
+        });
+      }
+    }),
+
+  // What the platform can actually prove about the caller's own trades. Only a
+  // party to a settlement may read it, and every leg is reported as its own
+  // evidence rather than rolled into a single "settled" flag.
+  mySettlements: protectedProcedure.query(async ({ ctx }) => {
+    const db = await getDb();
+    if (!db) {
+      throw new TRPCError({ code: 'SERVICE_UNAVAILABLE', message: 'Database not available' });
+    }
+
+    const rows = await db
+      .select()
+      .from(p2pSettlements)
+      .where(
+        or(eq(p2pSettlements.buyerId, ctx.user.id), eq(p2pSettlements.sellerId, ctx.user.id))
+      )
+      .orderBy(desc(p2pSettlements.createdAt))
+      .limit(50);
+
+    return rows.map(row => ({
+      settlementId: row.id,
+      buyTradeId: row.buyTradeId,
+      side: row.buyerId === ctx.user.id ? ('buyer' as const) : ('seller' as const),
+      energyWh: row.energyWh,
+      amountCents: row.amountCents,
+      currency: row.currency,
+      state: row.state,
+      buyerPaid: row.buyerPaidAt !== null,
+      buyerPaidAt: row.buyerPaidAt,
+      // The provider's reference, not our row id: it is what a dispute is
+      // resolved against.
+      buyerPaymentReference: row.buyerPaymentReference,
+      delivery: row.delivery,
+      deliveredEnergyWh: row.deliveredEnergyWh,
+      deliverySamples: row.deliverySamples,
+      deliveryNote: row.deliveryNote,
+      sellerPayout: row.sellerPayout,
+      sellerPayoutReference: row.sellerPayoutReference,
+      reconciliation: row.reconciliation,
+      reconciliationNote: row.reconciliationNote,
+      updatedAt: row.updatedAt,
+    }));
+  }),
 
   // Cancel an open offer (owner only, while still pending)
   cancelOffer: protectedProcedure

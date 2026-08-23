@@ -11,6 +11,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { toast } from "sonner";
 import { ArrowDownUp } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
+import SettlementEvidencePanel from "@/components/p2p/SettlementEvidencePanel";
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell, ReferenceLine } from "recharts";
 
 function fmtWh(wh: number): string {
@@ -30,10 +31,10 @@ export default function OrderBook() {
   const submitMutation = trpc.p2pMatching.submitOrder.useMutation({
     onSuccess: (r) => {
       toast.success(
-        r.status === "executed"
-          ? `Order fully filled — ${fmtWh(r.filledEnergyWh)} matched across ${r.matches.length} trade(s)`
+        r.status === "filled"
+          ? `Fully matched — ${fmtWh(r.filledEnergyWh)} across ${r.matches.length} trade(s). Awaiting payment; nothing is settled yet.`
           : r.filledEnergyWh > 0
-            ? `Partially filled: ${fmtWh(r.filledEnergyWh)} of ${fmtWh(r.requestedEnergyWh)} matched`
+            ? `Partially matched: ${fmtWh(r.filledEnergyWh)} of ${fmtWh(r.requestedEnergyWh)}. Awaiting payment; nothing is settled yet.`
             : "Order placed on the book"
       );
       setEnergyKwh("");
@@ -68,6 +69,11 @@ export default function OrderBook() {
           <h1 className="text-2xl font-bold tracking-tight">P2P Order Book</h1>
           <p className="text-muted-foreground">
             Peer-to-peer energy matching with price-time priority. Orders rest until matched.
+          </p>
+          <p className="text-sm text-muted-foreground">
+            A match is not a settlement: matched orders stay pending until the buyer's payment is
+            confirmed by the provider, and the seller is paid only once a disbursement provider
+            exists — none is configured, so no seller payout has been made.
           </p>
         </div>
 
@@ -253,6 +259,8 @@ export default function OrderBook() {
               )}
             </CardContent>
           </Card>
+
+          <SettlementEvidencePanel />
         </div>
       </div>
     </DashboardLayout>

@@ -485,10 +485,13 @@ export async function p2pTradingWorkflow(
  * validate -> escrow -> dispatch/transfer -> release escrow -> notify.
  *
  * Exported under the exact type name the Temporal client starts
- * (server/integration/temporal-client.ts uses 'executeTrade'). Escrow is only
- * released after the energy-transfer activity confirms the dispatch command
- * was published; on any failure the escrow stays held and the failure is
- * reported.
+ * (server/integration/temporal-client.ts uses 'executeTrade').
+ *
+ * Two steps cannot complete today, and both refuse rather than pretend:
+ * the escrow step recognises only a buyer payment the provider has confirmed
+ * (the platform holds no client funds), and the release step cannot pay a
+ * seller at all because there is no disbursement provider. A trade therefore
+ * ends at 'buyer paid, seller unpaid' instead of reporting itself settled.
  */
 export async function executeTrade(input: {
   tradeId: number;

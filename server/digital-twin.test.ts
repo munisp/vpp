@@ -172,6 +172,41 @@ describe('digital twin graph', () => {
     expect(graph.meteredGridPowerWatts).toBe(900);
     const site = graph.nodes.find(node => node.id === 'site');
     expect(site?.powerWatts).toBeNull();
+    // A reporting meter says nothing about the equipment behind the bus, so the
+    // bus is not drawn live off it.
+    expect(site?.evidence).toBe('never');
+    expect(site?.detail).toContain('Only a meter is registered');
+  });
+
+  it('calls the bus stale when the only equipment behind it is stale, meter or not', () => {
+    const graph = graphOf([
+      asset({
+        id: 1,
+        assetType: 'solar',
+        observation: observation({ observedAt: new Date(NOW.getTime() - 3_600_000) }),
+      }),
+      asset({
+        id: 2,
+        name: 'Main meter',
+        assetType: 'meter',
+        observation: observation({ powerWatts: 900 }),
+      }),
+    ]);
+
+    const site = graph.nodes.find(node => node.id === 'site');
+    expect(site?.evidence).toBe('stale');
+    expect(site?.powerWatts).toBeNull();
+  });
+
+  it('counts equipment reporting without a power value as seen but not as a zero', () => {
+    const graph = graphOf([
+      asset({ id: 1, assetType: 'solar', observation: observation({ powerWatts: null }) }),
+    ]);
+
+    const site = graph.nodes.find(node => node.id === 'site');
+    expect(site?.evidence).toBe('measured');
+    expect(site?.powerWatts).toBeNull();
+    expect(graph.measuredBehindMeter).toBe(0);
   });
 
   it('says the grid exchange is unmeasured when no meter is reporting', () => {

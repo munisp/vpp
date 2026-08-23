@@ -330,6 +330,10 @@ export function buildTwinGraph(input: TwinInput): TwinGraph {
   let measuredNetPowerWatts = 0;
   let measuredBehindMeter = 0;
   let meteredGridPowerWatts: number | null = null;
+  /** Behind-the-bus staleness, so the bus is not called live off a meter alone. */
+  let staleBehindMeter = 0;
+  let seenBehindMeterWithoutPower = 0;
+  let assetsBehindMeter = 0;
   /** Grid exchange is only known if a meter reported it; assets do not imply it. */
   let gridEvidence: EvidenceState = 'never';
   let gridAgeSeconds: number | null = null;
@@ -340,6 +344,11 @@ export function buildTwinGraph(input: TwinInput): TwinGraph {
     const { evidence, ageSeconds } = evidenceOf(asset.observation.observedAt, bound, now);
     const lastPower = asset.observation.powerWatts;
     const power = evidence === 'measured' ? lastPower : null;
+
+    if (kind !== 'meter') {
+      assetsBehindMeter += 1;
+      if (evidence === 'stale') staleBehindMeter += 1;
+    }
 
     if (evidence === 'measured') {
       measured += 1;
@@ -352,7 +361,9 @@ export function buildTwinGraph(input: TwinInput): TwinGraph {
           measuredBehindMeter += 1;
         }
       } else if (kind !== 'meter') {
-        measuredBehindMeter += 1;
+        // Seen, but with no power value: it belongs to the bus's evidence and
+        // not to a sum it cannot contribute a number to.
+        seenBehindMeterWithoutPower += 1;
       }
     } else if (evidence === 'stale') {
       stale += 1;
@@ -430,7 +441,14 @@ export function buildTwinGraph(input: TwinInput): TwinGraph {
     id: SITE_NODE,
     kind: 'site',
     label: input.siteLabel,
-    evidence: measured > 0 ? 'measured' : stale > 0 ? 'stale' : 'never',
+    // The bus is what sits behind the meter; a reporting meter says nothing
+    // about whether the equipment behind it is being seen.
+    evidence:
+      measuredBehindMeter + seenBehindMeterWithoutPower > 0
+        ? 'measured'
+        : staleBehindMeter > 0
+          ? 'stale'
+          : 'never',
     ageSeconds: null,
     powerWatts: measuredBehindMeter > 0 ? measuredNetPowerWatts : null,
     lastPowerWatts: measuredBehindMeter > 0 ? measuredNetPowerWatts : null,
@@ -440,7 +458,9 @@ export function buildTwinGraph(input: TwinInput): TwinGraph {
     detail:
       measuredBehindMeter > 0
         ? `Net ${formatWatts(measuredNetPowerWatts)} across the ${measuredBehindMeter} of ${coverage.assets} assets reporting behind the meter. Meters are not added in — they measure the boundary, not another load — and the ${coverage.assets - measured} silent assets contribute nothing and are not assumed idle.`
-        : 'No asset behind this bus is currently reporting, so the net flow is unknown rather than zero.',
+        : assetsBehindMeter === 0
+          ? 'Only a meter is registered here, so nothing is known about the equipment behind the bus.'
+          : 'No asset behind this bus is currently reporting, so the net flow is unknown rather than zero.',
   });
 
   nodes.push({

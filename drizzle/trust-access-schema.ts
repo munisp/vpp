@@ -1,4 +1,23 @@
-import { int, mysqlEnum, mysqlTable, text, timestamp, varchar, boolean } from "drizzle-orm/mysql-core";
+import {
+  boolean,
+  integer as int,
+  pgEnum,
+  pgTable,
+  serial,
+  text,
+  timestamp,
+  varchar,
+} from "drizzle-orm/pg-core";
+
+export const priceAlertDispatchLogPriceTypeEnum = pgEnum("price_alert_dispatch_log_price_type", ["off_peak", "shoulder", "peak", "super_peak"]);
+export const priceAlertDispatchLogCountryEnum = pgEnum("price_alert_dispatch_log_country", ["nigeria", "tanzania"]);
+export const priceAlertMarketScopesPriceTypeEnum = pgEnum("price_alert_market_scopes_price_type", ["off_peak", "shoulder", "peak", "super_peak"]);
+export const priceAlertMarketScopesCountryEnum = pgEnum("price_alert_market_scopes_country", ["nigeria", "tanzania"]);
+export const ntlFlagsStatusEnum = pgEnum("ntl_flags_status", ["suspected", "under_review", "confirmed", "cleared"]);
+export const ntlFlagsFlagTypeEnum = pgEnum("ntl_flags_flag_type", ["divergence", "bypass_signature", "combined"]);
+export const smsCommandLogDirectionEnum = pgEnum("sms_command_log_direction", ["inbound"]);
+export const smsCommandLogResolvedViaEnum = pgEnum("sms_command_log_resolved_via", ["users_phone", "payments_phone", "unresolved"]);
+
 
 /**
  * Trust & Access Schema
@@ -20,12 +39,12 @@ import { int, mysqlEnum, mysqlTable, text, timestamp, varchar, boolean } from "d
  * SMS Command Log - every inbound SMS command and its reply.
  * Phone -> user resolution is recorded via `resolvedVia` for auditability.
  */
-export const smsCommandLog = mysqlTable("sms_command_log", {
-  id: int("id").autoincrement().primaryKey(),
+export const smsCommandLog = pgTable("sms_command_log", {
+  id: serial("id").primaryKey(),
   userId: int("userId"), // null when the phone number could not be resolved
   phoneNumber: varchar("phoneNumber", { length: 20 }).notNull(),
-  resolvedVia: mysqlEnum("resolvedVia", ["users_phone", "payments_phone", "unresolved"]).notNull(),
-  direction: mysqlEnum("direction", ["inbound"]).default("inbound").notNull(),
+  resolvedVia: smsCommandLogResolvedViaEnum("resolvedVia").notNull(),
+  direction: smsCommandLogDirectionEnum("direction").default("inbound").notNull(),
   rawText: text("rawText").notNull(),
   parsedCommand: varchar("parsedCommand", { length: 32 }).notNull(), // BALANCE|STATUS|TOKEN_LAST|OUTAGE|HELP|UNKNOWN
   replyText: text("replyText"),
@@ -43,12 +62,12 @@ export type InsertSmsCommandLog = typeof smsCommandLog.$inferInsert;
  * Status workflow is deliberately human-in-the-loop: suspected ->
  * under_review -> confirmed | cleared. The engine never auto-accuses users.
  */
-export const ntlFlags = mysqlTable("ntl_flags", {
-  id: int("id").autoincrement().primaryKey(),
+export const ntlFlags = pgTable("ntl_flags", {
+  id: serial("id").primaryKey(),
   assetId: int("assetId").notNull(),
   userId: int("userId").notNull(),
-  flagType: mysqlEnum("flagType", ["divergence", "bypass_signature", "combined"]).notNull(),
-  status: mysqlEnum("status", ["suspected", "under_review", "confirmed", "cleared"]).default("suspected").notNull(),
+  flagType: ntlFlagsFlagTypeEnum("flagType").notNull(),
+  status: ntlFlagsStatusEnum("status").default("suspected").notNull(),
   riskScore: int("riskScore").notNull(), // 0-100 composite score
   evidence: text("evidence").notNull(), // JSON: z-scores, ratios, window stats, bypass-pattern details
   windowStart: timestamp("windowStart").notNull(),
@@ -57,7 +76,7 @@ export const ntlFlags = mysqlTable("ntl_flags", {
   investigatedAt: timestamp("investigatedAt"),
   resolutionNotes: text("resolutionNotes"),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
-  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().$onUpdate(() => new Date()).notNull(),
 });
 
 export type NtlFlag = typeof ntlFlags.$inferSelect;
@@ -68,11 +87,11 @@ export type InsertNtlFlag = typeof ntlFlags.$inferInsert;
  * adding the genuinely-missing market scope (country + priceType) without
  * modifying the existing schema file.
  */
-export const priceAlertMarketScopes = mysqlTable("price_alert_market_scopes", {
-  id: int("id").autoincrement().primaryKey(),
+export const priceAlertMarketScopes = pgTable("price_alert_market_scopes", {
+  id: serial("id").primaryKey(),
   priceAlertId: int("priceAlertId").notNull().unique(),
-  country: mysqlEnum("country", ["nigeria", "tanzania"]).notNull(),
-  priceType: mysqlEnum("priceType", ["off_peak", "shoulder", "peak", "super_peak"]).notNull(),
+  country: priceAlertMarketScopesCountryEnum("country").notNull(),
+  priceType: priceAlertMarketScopesPriceTypeEnum("priceType").notNull(),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
 });
 
@@ -83,12 +102,12 @@ export type InsertPriceAlertMarketScope = typeof priceAlertMarketScopes.$inferIn
  * Price Alert Dispatch Log - one row per evaluation-cycle dispatch attempt,
  * recording the observed price and per-channel delivery results.
  */
-export const priceAlertDispatchLog = mysqlTable("price_alert_dispatch_log", {
-  id: int("id").autoincrement().primaryKey(),
+export const priceAlertDispatchLog = pgTable("price_alert_dispatch_log", {
+  id: serial("id").primaryKey(),
   priceAlertId: int("priceAlertId").notNull(),
   userId: int("userId").notNull(),
-  country: mysqlEnum("country", ["nigeria", "tanzania"]).notNull(),
-  priceType: mysqlEnum("priceType", ["off_peak", "shoulder", "peak", "super_peak"]).notNull(),
+  country: priceAlertDispatchLogCountryEnum("country").notNull(),
+  priceType: priceAlertDispatchLogPriceTypeEnum("priceType").notNull(),
   observedPrice: int("observedPrice").notNull(), // cents per kWh that triggered the alert
   pushSent: boolean("pushSent").default(false).notNull(),
   smsSent: boolean("smsSent").default(false).notNull(),
@@ -106,8 +125,8 @@ export type InsertPriceAlertDispatchLog = typeof priceAlertDispatchLog.$inferIns
  * its deterministic SHA-256 (also printed on the document) so regulators can
  * verify integrity via getReportChecksum.
  */
-export const regulatorReports = mysqlTable("regulator_reports", {
-  id: int("id").autoincrement().primaryKey(),
+export const regulatorReports = pgTable("regulator_reports", {
+  id: serial("id").primaryKey(),
   generatedBy: int("generatedBy").notNull(),
   periodStart: timestamp("periodStart").notNull(),
   periodEnd: timestamp("periodEnd").notNull(),

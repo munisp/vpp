@@ -11,6 +11,12 @@
 poll_interval_secs = 30
 request_timeout_ms = 3000
 
+# Readings held while the platform is unreachable, replayed oldest-first once it
+# answers again. Bounded: when the spool fills, the oldest readings are dropped
+# and counted, so a gap in the meter history is visible in the logs.
+spool_max_readings = 50000
+publish_batch_size = 500
+
 [platform]
 base_url = "http://vpp-server:3000"
 shared_secret = "" # GRID_PROTOCOL_SHARED_SECRET, >= 32 characters

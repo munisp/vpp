@@ -182,7 +182,7 @@ export async function processReferralReward(referralId: number) {
       })
       .where(and(eq(referrals.id, referral.id), ne(referrals.status, "rewarded")));
 
-    if (Number(claim[0].affectedRows) === 0) {
+    if ((claim.rowCount ?? 0) === 0) {
       throw new Error("Reward already processed");
     }
 
@@ -194,9 +194,9 @@ export async function processReferralReward(referralId: number) {
       currency: referral.rewardCurrency,
       status: "pending",
       description: `Referral reward for inviting user ${referral.refereeId}`,
-    });
+    }).returning({ id: referralRewards.id });
 
-    const rewardId = Number(insert[0].insertId);
+    const rewardId = Number(insert[0].id);
     if (!Number.isInteger(rewardId) || rewardId <= 0) {
       throw new Error("Failed to persist referral reward");
     }

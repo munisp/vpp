@@ -360,7 +360,7 @@ export async function getSystemKPIs(): Promise<SystemKPIs> {
   const userStats = await db
     .select({
       totalUsers: count(users.id),
-      activeUsers: sql<number>`SUM(CASE WHEN ${users.lastSignedIn} >= DATE_SUB(NOW(), INTERVAL 30 DAY) THEN 1 ELSE 0 END)`,
+      activeUsers: sql<number>`SUM(CASE WHEN ${users.lastSignedIn} >= (NOW() - INTERVAL '30 day') THEN 1 ELSE 0 END)`,
     })
     .from(users);
 

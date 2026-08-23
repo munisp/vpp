@@ -29,7 +29,7 @@ The VPP Platform consists of:
 ### Software Requirements
 - Node.js 22.x
 - Python 3.11+
-- MySQL/TiDB database
+- PostgreSQL 14+ database
 - Docker (optional, for containerized deployment)
 
 ---
@@ -99,7 +99,7 @@ nano .env
 **Required Variables:**
 ```bash
 # Database
-DATABASE_URL="mysql://user:password@localhost:3306/vpp_platform"
+DATABASE_URL="postgresql://user:password@localhost:5432/vpp_platform"
 
 # Application
 JWT_SECRET="your-secret-key-here"
@@ -436,7 +436,7 @@ receivers:
 ```bash
 # Database backups (daily)
 crontab -e
-# Add: 0 2 * * * mysqldump -u user -p password vpp_platform > /backups/vpp_$(date +\%Y\%m\%d).sql
+# Add: 0 2 * * * PGPASSWORD=password pg_dump -U user vpp_platform > /backups/vpp_$(date +\%Y\%m\%d).sql
 
 # Configuration backups (weekly)
 # Add: 0 3 * * 0 tar czf /backups/config_$(date +\%Y\%m\%d).tar.gz /home/ubuntu/vpp_consumer_platform
@@ -604,10 +604,10 @@ pnpm db:push
 pnpm db:studio
 
 # Backup database
-mysqldump -u user -p password vpp_platform > backup.sql
+PGPASSWORD=password pg_dump -U user vpp_platform > backup.sql
 
 # Restore database
-mysql -u user -p password vpp_platform < backup.sql
+PGPASSWORD=password psql -U user -d vpp_platform < backup.sql
 ```
 
 ---

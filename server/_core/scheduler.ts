@@ -13,6 +13,7 @@ import { sendEmail } from './notifications';
 import * as analyticsDb from '../analytics';
 import { checkPriceAlerts } from '../services/price-alert-engine';
 import { energyWallet } from '../services/energy-wallet';
+import { scoreDueForecastRuns } from '../services/forecast-accuracy';
 
 /**
  * Initialize scheduled report jobs
@@ -67,6 +68,24 @@ export function initScheduledReports() {
       }
     } catch (err) {
       console.error('[Scheduler] Wallet top-up reconciliation failed:', err);
+    }
+  });
+
+  // Forecast scoring - hourly. Pairs elapsed forecasts with the actuals that
+  // arrived and records measured MAE/RMSE/MAPE/bias/coverage. Runs whose actuals
+  // never showed up are recorded as unmeasured rather than left looking accurate.
+  cron.schedule('20 * * * *', async () => {
+    try {
+      const scores = await scoreDueForecastRuns(100);
+      if (scores.length > 0) {
+        const measured = scores.filter(score => score.status === 'scored').length;
+        console.log(
+          `[Scheduler] Forecast scoring: ${measured} scored, ` +
+            `${scores.length - measured} lacked enough actuals to score`
+        );
+      }
+    } catch (err) {
+      console.error('[Scheduler] Forecast scoring failed:', err);
     }
   });
 

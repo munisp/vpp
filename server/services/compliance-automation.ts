@@ -8,6 +8,7 @@
 import { getDb } from '../db';
 import { sql } from 'drizzle-orm';
 import { kafkaPublisher } from '../integration/kafka-publisher';
+import type { SqlRow } from '../sql-row';
 
 // Types for compliance
 export interface ComplianceRule {
@@ -201,15 +202,15 @@ export class ComplianceAutomationService {
 
     for (const rule of rules) {
       // Check if rule already exists
-      const existingResult = await db.execute(sql`
+      const existingResult = await db.execute<SqlRow>(sql`
         SELECT id FROM compliance_rules WHERE rule_code = ${rule.ruleCode}
       `);
 
-      if ((existingResult as any)[0]?.length > 0) {
+      if (existingResult.rows?.length > 0) {
         continue; // Skip existing rules
       }
 
-      const result = await db.execute(sql`
+      const result = await db.execute<SqlRow>(sql`
         INSERT INTO compliance_rules (
           rule_code, jurisdiction, regulatory_body, rule_category,
           rule_name, description, requirements, check_frequency,
@@ -222,10 +223,11 @@ export class ComplianceAutomationService {
           ${rule.effectiveFrom}, ${rule.effectiveUntil}, ${rule.penaltyDescription},
           ${rule.automatedCheckEnabled}, ${rule.status}, NOW(), NOW()
         )
+        RETURNING id
       `);
 
       createdRules.push({
-        id: (result as any).insertId,
+        id: Number(result.rows[0].id),
         ...rule,
       });
     }
@@ -241,7 +243,7 @@ export class ComplianceAutomationService {
     const db = await getDb();
     if (!db) throw new Error('Database not available');
 
-    const result = await db.execute(sql`
+    const result = await db.execute<SqlRow>(sql`
       SELECT * FROM compliance_rules
       WHERE jurisdiction = ${jurisdiction}
         AND status = 'active'
@@ -250,7 +252,7 @@ export class ComplianceAutomationService {
       ORDER BY rule_category, rule_code
     `);
 
-    return ((result as any)[0] || []).map(this.mapRowToRule);
+    return (result.rows || []).map(this.mapRowToRule);
   }
 
   /**
@@ -320,7 +322,7 @@ export class ComplianceAutomationService {
     const nextCheckDue = this.calculateNextCheckDue(rule.checkFrequency);
 
     // Store check result
-    const result = await db.execute(sql`
+    const result = await db.execute<SqlRow>(sql`
       INSERT INTO compliance_checks (
         rule_id, check_type, scope_type, scope_id,
         checked_at, status, findings, evidence_references,
@@ -331,6 +333,7 @@ export class ComplianceAutomationService {
         ${JSON.stringify(evidenceReferences)}, 'system',
         ${nextCheckDue}, NOW()
       )
+      RETURNING id
     `);
 
     console.log(`[Compliance] Check ${rule.ruleCode}: ${status} (${findings.length} findings)`);
@@ -338,7 +341,7 @@ export class ComplianceAutomationService {
     // Publish to Kafka for lakehouse analytics
     try {
       await kafkaPublisher.publishComplianceCheck({
-        checkId: ((result as any).insertId).toString(),
+        checkId: (Number(result.rows[0].id)).toString(),
         ruleId: ruleId.toString(),
         jurisdiction: rule.jurisdiction,
         subjectType: scope.type,
@@ -355,7 +358,7 @@ export class ComplianceAutomationService {
     }
 
     return {
-      id: (result as any).insertId,
+      id: Number(result.rows[0].id),
       ruleId,
       checkType: 'automated',
       scopeType: scope.type,
@@ -390,17 +393,17 @@ export class ComplianceAutomationService {
     if (scope.type === 'asset' && scope.id) {
       telemetryQuery = sql`
         SELECT voltage, frequency, power FROM telemetry
-        WHERE assetId = ${scope.id}
-          AND timestamp > DATE_SUB(NOW(), INTERVAL 1 HOUR)
+        WHERE "assetId" = ${scope.id}
+          AND timestamp > (NOW() - INTERVAL '1 hour')
         ORDER BY timestamp DESC
         LIMIT 100
       `;
     } else if (scope.type === 'user' && scope.id) {
       telemetryQuery = sql`
         SELECT t.voltage, t.frequency, t.power FROM telemetry t
-        JOIN assets a ON a.id = t.assetId
-        WHERE a.userId = ${scope.id}
-          AND t.timestamp > DATE_SUB(NOW(), INTERVAL 1 HOUR)
+        JOIN assets a ON a.id = t."assetId"
+        WHERE a."userId" = ${scope.id}
+          AND t.timestamp > (NOW() - INTERVAL '1 hour')
         ORDER BY t.timestamp DESC
         LIMIT 100
       `;
@@ -408,8 +411,8 @@ export class ComplianceAutomationService {
       return;
     }
 
-    const telemetryResult = await db.execute(telemetryQuery);
-    const telemetry = (telemetryResult as any)[0] || [];
+    const telemetryResult = await db.execute<SqlRow>(telemetryQuery);
+    const telemetry = telemetryResult.rows || [];
 
     if (telemetry.length === 0) {
       findings.push({
@@ -490,13 +493,12 @@ export class ComplianceAutomationService {
 
     // Check consent records
     if (requirements.consent_required) {
-      const consentResult = await db.execute(sql`
+      const consentResult = await db.execute<SqlRow>(sql`
         SELECT COUNT(*) as total,
-               SUM(CASE WHEN consent_given = true THEN 1 ELSE 0 END) as consented
+               SUM(CASE WHEN consent_given THEN 1 ELSE 0 END) as consented
         FROM users
-        WHERE status = 'active'
       `);
-      const consentStats = (consentResult as any)[0]?.[0] || {};
+      const consentStats = consentResult.rows[0] || {};
 
       if (consentStats.total > 0 && consentStats.consented < consentStats.total) {
         findings.push({
@@ -516,11 +518,11 @@ export class ComplianceAutomationService {
     // Check data retention
     if (requirements.data_retention_max_years) {
       const maxRetentionDays = requirements.data_retention_max_years * 365;
-      const oldDataResult = await db.execute(sql`
+      const oldDataResult = await db.execute<SqlRow>(sql`
         SELECT COUNT(*) as count FROM telemetry
-        WHERE timestamp < DATE_SUB(NOW(), INTERVAL ${maxRetentionDays} DAY)
+        WHERE timestamp < (NOW() - (${maxRetentionDays} * INTERVAL '1 day'))
       `);
-      const oldDataCount = (oldDataResult as any)[0]?.[0]?.count || 0;
+      const oldDataCount = oldDataResult.rows[0]?.count || 0;
 
       if (oldDataCount > 0) {
         findings.push({
@@ -558,7 +560,7 @@ export class ComplianceAutomationService {
     const lastMonthStart = new Date(lastMonth.getFullYear(), lastMonth.getMonth(), 1);
     const lastMonthEnd = new Date(lastMonth.getFullYear(), lastMonth.getMonth() + 1, 0);
 
-    const reportResult = await db.execute(sql`
+    const reportResult = await db.execute<SqlRow>(sql`
       SELECT * FROM compliance_reports
       WHERE jurisdiction = ${rule.jurisdiction}
         AND report_type = 'periodic'
@@ -568,7 +570,7 @@ export class ComplianceAutomationService {
       LIMIT 1
     `);
 
-    const report = (reportResult as any)[0]?.[0];
+    const report = reportResult.rows[0];
 
     if (!report) {
       const deadlineDate = new Date(lastMonthEnd);
@@ -605,12 +607,12 @@ export class ComplianceAutomationService {
 
     // Check complaint response times
     if (requirements.complaint_response_hours) {
-      const overdueResult = await db.execute(sql`
+      const overdueResult = await db.execute<SqlRow>(sql`
         SELECT COUNT(*) as count FROM support_tickets
         WHERE status = 'open'
-          AND created_at < DATE_SUB(NOW(), INTERVAL ${requirements.complaint_response_hours} HOUR)
+          AND created_at < (NOW() - (${requirements.complaint_response_hours} * INTERVAL '1 hour'))
       `);
-      const overdueCount = (overdueResult as any)[0]?.[0]?.count || 0;
+      const overdueCount = overdueResult.rows[0]?.count || 0;
 
       if (overdueCount > 0) {
         findings.push({
@@ -630,14 +632,14 @@ export class ComplianceAutomationService {
     // Check service availability
     if (requirements.service_availability) {
       // Calculate platform uptime (simplified)
-      const uptimeResult = await db.execute(sql`
+      const uptimeResult = await db.execute<SqlRow>(sql`
         SELECT 
           COUNT(*) as total_checks,
           SUM(CASE WHEN status = 'healthy' THEN 1 ELSE 0 END) as healthy_checks
         FROM health_checks
-        WHERE checked_at > DATE_SUB(NOW(), INTERVAL 30 DAY)
+        WHERE checked_at > (NOW() - INTERVAL '30 day')
       `);
-      const uptimeStats = (uptimeResult as any)[0]?.[0] || {};
+      const uptimeStats = uptimeResult.rows[0] || {};
 
       if (uptimeStats.total_checks > 0) {
         const availability = uptimeStats.healthy_checks / uptimeStats.total_checks;
@@ -671,12 +673,12 @@ export class ComplianceAutomationService {
     if (!db) return;
 
     // Check for unresolved critical anomalies
-    const criticalAnomaliesResult = await db.execute(sql`
+    const criticalAnomaliesResult = await db.execute<SqlRow>(sql`
       SELECT COUNT(*) as count FROM anomaly_events
-      WHERE severity IN ('critical', 'emergency')
+      WHERE severity IN ('high', 'critical')
         AND resolved_at IS NULL
     `);
-    const criticalCount = (criticalAnomaliesResult as any)[0]?.[0]?.count || 0;
+    const criticalCount = criticalAnomaliesResult.rows[0]?.count || 0;
 
     if (criticalCount > 0) {
       findings.push({
@@ -709,7 +711,7 @@ export class ComplianceAutomationService {
     const sections: ComplianceReportSection[] = [];
 
     // Get all checks for the period
-    const checksResult = await db.execute(sql`
+    const checksResult = await db.execute<SqlRow>(sql`
       SELECT cc.*, cr.rule_code, cr.rule_name, cr.rule_category
       FROM compliance_checks cc
       JOIN compliance_rules cr ON cr.id = cc.rule_id
@@ -718,7 +720,7 @@ export class ComplianceAutomationService {
         AND cc.checked_at <= ${periodEnd}
       ORDER BY cr.rule_category, cc.checked_at DESC
     `);
-    const checks = (checksResult as any)[0] || [];
+    const checks = checksResult.rows || [];
 
     // Group checks by category
     const checksByCategory: Map<string, ComplianceCheck[]> = new Map();
@@ -748,7 +750,7 @@ export class ComplianceAutomationService {
     }
 
     // Store report
-    const result = await db.execute(sql`
+    const result = await db.execute<SqlRow>(sql`
       INSERT INTO compliance_reports (
         report_id, report_type, jurisdiction,
         period_start, period_end, generated_at,
@@ -784,11 +786,11 @@ export class ComplianceAutomationService {
     const db = await getDb();
     if (!db) throw new Error('Database not available');
 
-    const result = await db.execute(sql`
+    const result = await db.execute<SqlRow>(sql`
       SELECT * FROM compliance_rules WHERE id = ${ruleId}
     `);
 
-    const row = (result as any)[0]?.[0];
+    const row = result.rows[0];
     return row ? this.mapRowToRule(row) : null;
   }
 
@@ -813,7 +815,7 @@ export class ComplianceAutomationService {
     if (!db) throw new Error('Database not available');
 
     // Get latest check for each rule
-    const checksResult = await db.execute(sql`
+    const checksResult = await db.execute<SqlRow>(sql`
       SELECT cc.*, cr.rule_code FROM compliance_checks cc
       JOIN compliance_rules cr ON cr.id = cc.rule_id
       WHERE cr.jurisdiction = ${jurisdiction}
@@ -822,7 +824,7 @@ export class ComplianceAutomationService {
       ORDER BY cc.rule_id, cc.checked_at DESC
     `);
 
-    const checks = (checksResult as any)[0] || [];
+    const checks = checksResult.rows || [];
     const latestByRule: Map<number, any> = new Map();
     
     for (const check of checks) {

@@ -15,7 +15,7 @@ import { derCapabilities, DispatchEligibility } from './der-capabilities';
 import { probabilisticForecasting, ForecastResult, ForecastQuantiles } from './probabilistic-forecasting';
 import { settlementLedger } from './settlement-ledger';
 import { kafkaPublisher } from '../integration/kafka-publisher';
-import { mqttBrokerService } from '../integration/mqtt-broker';
+import { dispatchDeviceSetpoint } from './control-delivery';
 import {
   MilpAsset,
   MilpDispatchRequest,
@@ -25,6 +25,9 @@ import {
   isMilpOptimizerConfigured,
   solveMilpDispatch,
 } from './milp-dispatch';
+import { requireCapability } from './degraded-operation';
+import type { SqlRow } from '../sql-row';
+import { jsonSetText } from '../sql-json';
 
 // Types for optimization
 export type ObjectiveFunction = 
@@ -115,6 +118,16 @@ interface IntervalContext {
   solarForecast?: ForecastQuantiles;
   // true when priceForecast is the hardcoded fallback curve, not real forecast data
   priceForecastEstimated?: boolean;
+}
+
+/** Timestamp columns arrive as Date from pg but as a string from raw JSON rows. */
+function toDate(value: unknown): Date {
+  if (value instanceof Date) return value;
+  if (typeof value === 'string' || typeof value === 'number') {
+    const parsed = new Date(value);
+    if (!Number.isNaN(parsed.getTime())) return parsed;
+  }
+  throw new Error(`Expected a timestamp, got ${JSON.stringify(value)}`);
 }
 
 export class OptimizationEngine {
@@ -320,6 +333,9 @@ export class OptimizationEngine {
       grid_target_w: request.objective === 'balance_grid' ? contexts.map(() => 0) : null,
     };
 
+    // Refused while the optimizer is in an open outage: the alternative is a
+    // heuristic schedule stored under the optimizer's name.
+    await requireCapability('optimizer_dispatch');
     const result = await solveMilpDispatch(milpRequest);
     return {
       setpoints: this.milpSetpoints(result, request, assets, contexts, scheduleStart, intervalMinutes),
@@ -395,19 +411,19 @@ export class OptimizationEngine {
     let assetQuery;
     if (request.scope.assetIds && request.scope.assetIds.length > 0) {
       assetQuery = sql`
-        SELECT id, userId, assetType, capacity, status FROM assets
+        SELECT id, "userId", "assetType", capacity, status FROM assets
         WHERE id IN (${sql.join(request.scope.assetIds.map(id => sql`${id}`), sql`, `)})
           AND status = 'active'
       `;
     } else if (request.scope.userId) {
       assetQuery = sql`
-        SELECT id, userId, assetType, capacity, status FROM assets
-        WHERE userId = ${request.scope.userId} AND status = 'active'
+        SELECT id, "userId", "assetType", capacity, status FROM assets
+        WHERE "userId" = ${request.scope.userId} AND status = 'active'
       `;
     } else if (request.scope.communityId) {
       assetQuery = sql`
-        SELECT a.id, a.userId, a.assetType, a.capacity, a.status FROM assets a
-        JOIN community_members cm ON cm.user_id = a.userId
+        SELECT a.id, a."userId", a."assetType", a.capacity, a.status FROM assets a
+        JOIN community_members cm ON cm.user_id = a."userId"
         WHERE cm.community_id = ${request.scope.communityId}
           AND cm.status = 'active' AND a.status = 'active'
       `;
@@ -415,19 +431,19 @@ export class OptimizationEngine {
       return [];
     }
 
-    const assetsResult = await db.execute(assetQuery);
+    const assetsResult = await db.execute<SqlRow>(assetQuery);
     const assets: AssetState[] = [];
 
-    for (const row of (assetsResult as any)[0] || []) {
+    for (const row of assetsResult.rows || []) {
       const eligibility = await derCapabilities.calculateEligibility(row.id);
       
       // Get current telemetry
-      const telemetryResult = await db.execute(sql`
-        SELECT power, stateOfCharge FROM telemetry
-        WHERE assetId = ${row.id}
+      const telemetryResult = await db.execute<SqlRow>(sql`
+        SELECT power, "stateOfCharge" FROM telemetry
+        WHERE "assetId" = ${row.id}
         ORDER BY timestamp DESC LIMIT 1
       `);
-      const telemetry = (telemetryResult as any)[0]?.[0];
+      const telemetry = telemetryResult.rows[0];
 
       assets.push({
         assetId: row.id,
@@ -497,7 +513,7 @@ export class OptimizationEngine {
     const db = await getDb();
     if (!db || !enrollmentIds || enrollmentIds.length === 0) return new Map();
 
-    const result = await db.execute(sql`
+    const result = await db.execute<SqlRow>(sql`
       SELECT se.id, gsp.base_rate_cents, gsp.service_type
       FROM service_enrollments se
       JOIN grid_service_products gsp ON gsp.id = se.service_product_id
@@ -506,7 +522,7 @@ export class OptimizationEngine {
     `);
 
     const rates = new Map<number, { rate: number; serviceType: string }>();
-    for (const row of (result as any)[0] || []) {
+    for (const row of result.rows || []) {
       rates.set(row.id, { rate: row.base_rate_cents, serviceType: row.service_type });
     }
     return rates;
@@ -915,7 +931,7 @@ export class OptimizationEngine {
 
     try {
       // Insert schedule
-      const scheduleResult = await db.execute(sql`
+      const scheduleResult = await db.execute<SqlRow>(sql`
         INSERT INTO dispatch_schedules (
           schedule_id, schedule_start, schedule_end, interval_minutes,
           optimization_run_id, objective_function, status,
@@ -928,13 +944,14 @@ export class OptimizationEngine {
           ${JSON.stringify({ scope: request.scope, constraints: request.constraints })},
           NOW(), NOW()
         )
+        RETURNING id
       `);
 
-      const dbScheduleId = (scheduleResult as any).insertId;
+      const dbScheduleId = Number(scheduleResult.rows[0].id);
 
       // Insert setpoints
       for (const sp of setpoints) {
-        await db.execute(sql`
+        await db.execute<SqlRow>(sql`
           INSERT INTO dispatch_setpoints (
             schedule_id, asset_id, interval_start, interval_end,
             target_power_watts, target_soc_percent, service_product_id,
@@ -1002,9 +1019,12 @@ export class OptimizationEngine {
     let dispatchedCount = 0;
     let queuedCount = 0;
 
-    // Get schedule and setpoints
-    const scheduleResult = await db.execute(sql`
-      SELECT ds.*, dsp.* FROM dispatch_schedules ds
+    // Explicit columns: `ds.*, dsp.*` collides on id/status/metadata, and the
+    // updates below key off dsp.id.
+    const scheduleResult = await db.execute<SqlRow>(sql`
+      SELECT dsp.id, dsp.asset_id, dsp.target_power_watts,
+             dsp.interval_start, dsp.interval_end
+      FROM dispatch_schedules ds
       JOIN dispatch_setpoints dsp ON dsp.schedule_id = ds.id
       WHERE ds.schedule_id = ${scheduleId}
         AND dsp.status = 'scheduled'
@@ -1012,16 +1032,23 @@ export class OptimizationEngine {
         AND dsp.interval_end > NOW()
     `);
 
-    const setpoints = (scheduleResult as any)[0] || [];
+    const setpoints = scheduleResult.rows || [];
 
     for (const sp of setpoints) {
       try {
-        // Send command to device via MQTT
-        const result = await this.dispatchToDevice(sp.asset_id, sp.target_power_watts);
+        // Bounded by the setpoint's own interval: the device stops obeying when
+        // the interval it was optimized for ends, whether or not the next
+        // dispatch arrives.
+        const result = await this.dispatchToDevice(
+          Number(sp.asset_id),
+          Number(sp.target_power_watts),
+          toDate(sp.interval_start),
+          toDate(sp.interval_end)
+        );
 
         if (result.dispatched) {
           // Mark 'dispatched' ONLY when the command actually reached the broker
-          await db.execute(sql`
+          await db.execute<SqlRow>(sql`
             UPDATE dispatch_setpoints
             SET status = 'dispatched', dispatched_at = NOW()
             WHERE id = ${sp.id}
@@ -1035,18 +1062,21 @@ export class OptimizationEngine {
           errors.push(`Asset ${sp.asset_id}: not dispatched (unsent): ${dispatchError}`);
           queuedCount++;
 
-          await db.execute(sql`
+          await db.execute<SqlRow>(sql`
             UPDATE dispatch_setpoints
-            SET metadata = JSON_SET(COALESCE(metadata, '{}'), '$.dispatchError', ${dispatchError}, '$.dispatchStatus', 'unsent')
+            SET metadata = ${jsonSetText(sql`metadata`, {
+              dispatchError,
+              dispatchStatus: 'unsent',
+            })}
             WHERE id = ${sp.id}
           `);
         }
       } catch (error: any) {
         errors.push(`Asset ${sp.asset_id}: ${error.message}`);
 
-        await db.execute(sql`
+        await db.execute<SqlRow>(sql`
           UPDATE dispatch_setpoints
-          SET status = 'failed', metadata = JSON_SET(COALESCE(metadata, '{}'), '$.error', ${error.message})
+          SET status = 'failed', metadata = ${jsonSetText(sql`metadata`, { error: error.message })}
           WHERE id = ${sp.id}
         `);
       }
@@ -1054,7 +1084,7 @@ export class OptimizationEngine {
 
     // Update schedule status
     if (dispatchedCount > 0) {
-      await db.execute(sql`
+      await db.execute<SqlRow>(sql`
         UPDATE dispatch_schedules
         SET status = 'dispatching', updated_at = NOW()
         WHERE schedule_id = ${scheduleId}
@@ -1072,56 +1102,79 @@ export class OptimizationEngine {
   }
 
   /**
-   * Dispatch command to device via MQTT.
+   * Dispatch a bounded setpoint to a device via MQTT.
    *
-   * Records the command in device_commands, then publishes a set_power command
-   * through the MQTT broker. Returns { dispatched: true } only when the publish
-   * actually succeeds; otherwise the command stays 'queued' with the error
-   * recorded so nothing is ever reported as sent when it was not.
+   * Goes through the control-delivery path, so the command carries its validity
+   * window and its fallback policy and is recorded as a control assignment the
+   * expiry sweep can close out. An optimizer setpoint that outlives the interval
+   * it was computed for is a hazard: the device falls back to its own local
+   * logic (`resume_local`) instead of holding a stale target indefinitely.
+   *
+   * Returns { dispatched: true } only when the broker actually took the message;
+   * otherwise the command stays pending with the error recorded.
    */
-  private async dispatchToDevice(assetId: number, targetPowerWatts: number): Promise<{ dispatched: boolean; error?: string }> {
+  private async dispatchToDevice(
+    assetId: number,
+    targetPowerWatts: number,
+    validFrom: Date,
+    validTo: Date
+  ): Promise<{ dispatched: boolean; error?: string }> {
     const db = await getDb();
     if (!db) throw new Error('Database not available');
 
     // Get device info
-    const deviceResult = await db.execute(sql`
+    const deviceResult = await db.execute<SqlRow>(sql`
       SELECT d.* FROM devices d
-      JOIN assets a ON a.id = d.assetId
+      JOIN assets a ON a.id = d."assetId"
       WHERE a.id = ${assetId} AND d.status = 'online'
     `);
 
-    const device = (deviceResult as any)[0]?.[0];
+    const device = deviceResult.rows[0];
     if (!device) {
       throw new Error('Device not found or offline');
     }
 
     // Create device command record
-    const commandResult = await db.execute(sql`
+    const commandResult = await db.execute<SqlRow>(sql`
       INSERT INTO device_commands (
-        deviceId, command, payload, status, createdAt
+        "deviceId", command, payload, status, "createdAt"
       ) VALUES (
         ${device.id}, 'set_power',
         ${JSON.stringify({ targetPowerWatts, timestamp: new Date().toISOString() })},
         'pending', NOW()
       )
+      RETURNING id
     `);
-    const commandId = (commandResult as any).insertId;
+    const commandId = Number(commandResult.rows[0].id);
 
-    // Publish the set_power command to the device via MQTT
     try {
-      await mqttBrokerService.publishCommand(device.deviceId, 'set_power', { targetPowerWatts });
+      const dispatch = await dispatchDeviceSetpoint({
+        deviceId: device.deviceId,
+        setpointWatts: targetPowerWatts,
+        validFrom,
+        validTo,
+        fallbackPolicy: 'resume_local',
+        source: 'optimizer',
+        assetId,
+      });
+      if (!dispatch.published) {
+        throw new Error(dispatch.reason || 'MQTT publish failed');
+      }
 
-      await db.execute(sql`
-        UPDATE device_commands SET status = 'sent', sentAt = NOW() WHERE id = ${commandId}
+      await db.execute<SqlRow>(sql`
+        UPDATE device_commands SET status = 'sent', "sentAt" = NOW() WHERE id = ${commandId}
       `);
 
-      console.log(`[Optimization] Dispatched set_power=${targetPowerWatts}W to device ${device.deviceId}`);
+      console.log(
+        `[Optimization] Dispatched set_power=${targetPowerWatts}W to device ${device.deviceId} ` +
+          `until ${dispatch.validTo.toISOString()} (assignment ${dispatch.assignmentId})`
+      );
       return { dispatched: true };
     } catch (error: any) {
       const dispatchError = error?.message || String(error);
 
       // Command stays 'pending' (unsent) with the error recorded in response
-      await db.execute(sql`
+      await db.execute<SqlRow>(sql`
         UPDATE device_commands
         SET response = ${JSON.stringify({ dispatchError, failedAt: new Date().toISOString() })}
         WHERE id = ${commandId}

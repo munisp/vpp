@@ -1,18 +1,28 @@
-import { int, mysqlEnum, mysqlTable, text, timestamp, varchar } from "drizzle-orm/mysql-core";
+import {
+  integer as int,
+  pgEnum,
+  pgTable,
+  serial,
+  text,
+  timestamp,
+  varchar,
+} from "drizzle-orm/pg-core";
 
-/**
- * Audit Logs table - tracks all admin and critical user actions
- */
-export const auditLogs = mysqlTable("audit_logs", {
-  id: int("id").autoincrement().primaryKey(),
-  
-  // Who performed the action
-  userId: int("user_id").notNull(),
-  userName: varchar("user_name", { length: 255 }),
-  userRole: mysqlEnum("user_role", ["user", "admin"]).notNull(),
-  
-  // What action was performed
-  action: mysqlEnum("action", [
+export const auditLogsStatusEnum = pgEnum("audit_logs_status", ["success", "failure", "pending"]);
+export const auditLogsEntityTypeEnum = pgEnum("audit_logs_entity_type", [
+    "user",
+    "asset",
+    "trade",
+    "payment",
+    "billing",
+    "alert",
+    "device",
+    "dr_event",
+    "market_price",
+    "payment_credential",
+    "system_config"
+  ]);
+export const auditLogsActionEnum = pgEnum("audit_logs_action", [
     "create",
     "update",
     "delete",
@@ -27,22 +37,26 @@ export const auditLogs = mysqlTable("audit_logs", {
     "export",
     "import",
     "configure"
-  ]).notNull(),
+  ]);
+export const auditLogsUserRoleEnum = pgEnum("audit_logs_user_role", ["user", "admin"]);
+
+
+/**
+ * Audit Logs table - tracks all admin and critical user actions
+ */
+export const auditLogs = pgTable("audit_logs", {
+  id: serial("id").primaryKey(),
+  
+  // Who performed the action
+  userId: int("user_id").notNull(),
+  userName: varchar("user_name", { length: 255 }),
+  userRole: auditLogsUserRoleEnum("user_role").notNull(),
+  
+  // What action was performed
+  action: auditLogsActionEnum("action").notNull(),
   
   // What entity was affected
-  entityType: mysqlEnum("entity_type", [
-    "user",
-    "asset",
-    "trade",
-    "payment",
-    "billing",
-    "alert",
-    "device",
-    "dr_event",
-    "market_price",
-    "payment_credential",
-    "system_config"
-  ]).notNull(),
+  entityType: auditLogsEntityTypeEnum("entity_type").notNull(),
   
   entityId: varchar("entity_id", { length: 255 }), // ID of the affected entity
   entityName: varchar("entity_name", { length: 255 }), // Name/description of the entity
@@ -56,7 +70,7 @@ export const auditLogs = mysqlTable("audit_logs", {
   userAgent: varchar("user_agent", { length: 500 }),
   
   // Status
-  status: mysqlEnum("status", ["success", "failure", "pending"]).default("success").notNull(),
+  status: auditLogsStatusEnum("status").default("success").notNull(),
   errorMessage: text("error_message"), // If status is failure
   
   createdAt: timestamp("created_at").defaultNow().notNull(),

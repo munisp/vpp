@@ -7,6 +7,7 @@ mod config;
 mod decode;
 mod platform;
 mod poller;
+mod spool;
 
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -17,7 +18,8 @@ use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 use crate::config::Config;
-use crate::platform::PlatformClient;
+use crate::platform::{PlatformClient, Reading};
+use crate::spool::Spool;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -43,8 +45,10 @@ async fn main() -> Result<()> {
     info!(
         devices = config.devices.len(),
         poll_interval_secs = config.poll_interval_secs,
+        spool_max_readings = config.spool_max_readings,
         "modbus poller starting"
     );
+    let mut spool = Spool::new(config.spool_max_readings);
 
     let mut ticker = interval(config.poll_interval());
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -56,13 +60,14 @@ async fn main() -> Result<()> {
                 return Ok(());
             }
             _ = ticker.tick() => {
-                poll_once(&config, &client).await;
+                poll_once(&config, &client, &mut spool).await;
             }
         }
     }
 }
 
-async fn poll_once(config: &Config, client: &PlatformClient) {
+async fn poll_once(config: &Config, client: &PlatformClient, spool: &mut Spool) {
+    let held_before = spool.len();
     let now_ms = match SystemTime::now().duration_since(UNIX_EPOCH) {
         Ok(elapsed) => elapsed.as_millis() as i64,
         Err(err) => {
@@ -85,10 +90,51 @@ async fn poll_once(config: &Config, client: &PlatformClient) {
         for failure in &failures {
             warn!(device = %device.id, error = %format!("{failure:#}"), "register read failed");
         }
-        if let Err(err) = client.publish(&readings).await {
-            error!(device = %device.id, error = %format!("{err:#}"), "publishing readings failed");
-        } else if !readings.is_empty() {
-            info!(device = %device.id, readings = readings.len(), "published readings");
+        let dropped = spool.push(readings);
+        if dropped > 0 {
+            error!(
+                device = %device.id,
+                dropped,
+                dropped_total = spool.dropped_total(),
+                "spool is full: readings discarded, the meter history now has a hole"
+            );
         }
+    }
+
+    drain(config, client, spool, held_before).await;
+}
+
+/// Delivers what the poller is holding, oldest first. Readings stay in the spool
+/// until the platform has accepted them: a reading that was never accepted is not
+/// delivered telemetry, and the register read behind it cannot be repeated.
+async fn drain(config: &Config, client: &PlatformClient, spool: &mut Spool, held_before: usize) {
+    let mut delivered = 0usize;
+
+    while !spool.is_empty() {
+        let batch: Vec<Reading> = spool.take(config.publish_batch_size);
+        let count = batch.len();
+        match client.publish(&batch).await {
+            Ok(()) => delivered += count,
+            Err(err) => {
+                let dropped = spool.requeue(batch);
+                error!(
+                    error = %format!("{err:#}"),
+                    delivered,
+                    holding = spool.len(),
+                    dropped,
+                    dropped_total = spool.dropped_total(),
+                    "publishing readings failed; holding them for the next cycle"
+                );
+                return;
+            }
+        }
+    }
+
+    if delivered > 0 {
+        info!(
+            readings = delivered,
+            replayed = held_before.min(delivered),
+            "published readings"
+        );
     }
 }

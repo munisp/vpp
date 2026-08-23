@@ -10,8 +10,9 @@ import json
 import logging
 from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional
-import mysql.connector
-from mysql.connector import Error
+import psycopg2
+import psycopg2.extras
+from psycopg2 import Error
 import boto3
 from botocore.exceptions import ClientError
 
@@ -28,10 +29,12 @@ class LakehouseETL:
     def __init__(self):
         self.db_config = {
             'host': os.getenv('DATABASE_HOST', 'localhost'),
-            'port': int(os.getenv('DATABASE_PORT', '3306')),
-            'user': os.getenv('DATABASE_USER', 'root'),
+            'port': int(os.getenv('DATABASE_PORT', '5432')),
+            'user': os.getenv('DATABASE_USER', 'postgres'),
             'password': os.getenv('DATABASE_PASSWORD', ''),
-            'database': os.getenv('DATABASE_NAME', 'vpp_platform')
+            'dbname': os.getenv('DATABASE_NAME', 'vpp_platform'),
+            'sslmode': os.getenv('DATABASE_SSLMODE', 'require'),
+            'options': '-c timezone=UTC',
         }
         
         self.s3_client = boto3.client(
@@ -47,7 +50,7 @@ class LakehouseETL:
     def connect_db(self) -> bool:
         """Connect to operational database"""
         try:
-            self.connection = mysql.connector.connect(**self.db_config)
+            self.connection = psycopg2.connect(**self.db_config)
             logger.info("Connected to operational database")
             return True
         except Error as e:
@@ -56,39 +59,37 @@ class LakehouseETL:
     
     def disconnect_db(self):
         """Disconnect from database"""
-        if self.connection and self.connection.is_connected():
+        if self.connection and not self.connection.closed:
             self.connection.close()
             logger.info("Disconnected from database")
     
     def extract_telemetry_data(self, start_date: datetime, end_date: datetime) -> List[Dict]:
         """Extract telemetry data from operational database"""
         query = """
-            SELECT 
+            SELECT
                 t.id,
-                t.assetId,
+                t."assetId",
                 t.timestamp,
                 t.voltage,
                 t.current,
                 t.power,
                 t.energy,
                 t.frequency,
-                t.powerFactor,
+                t."stateOfCharge",
                 t.temperature,
-                t.soc,
-                t.soh,
-                a.userId,
-                a.type as assetType,
+                a."userId",
+                a."assetType",
                 a.capacity
             FROM telemetry t
-            JOIN assets a ON t.assetId = a.id
+            JOIN assets a ON t."assetId" = a.id
             WHERE t.timestamp BETWEEN %s AND %s
             ORDER BY t.timestamp
         """
         
         try:
-            cursor = self.connection.cursor(dictionary=True)
+            cursor = self.connection.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
             cursor.execute(query, (start_date, end_date))
-            results = cursor.fetchall()
+            results = [dict(row) for row in cursor.fetchall()]
             cursor.close()
             logger.info(f"Extracted {len(results)} telemetry records")
             return results
@@ -99,30 +100,29 @@ class LakehouseETL:
     def extract_dr_events_data(self, start_date: datetime, end_date: datetime) -> List[Dict]:
         """Extract DR events data"""
         query = """
-            SELECT 
+            SELECT
                 e.id,
-                e.type,
-                e.startTime,
-                e.endTime,
-                e.targetReduction,
-                e.actualReduction,
-                e.compensationRate,
+                e."eventType",
+                e."startTime",
+                e."endTime",
+                e."targetReduction",
+                e."actualReduction",
+                e."compensationRate",
                 e.status,
-                COUNT(DISTINCT p.userId) as participantCount,
-                SUM(r.actualReduction) as totalReduction,
-                SUM(c.amount) as totalCompensation
-            FROM demandResponseEvents e
-            LEFT JOIN drParticipants p ON e.id = p.eventId
-            LEFT JOIN drResponses r ON e.id = r.eventId
-            LEFT JOIN drCompensation c ON e.id = c.eventId
-            WHERE e.startTime BETWEEN %s AND %s
-            GROUP BY e.id
+                (SELECT COUNT(DISTINCT r."userId") FROM "drResponses" r
+                     WHERE r."eventId" = e.id) as "participantCount",
+                (SELECT SUM(r."actualReduction") FROM "drResponses" r
+                     WHERE r."eventId" = e.id) as "totalReduction",
+                (SELECT SUM(c.amount) FROM "drCompensation" c
+                     WHERE c."eventId" = e.id) as "totalCompensation"
+            FROM "demandResponseEvents" e
+            WHERE e."startTime" BETWEEN %s AND %s
         """
         
         try:
-            cursor = self.connection.cursor(dictionary=True)
+            cursor = self.connection.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
             cursor.execute(query, (start_date, end_date))
-            results = cursor.fetchall()
+            results = [dict(row) for row in cursor.fetchall()]
             cursor.close()
             logger.info(f"Extracted {len(results)} DR event records")
             return results
@@ -133,26 +133,27 @@ class LakehouseETL:
     def extract_payment_data(self, start_date: datetime, end_date: datetime) -> List[Dict]:
         """Extract payment data"""
         query = """
-            SELECT 
+            SELECT
                 p.id,
-                p.userId,
+                p."userId",
                 p.amount,
                 p.currency,
-                p.gateway,
+                p."paymentMethod",
+                p."paymentType",
                 p.status,
-                p.createdAt,
-                p.updatedAt,
-                b.type as billingType,
-                b.amount as billingAmount
+                p."createdAt",
+                p."updatedAt",
+                b."billingType",
+                b."totalValue" as "billingTotalValue"
             FROM payments p
-            LEFT JOIN billings b ON p.id = b.paymentId
-            WHERE p.createdAt BETWEEN %s AND %s
+            LEFT JOIN billings b ON b.id = p."billingId"
+            WHERE p."createdAt" BETWEEN %s AND %s
         """
         
         try:
-            cursor = self.connection.cursor(dictionary=True)
+            cursor = self.connection.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
             cursor.execute(query, (start_date, end_date))
-            results = cursor.fetchall()
+            results = [dict(row) for row in cursor.fetchall()]
             cursor.close()
             logger.info(f"Extracted {len(results)} payment records")
             return results
@@ -162,30 +163,29 @@ class LakehouseETL:
     
     def extract_trading_data(self, start_date: datetime, end_date: datetime) -> List[Dict]:
         """Extract trading data"""
-        # Fixed schema to match actual MySQL trades table
         query = """
-            SELECT 
+            SELECT
                 t.id,
-                t.userId,
-                t.tradeType as type,
-                t.tradingMode,
-                t.energy as energyAmount,
-                t.price as pricePerUnit,
-                t.totalAmount,
+                t."userId",
+                t."tradeType",
+                t."tradingMode",
+                t.energy as "energyAmount",
+                t.price as "pricePerUnit",
+                t."totalAmount",
                 t.status,
-                t.timestamp as executedAt,
-                t.counterpartyId,
+                t.timestamp as "executedAt",
+                t."counterpartyId",
                 t.metadata,
-                t.createdAt,
-                t.updatedAt
+                t."createdAt",
+                t."updatedAt"
             FROM trades t
-            WHERE t.createdAt BETWEEN %s AND %s
+            WHERE t."createdAt" BETWEEN %s AND %s
         """
         
         try:
-            cursor = self.connection.cursor(dictionary=True)
+            cursor = self.connection.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
             cursor.execute(query, (start_date, end_date))
-            results = cursor.fetchall()
+            results = [dict(row) for row in cursor.fetchall()]
             cursor.close()
             logger.info(f"Extracted {len(results)} trading records")
             return results

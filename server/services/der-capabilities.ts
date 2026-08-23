@@ -8,6 +8,7 @@
 import { getDb } from '../db';
 import { sql } from 'drizzle-orm';
 import { kafkaPublisher } from '../integration/kafka-publisher';
+import type { SqlRow } from '../sql-row';
 
 // Types for DER management
 export interface DerCapability {
@@ -85,16 +86,16 @@ export class DerCapabilitiesService {
     if (!db) throw new Error('Database not available');
 
     // Check if capabilities already exist
-    const existing = await db.execute(sql`
+    const existing = await db.execute<SqlRow>(sql`
       SELECT id FROM der_capabilities WHERE asset_id = ${assetId}
     `);
 
     const protocols = JSON.stringify(capabilities.protocols || []);
     const certifications = JSON.stringify(capabilities.certifications || []);
 
-    if ((existing as any)[0]?.length > 0) {
+    if (existing.rows?.length > 0) {
       // Update existing
-      await db.execute(sql`
+      await db.execute<SqlRow>(sql`
         UPDATE der_capabilities SET
           max_power_export = ${capabilities.maxPowerExport || null},
           max_power_import = ${capabilities.maxPowerImport || null},
@@ -119,7 +120,7 @@ export class DerCapabilitiesService {
       `);
     } else {
       // Insert new
-      await db.execute(sql`
+      await db.execute<SqlRow>(sql`
         INSERT INTO der_capabilities (
           asset_id, max_power_export, max_power_import, min_power_export, min_power_import,
           ramp_rate_up, ramp_rate_down, max_soc, min_soc, round_trip_efficiency,
@@ -168,11 +169,11 @@ export class DerCapabilitiesService {
     const db = await getDb();
     if (!db) throw new Error('Database not available');
 
-    const result = await db.execute(sql`
+    const result = await db.execute<SqlRow>(sql`
       SELECT * FROM der_capabilities WHERE asset_id = ${assetId}
     `);
 
-    const row = (result as any)[0]?.[0];
+    const row = result.rows[0];
     if (!row) return null;
 
     return this.mapRowToCapability(row);
@@ -196,7 +197,7 @@ export class DerCapabilitiesService {
     const db = await getDb();
     if (!db) throw new Error('Database not available');
 
-    const result = await db.execute(sql`
+    const result = await db.execute<SqlRow>(sql`
       INSERT INTO der_constraints (
         asset_id, valid_from, valid_until, constraint_type,
         constraint_value, priority, source, reason, created_at
@@ -205,12 +206,13 @@ export class DerCapabilitiesService {
         ${constraint.constraintType}, ${constraint.constraintValue || null},
         ${constraint.priority || 5}, ${constraint.source}, ${constraint.reason || null}, NOW()
       )
+      RETURNING id
     `);
 
     console.log(`[DerCapabilities] Added ${constraint.constraintType} constraint for asset ${assetId}`);
 
     return {
-      id: (result as any).insertId,
+      id: Number(result.rows[0].id),
       assetId,
       validFrom: constraint.validFrom,
       validUntil: constraint.validUntil,
@@ -231,7 +233,7 @@ export class DerCapabilitiesService {
 
     const checkTime = atTime || new Date();
 
-    const result = await db.execute(sql`
+    const result = await db.execute<SqlRow>(sql`
       SELECT * FROM der_constraints
       WHERE asset_id = ${assetId}
         AND valid_from <= ${checkTime}
@@ -239,7 +241,7 @@ export class DerCapabilitiesService {
       ORDER BY priority DESC
     `);
 
-    return ((result as any)[0] || []).map(this.mapRowToConstraint);
+    return (result.rows || []).map(this.mapRowToConstraint);
   }
 
   /**
@@ -254,12 +256,12 @@ export class DerCapabilitiesService {
     const eligibleServices: string[] = [];
 
     // Get asset info
-    const assetResult = await db.execute(sql`
+    const assetResult = await db.execute<SqlRow>(sql`
       SELECT a.*, dc.* FROM assets a
       LEFT JOIN der_capabilities dc ON dc.asset_id = a.id
       WHERE a.id = ${assetId}
     `);
-    const asset = (assetResult as any)[0]?.[0];
+    const asset = assetResult.rows[0];
 
     if (!asset) {
       return {
@@ -280,13 +282,13 @@ export class DerCapabilitiesService {
     }
 
     // Get latest telemetry
-    const telemetryResult = await db.execute(sql`
+    const telemetryResult = await db.execute<SqlRow>(sql`
       SELECT * FROM telemetry
-      WHERE assetId = ${assetId}
+      WHERE "assetId" = ${assetId}
       ORDER BY timestamp DESC
       LIMIT 1
     `);
-    const telemetry = (telemetryResult as any)[0]?.[0];
+    const telemetry = telemetryResult.rows[0];
 
     // Get active constraints
     const activeConstraints = await this.getActiveConstraints(assetId, checkTime);
@@ -391,9 +393,9 @@ export class DerCapabilitiesService {
     const db = await getDb();
     if (!db) throw new Error('Database not available');
 
-    const result = await db.execute(sql`
+    const result = await db.execute<SqlRow>(sql`
       SELECT 
-        a.id, a.userId, a.assetType, a.name, a.capacity, a.status,
+        a.id, a."userId", a."assetType", a.name, a.capacity, a.status,
         dc.id as cap_id, dc.max_power_export, dc.max_power_import,
         dc.min_power_export, dc.min_power_import, dc.ramp_rate_up, dc.ramp_rate_down,
         dc.max_soc, dc.min_soc, dc.round_trip_efficiency, dc.response_time_ms,
@@ -401,22 +403,22 @@ export class DerCapabilitiesService {
         dc.can_provide_frequency_response, dc.can_provide_voltage_support,
         dc.can_provide_reserves, dc.can_provide_peak_shaving,
         dc.protocols, dc.certifications,
-        t.power as current_power, t.stateOfCharge as current_soc,
+        t.power as current_power, t."stateOfCharge" as current_soc,
         t.voltage as current_voltage, t.frequency as current_frequency
       FROM assets a
       LEFT JOIN der_capabilities dc ON dc.asset_id = a.id
       LEFT JOIN (
-        SELECT assetId, power, stateOfCharge, voltage, frequency
+        SELECT "assetId", power, "stateOfCharge", voltage, frequency
         FROM telemetry t1
         WHERE timestamp = (
-          SELECT MAX(timestamp) FROM telemetry t2 WHERE t2.assetId = t1.assetId
+          SELECT MAX(timestamp) FROM telemetry t2 WHERE t2."assetId" = t1."assetId"
         )
-      ) t ON t.assetId = a.id
-      WHERE a.userId = ${userId}
+      ) t ON t."assetId" = a.id
+      WHERE a."userId" = ${userId}
       ORDER BY a.id
     `);
 
-    return ((result as any)[0] || []).map((row: any) => ({
+    return (result.rows || []).map((row: any) => ({
       id: row.id,
       userId: row.userId,
       assetType: row.assetType,
@@ -451,19 +453,19 @@ export class DerCapabilitiesService {
 
     let assetQuery;
     if (scope.userId) {
-      assetQuery = sql`SELECT id FROM assets WHERE userId = ${scope.userId} AND status = 'active'`;
+      assetQuery = sql`SELECT id FROM assets WHERE "userId" = ${scope.userId} AND status = 'active'`;
     } else if (scope.communityId) {
       assetQuery = sql`
         SELECT a.id FROM assets a
-        JOIN community_members cm ON cm.user_id = a.userId
+        JOIN community_members cm ON cm.user_id = a."userId"
         WHERE cm.community_id = ${scope.communityId} AND cm.status = 'active' AND a.status = 'active'
       `;
     } else {
       throw new Error('Must specify userId or communityId');
     }
 
-    const assetsResult = await db.execute(assetQuery);
-    const assetIds = ((assetsResult as any)[0] || []).map((r: any) => r.id);
+    const assetsResult = await db.execute<SqlRow>(assetQuery);
+    const assetIds = (assetsResult.rows || []).map((r: any) => r.id);
 
     let totalExportCapacity = 0;
     let totalImportCapacity = 0;
@@ -511,25 +513,25 @@ export class DerCapabilitiesService {
     if (!db) throw new Error('Database not available');
 
     // Get asset info
-    const assetResult = await db.execute(sql`
+    const assetResult = await db.execute<SqlRow>(sql`
       SELECT * FROM assets WHERE id = ${assetId}
     `);
-    const asset = (assetResult as any)[0]?.[0];
+    const asset = assetResult.rows[0];
     if (!asset) throw new Error('Asset not found');
 
     // Get recent telemetry to estimate capabilities
-    const telemetryResult = await db.execute(sql`
+    const telemetryResult = await db.execute<SqlRow>(sql`
       SELECT 
         MAX(power) as max_power,
         MIN(power) as min_power,
         AVG(power) as avg_power,
-        MAX(stateOfCharge) as max_soc,
-        MIN(stateOfCharge) as min_soc
+        MAX("stateOfCharge") as max_soc,
+        MIN("stateOfCharge") as min_soc
       FROM telemetry
-      WHERE assetId = ${assetId}
-        AND timestamp > DATE_SUB(NOW(), INTERVAL 30 DAY)
+      WHERE "assetId" = ${assetId}
+        AND timestamp > (NOW() - INTERVAL '30 day')
     `);
-    const telemetryStats = (telemetryResult as any)[0]?.[0];
+    const telemetryStats = telemetryResult.rows[0];
 
     const capabilities: Partial<DerCapability> = {
       protocols: ['mqtt'],

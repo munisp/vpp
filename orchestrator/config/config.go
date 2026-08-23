@@ -78,6 +78,7 @@ type DatabaseConfig struct {
 	User     string
 	Password string
 	Database string
+	SSLMode  string
 }
 
 type uint128 struct {
@@ -133,10 +134,11 @@ func LoadConfig() (*Config, error) {
 		},
 		Database: DatabaseConfig{
 			Host:     getEnv("DB_HOST", "localhost"),
-			Port:     getEnv("DB_PORT", "3306"),
-			User:     getEnv("DB_USER", "root"),
+			Port:     getEnv("DB_PORT", "5432"),
+			User:     getEnv("DB_USER", "postgres"),
 			Password: getEnv("DB_PASSWORD", ""),
 			Database: getEnv("DB_NAME", "vpp_platform"),
+			SSLMode:  getEnv("DB_SSLMODE", "require"),
 		},
 	}
 

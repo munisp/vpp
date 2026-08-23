@@ -16,7 +16,7 @@ IoT Devices → MQTT Broker → Go Bridge → Fluvio → Python Consumers → Da
    - Validates and transforms data
    - Publishes to Fluvio topics
 3. **Fluvio Cluster** - Distributed streaming platform
-4. **Database Consumer (Python)** - Stores telemetry in MySQL
+4. **Database Consumer (Python)** - Stores telemetry in PostgreSQL
 5. **Analytics Consumer (Python)** - Real-time windowed aggregations
 
 ## Features

@@ -17,8 +17,10 @@ type Config struct {
 	Listen   string         `yaml:"listen"`
 	Platform PlatformConfig `yaml:"platform"`
 	OCPP     OCPPConfig     `yaml:"ocpp"`
+	Control  ControlConfig  `yaml:"control"`
 	OpenADR  OpenADRConfig  `yaml:"openadr"`
 	SEP2     SEP2Config     `yaml:"sep2"`
+	Matter   MatterConfig   `yaml:"matter"`
 	LogLevel string         `yaml:"log_level"`
 }
 
@@ -30,12 +32,26 @@ type PlatformConfig struct {
 
 type OCPPConfig struct {
 	Enabled bool `yaml:"enabled"`
+	// Versions lists the OCPP versions this deployment accepts, "1.6" and/or
+	// "2.0.1". A station is routed by the WebSocket subprotocol it offers, so a
+	// version that is not listed is refused rather than served with the other
+	// version's message set. Defaults to 1.6 only.
+	Versions []string `yaml:"versions"`
 	// ChargePoints maps charge point identity to its HTTP basic auth password.
 	// OCPP 1.6 security profile 1 is basic auth over TLS; an empty map means no
 	// charger can connect, which is preferable to accepting all of them.
 	ChargePoints      map[string]string `yaml:"charge_points"`
 	HeartbeatInterval time.Duration     `yaml:"heartbeat_interval"`
 	CallTimeout       time.Duration     `yaml:"call_timeout"`
+}
+
+// ControlConfig bounds how long a dispatched setpoint may apply and how often
+// closed windows are swept. These are safety limits, not tuning knobs: a long
+// max_validity is how a charge point ends up holding a stale setpoint through an
+// outage.
+type ControlConfig struct {
+	MaxValidity   time.Duration `yaml:"max_validity"`
+	SweepInterval time.Duration `yaml:"sweep_interval"`
 }
 
 type OpenADRConfig struct {
@@ -59,6 +75,43 @@ type SEP2Config struct {
 	ClientKeyFile  string        `yaml:"client_key_file"`
 	CAFile         string        `yaml:"ca_file"`
 	PollInterval   time.Duration `yaml:"poll_interval"`
+}
+
+// MatterConfig points at a Matter controller. This service is a client of one
+// (a Matter server exposing the WebSocket controller API); it embeds no Matter
+// stack, so there is no configuration under which it can commission or command a
+// node without that controller.
+type MatterConfig struct {
+	Enabled bool `yaml:"enabled"`
+	// URL is the controller's WebSocket endpoint, e.g. ws://matter-server:5580/ws.
+	URL string `yaml:"url"`
+	// CallTimeout bounds one controller command. A command whose result never
+	// arrives fails; it is not retried, because a Matter invoke is not
+	// necessarily idempotent.
+	CallTimeout time.Duration `yaml:"call_timeout"`
+	// ReconnectInterval is the delay before redialling a dropped controller.
+	ReconnectInterval time.Duration `yaml:"reconnect_interval"`
+	// AllowTestNodes permits the controller's synthetic nodes (id >= 900000),
+	// which acknowledge commands without any device performing them. Off by
+	// default: on a real deployment those acknowledgements would be indis-
+	// tinguishable from a dispatched load.
+	AllowTestNodes bool `yaml:"allow_test_nodes"`
+}
+
+// The OCPP versions this service can terminate.
+const (
+	OCPPVersion16  = "1.6"
+	OCPPVersion201 = "2.0.1"
+)
+
+// Speaks reports whether an OCPP version is enabled.
+func (o OCPPConfig) Speaks(version string) bool {
+	for _, enabled := range o.Versions {
+		if enabled == version {
+			return true
+		}
+	}
+	return false
 }
 
 // Load reads a YAML file, applies environment overrides and validates.
@@ -106,6 +159,9 @@ func Load(path string) (*Config, error) {
 	if v := os.Getenv("SEP2_CLIENT_KEY_FILE"); v != "" {
 		cfg.SEP2.ClientKeyFile = v
 	}
+	if v := os.Getenv("MATTER_CONTROLLER_URL"); v != "" {
+		cfg.Matter.URL = v
+	}
 
 	if err := cfg.Validate(); err != nil {
 		return nil, err
@@ -127,8 +183,8 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("platform.shared_secret must be at least 32 characters")
 	}
 
-	if !c.OCPP.Enabled && !c.OpenADR.Enabled && !c.SEP2.Enabled {
-		return fmt.Errorf("no protocol is enabled: enable at least one of ocpp, openadr, sep2")
+	if !c.OCPP.Enabled && !c.OpenADR.Enabled && !c.SEP2.Enabled && !c.Matter.Enabled {
+		return fmt.Errorf("no protocol is enabled: enable at least one of ocpp, openadr, sep2, matter")
 	}
 
 	if c.OCPP.Enabled {
@@ -146,6 +202,27 @@ func (c *Config) Validate() error {
 		if c.OCPP.CallTimeout <= 0 {
 			c.OCPP.CallTimeout = 30 * time.Second
 		}
+		if len(c.OCPP.Versions) == 0 {
+			c.OCPP.Versions = []string{OCPPVersion16}
+		}
+		for _, version := range c.OCPP.Versions {
+			if version != OCPPVersion16 && version != OCPPVersion201 {
+				return fmt.Errorf("ocpp.versions: %q is not a supported OCPP version (%s, %s)", version, OCPPVersion16, OCPPVersion201)
+			}
+		}
+	}
+
+	if c.Control.MaxValidity <= 0 {
+		c.Control.MaxValidity = time.Hour
+	}
+	if c.Control.MaxValidity > 24*time.Hour {
+		return fmt.Errorf("control.max_validity %s exceeds 24h: a setpoint nobody refreshes for a day is not a control window", c.Control.MaxValidity)
+	}
+	if c.Control.SweepInterval <= 0 {
+		c.Control.SweepInterval = 30 * time.Second
+	}
+	if c.Control.SweepInterval >= c.Control.MaxValidity {
+		return fmt.Errorf("control.sweep_interval %s must be shorter than control.max_validity %s", c.Control.SweepInterval, c.Control.MaxValidity)
 	}
 
 	if c.OpenADR.Enabled {
@@ -175,6 +252,18 @@ func (c *Config) Validate() error {
 		}
 		if c.SEP2.PollInterval <= 0 {
 			c.SEP2.PollInterval = 5 * time.Minute
+		}
+	}
+
+	if c.Matter.Enabled {
+		if strings.TrimSpace(c.Matter.URL) == "" {
+			return fmt.Errorf("matter.url is required when matter is enabled: there is no built-in Matter stack to fall back to")
+		}
+		if c.Matter.CallTimeout <= 0 {
+			c.Matter.CallTimeout = 30 * time.Second
+		}
+		if c.Matter.ReconnectInterval <= 0 {
+			c.Matter.ReconnectInterval = 10 * time.Second
 		}
 	}
 

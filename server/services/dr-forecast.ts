@@ -27,6 +27,7 @@ import {
   DrEventForecastRow,
 } from '../../drizzle/grid-intel-schema';
 import { getWeatherForecast } from './weather-api';
+import type { SqlRow } from '../sql-row';
 
 export interface DayForecast {
   date: Date;
@@ -72,31 +73,31 @@ export class DrForecastService {
     if (!db) throw new Error('Database not available');
 
     // ---- Signal 1: event history by weekday + season (real query) ----
-    const historyResult = await db.execute(sql`
-      SELECT WEEKDAY(startTime) as weekday, MONTH(startTime) as month, COUNT(*) as count
-      FROM demandResponseEvents
-      WHERE startTime > DATE_SUB(NOW(), INTERVAL ${HISTORY_DAYS} DAY)
+    const historyResult = await db.execute<SqlRow>(sql`
+      SELECT (EXTRACT(ISODOW FROM "startTime") - 1) as weekday, EXTRACT(MONTH FROM "startTime") as month, COUNT(*) as count
+      FROM "demandResponseEvents"
+      WHERE "startTime" > (NOW() - (${HISTORY_DAYS} * INTERVAL '1 day'))
         AND status != 'cancelled'
-      GROUP BY WEEKDAY(startTime), MONTH(startTime)
+      GROUP BY EXTRACT(ISODOW FROM "startTime"), EXTRACT(MONTH FROM "startTime")
     `);
     const historyRows: Array<{ weekday: number; month: number; count: number }> =
-      ((historyResult as any)[0] || []).map((r: any) => ({
-        weekday: Number(r.weekday), // MySQL WEEKDAY(): 0=Monday..6=Sunday
+      (historyResult.rows || []).map((r: any) => ({
+        weekday: Number(r.weekday), // ISODOW - 1: 0=Monday..6=Sunday
         month: Number(r.month),
         count: Number(r.count),
       }));
 
     // ---- Signal 2: aggregate demand trend from telemetry (real query) ----
-    const trendResult = await db.execute(sql`
+    const trendResult = await db.execute<SqlRow>(sql`
       SELECT
-        AVG(CASE WHEN t.timestamp > DATE_SUB(NOW(), INTERVAL 7 DAY) THEN ABS(t.power) END) as recent_avg,
-        AVG(CASE WHEN t.timestamp BETWEEN DATE_SUB(NOW(), INTERVAL 28 DAY) AND DATE_SUB(NOW(), INTERVAL 7 DAY) THEN ABS(t.power) END) as older_avg
+        AVG(CASE WHEN t.timestamp > (NOW() - INTERVAL '7 day') THEN ABS(t.power) END) as recent_avg,
+        AVG(CASE WHEN t.timestamp BETWEEN (NOW() - INTERVAL '28 day') AND (NOW() - INTERVAL '7 day') THEN ABS(t.power) END) as older_avg
       FROM telemetry t
-      JOIN assets a ON a.id = t.assetId
-      WHERE t.power IS NOT NULL AND a.assetType = 'meter'
-        AND t.timestamp > DATE_SUB(NOW(), INTERVAL 28 DAY)
+      JOIN assets a ON a.id = t."assetId"
+      WHERE t.power IS NOT NULL AND a."assetType" = 'meter'
+        AND t.timestamp > (NOW() - INTERVAL '28 day')
     `);
-    const trendRow = (trendResult as any)[0]?.[0] || {};
+    const trendRow = trendResult.rows[0] || {};
     let demandTrendPercent: number | null = null;
     if (trendRow.recent_avg !== null && trendRow.older_avg !== null && Number(trendRow.older_avg) > 0) {
       const trend = (Number(trendRow.recent_avg) - Number(trendRow.older_avg)) / Number(trendRow.older_avg);
@@ -128,17 +129,17 @@ export class DrForecastService {
       const date = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + d));
       const dateKey = date.toISOString().slice(0, 10);
       const month = date.getUTCMonth() + 1;
-      // Convert JS getUTCDay (0=Sunday) to MySQL WEEKDAY (0=Monday)
-      const mysqlWeekday = (date.getUTCDay() + 6) % 7;
+      // Convert JS getUTCDay (0=Sunday) to the 0=Monday weekday used above
+      const isoWeekday = (date.getUTCDay() + 6) % 7;
 
       // Weekday frequency: events on this weekday / occurrences of this weekday in window
       const weekdayOccurrences = Math.floor(HISTORY_DAYS / 7);
-      const weekdayEvents = historyRows.filter(r => r.weekday === mysqlWeekday).reduce((s, r) => s + r.count, 0);
+      const weekdayEvents = historyRows.filter(r => r.weekday === isoWeekday).reduce((s, r) => s + r.count, 0);
       const weekdayRate = weekdayEvents / weekdayOccurrences;
 
       // Seasonal frequency: same weekday in the same calendar month across history
       const seasonalEvents = historyRows
-        .filter(r => r.weekday === mysqlWeekday && r.month === month)
+        .filter(r => r.weekday === isoWeekday && r.month === month)
         .reduce((s, r) => s + r.count, 0);
       const seasonalOccurrences = Math.max(1, Math.floor(HISTORY_DAYS / 365));
       const seasonalRate = seasonalEvents / seasonalOccurrences;
@@ -168,7 +169,7 @@ export class DrForecastService {
 
       const insertResult = await db.insert(drEventForecasts).values({
         forecastDate: date,
-        weekday: mysqlWeekday,
+        weekday: isoWeekday,
         likelihoodPercent,
         historyFrequencyPercent,
         demandTrendPercent,
@@ -176,18 +177,18 @@ export class DrForecastService {
         weatherUsed,
         historyEventCount,
         metadata: JSON.stringify({ location: { lat, lon }, historyDays: HISTORY_DAYS }),
-      });
+      }).returning({ id: drEventForecasts.id });
 
       results.push({
         date,
-        weekday: mysqlWeekday,
+        weekday: isoWeekday,
         likelihoodPercent,
         historyFrequencyPercent,
         demandTrendPercent,
         heatFactorPercent,
         weatherUsed,
         historyEventCount,
-        forecastId: Number((insertResult as any)[0]?.insertId),
+        forecastId: Number(insertResult[0].id),
       });
     }
 
@@ -209,36 +210,36 @@ export class DrForecastService {
     if (params.targetReductionKw <= 0) throw new Error('targetReductionKw must be positive');
 
     // Historical performance per user from real DR responses
-    const perfResult = await db.execute(sql`
+    const perfResult = await db.execute<SqlRow>(sql`
       SELECT
-        userId,
+        "userId",
         COUNT(*) as events_responded,
-        SUM(CASE WHEN targetReduction > 0 AND actualReduction IS NOT NULL THEN actualReduction ELSE 0 END) as total_actual,
-        SUM(CASE WHEN targetReduction > 0 AND actualReduction IS NOT NULL THEN targetReduction ELSE 0 END) as total_target,
-        SUM(CASE WHEN participationStatus IN ('opted_in', 'auto_enrolled')
-                  AND completedAt IS NOT NULL
-                  AND (actualReduction IS NULL OR actualReduction < targetReduction * 0.25)
+        SUM(CASE WHEN "targetReduction" > 0 AND "actualReduction" IS NOT NULL THEN "actualReduction" ELSE 0 END) as total_actual,
+        SUM(CASE WHEN "targetReduction" > 0 AND "actualReduction" IS NOT NULL THEN "targetReduction" ELSE 0 END) as total_target,
+        SUM(CASE WHEN "participationStatus" IN ('opted_in', 'auto_enrolled')
+                  AND "completedAt" IS NOT NULL
+                  AND ("actualReduction" IS NULL OR "actualReduction" < "targetReduction" * 0.25)
                  THEN 1 ELSE 0 END) as no_shows
-      FROM drResponses
-      GROUP BY userId
+      FROM "drResponses"
+      GROUP BY "userId"
     `);
-    const perfRows = ((perfResult as any)[0] || []) as any[];
+    const perfRows = (perfResult.rows || []) as any[];
 
     // Active DR enrollees (so users without history can still be considered)
-    const enrolledResult = await db.execute(sql`
-      SELECT userId, maxReduction FROM drParticipants WHERE status = 'active'
+    const enrolledResult = await db.execute<SqlRow>(sql`
+      SELECT "userId", "maxReduction" FROM "drParticipants" WHERE status = 'active'
     `);
-    const enrolledRows = ((enrolledResult as any)[0] || []) as any[];
+    const enrolledRows = (enrolledResult.rows || []) as any[];
 
     // Battery-backed flexibility per user from real assets
-    const flexResult = await db.execute(sql`
-      SELECT userId, COALESCE(SUM(capacity), 0) as battery_wh
+    const flexResult = await db.execute<SqlRow>(sql`
+      SELECT "userId", COALESCE(SUM(capacity), 0) as battery_wh
       FROM assets
-      WHERE assetType = 'battery' AND status = 'active'
-      GROUP BY userId
+      WHERE "assetType" = 'battery' AND status = 'active'
+      GROUP BY "userId"
     `);
     const batteryWhByUser = new Map<number, number>(
-      ((flexResult as any)[0] || []).map((r: any) => [Number(r.userId), Number(r.battery_wh)])
+      (flexResult.rows || []).map((r: any) => [Number(r.userId), Number(r.battery_wh)])
     );
 
     const candidates = new Map<number, {
@@ -325,9 +326,9 @@ export class DrForecastService {
         flexibilityKw10: Math.round(c.flexibilityKw * 10),
         noShowCount: c.noShowCount,
         outcome: 'pending',
-      });
+      }).returning({ id: drParticipantRecommendations.id });
       views.push({
-        recommendationId: Number((insertResult as any)[0]?.insertId),
+        recommendationId: Number(insertResult[0].id),
         userId: c.userId,
         rankPosition: i + 1,
         score: Math.round(c.score * 100) / 100,
@@ -369,7 +370,7 @@ export class DrForecastService {
       throw new Error(`Recommendation ${recommendationId} outcome already recorded as '${rec.outcome}'`);
     }
 
-    await db.execute(sql`
+    await db.execute<SqlRow>(sql`
       UPDATE dr_participant_recommendations SET
         outcome = ${outcome},
         outcome_recorded_at = NOW()

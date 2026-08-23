@@ -215,9 +215,9 @@ class DRAutomationService {
         gridConditions: conditions,
         performanceBonus: rule.eventConfig.performanceBonus,
       }),
-    });
+    }).returning({ id: demandResponseEvents.id });
 
-    const eventId = Number((result as any).insertId);
+    const eventId = Number(result[0].id);
 
     // Auto-enroll eligible participants
     await this.enrollParticipants(eventId, rule);

@@ -17,12 +17,25 @@ platform:
 
 ocpp:
   enabled: true
-  # OCPP 1.6 security profile 1: HTTP basic auth over TLS. An empty map means
-  # no charge point can connect, which is the safe default.
+  # Versions this deployment terminates. A station is routed by the WebSocket
+  # subprotocol it offers ("ocpp1.6" / "ocpp2.0.1"); a version that is not
+  # listed here is refused, never served with the other version's message set.
+  versions: ["1.6", "2.0.1"]
+  # Security profile 1: HTTP basic auth over TLS, for both versions. An empty
+  # map means no charge point can connect, which is the safe default.
   charge_points:
     CP-0001: "" # >= 16 characters
   heartbeat_interval: 300s
   call_timeout: 30s
+
+control:
+  # No setpoint this service delivers may outlive this window: the bound is sent
+  # to the charge point as validFrom/validTo, so hardware stops obeying on its
+  # own clock if the platform disappears. Capped at 24h.
+  max_validity: 1h
+  # How often expired windows are swept and the standing safe fallback profile is
+  # re-asserted. Must be shorter than max_validity.
+  sweep_interval: 30s
 
 openadr:
   enabled: false
@@ -46,3 +59,16 @@ sep2:
   client_key_file: "/etc/vpp/sep2-client.key"
   ca_file: "/etc/vpp/sep2-ca.pem"
   poll_interval: 300s
+
+matter:
+  enabled: false
+  # A Matter controller exposing the WebSocket controller API (for example
+  # matter-server on :5580). This service embeds no Matter stack: without a
+  # controller it refuses to start rather than reporting commissioned nodes.
+  url: "ws://matter-server:5580/ws"
+  call_timeout: 30s
+  reconnect_interval: 10s
+  # The controller's synthetic nodes (id >= 900000) acknowledge commands that no
+  # device performs. Leave this off outside a development fabric: those
+  # acknowledgements are indistinguishable from a dispatched load.
+  allow_test_nodes: false

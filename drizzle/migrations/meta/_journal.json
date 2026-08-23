@@ -1,33 +1,75 @@
 {
   "version": "7",
-  "dialect": "mysql",
+  "dialect": "postgresql",
   "entries": [
     {
       "idx": 0,
-      "version": "5",
-      "when": 1786388522492,
-      "tag": "0000_baseline",
+      "version": "7",
+      "when": 1787428343808,
+      "tag": "0000_postgres_baseline",
       "breakpoints": true
     },
     {
       "idx": 1,
-      "version": "5",
-      "when": 1786388523231,
-      "tag": "0001_recent_schema_changes",
+      "version": "7",
+      "when": 1787433971168,
+      "tag": "0001_control_validity",
       "breakpoints": true
     },
     {
       "idx": 2,
-      "version": "5",
-      "when": 1787404800000,
-      "tag": "0002_settlement_chain_uniqueness",
+      "version": "7",
+      "when": 1787435462457,
+      "tag": "0002_mqtt_bounded_control",
       "breakpoints": true
     },
     {
       "idx": 3,
-      "version": "5",
-      "when": 1787414400000,
-      "tag": "0003_grid_protocol_tables",
+      "version": "7",
+      "when": 1787476600000,
+      "tag": "0003_p2p_trade_control_source",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1787479600000,
+      "tag": "0004_forecast_accuracy",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1787486000000,
+      "tag": "0005_price_signals",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1787492000000,
+      "tag": "0006_fleet_telemetry",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1787498000000,
+      "tag": "0007_locational_flexibility",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1787504000000,
+      "tag": "0008_matter_loads",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1787510000000,
+      "tag": "0009_degraded_operation",
       "breakpoints": true
     }
   ]

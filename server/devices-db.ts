@@ -57,9 +57,10 @@ export async function createDevice(device: InsertDevice) {
   
   const result = await db
     .insert(devices)
-    .values(device);
+    .values(device)
+    .returning({ id: devices.id });
   
-  return result[0].insertId;
+  return result[0].id;
 }
 
 /**
@@ -117,9 +118,10 @@ export async function createDeviceCommand(command: InsertDeviceCommand) {
   
   const result = await db
     .insert(deviceCommands)
-    .values(command);
+    .values(command)
+    .returning({ id: deviceCommands.id });
   
-  return result[0].insertId;
+  return result[0].id;
 }
 
 /**

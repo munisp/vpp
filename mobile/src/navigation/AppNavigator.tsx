@@ -32,6 +32,13 @@ import BatteryHealthScreen from '../screens/BatteryHealthScreen';
 import SolarYieldScreen from '../screens/SolarYieldScreen';
 import PriceAlertsScreen from '../screens/PriceAlertsScreen';
 import OrderBookScreen from '../screens/OrderBookScreen';
+import ControlWindowsScreen from '../screens/ControlWindowsScreen';
+import ForecastAccuracyScreen from '../screens/ForecastAccuracyScreen';
+import PriceSignalsScreen from '../screens/PriceSignalsScreen';
+import CommunityTelemetryScreen from '../screens/CommunityTelemetryScreen';
+import LocationalFlexibilityScreen from '../screens/LocationalFlexibilityScreen';
+import MatterLoadsScreen from '../screens/MatterLoadsScreen';
+import ServiceStatusScreen from '../screens/ServiceStatusScreen';
 
 const Stack = createNativeStackNavigator();
 const Tab = createBottomTabNavigator();
@@ -160,6 +167,13 @@ export default function AppNavigator() {
       <Stack.Screen name="SolarYield" component={SolarYieldScreen} />
       <Stack.Screen name="PriceAlerts" component={PriceAlertsScreen} />
       <Stack.Screen name="OrderBook" component={OrderBookScreen} />
+      <Stack.Screen name="ControlWindows" component={ControlWindowsScreen} />
+      <Stack.Screen name="ForecastAccuracy" component={ForecastAccuracyScreen} />
+      <Stack.Screen name="PriceSignals" component={PriceSignalsScreen} />
+      <Stack.Screen name="CommunityTelemetry" component={CommunityTelemetryScreen} />
+      <Stack.Screen name="LocationalFlexibility" component={LocationalFlexibilityScreen} />
+      <Stack.Screen name="MatterLoads" component={MatterLoadsScreen} />
+      <Stack.Screen name="ServiceStatus" component={ServiceStatusScreen} />
           </>
         )}
       </Stack.Navigator>

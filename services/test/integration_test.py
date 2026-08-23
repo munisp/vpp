@@ -4,10 +4,12 @@ Tests end-to-end data flow from MQTT to database
 """
 
 import json
+import os
 import time
 from datetime import datetime
 
-import mysql.connector
+import psycopg2
+import psycopg2.extras
 import paho.mqtt.client as mqtt
 from loguru import logger
 
@@ -19,11 +21,12 @@ class IntegrationTest:
         self.mqtt_host = "localhost"
         self.mqtt_port = 1883
         self.db_config = {
-            "host": "localhost",
-            "port": 3306,
-            "user": "root",
-            "password": "",
-            "database": "vpp",
+            "host": os.getenv("DB_HOST", "localhost"),
+            "port": int(os.getenv("DB_PORT", "5432")),
+            "user": os.getenv("DB_USER", "postgres"),
+            "password": os.getenv("DB_PASSWORD", ""),
+            "dbname": os.getenv("DB_NAME", "vpp"),
+            "sslmode": os.getenv("DB_SSLMODE", "disable"),
         }
         
         self.test_device_id = "test-integration-001"
@@ -75,16 +78,16 @@ class IntegrationTest:
         logger.info(f"Verifying database storage (max wait: {max_wait}s)...")
         
         try:
-            conn = mysql.connector.connect(**self.db_config)
-            cursor = conn.cursor(dictionary=True)
+            conn = psycopg2.connect(**self.db_config)
+            cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
             
             # Poll database for the test message
             for attempt in range(max_wait):
                 query = """
                     SELECT * FROM telemetry
-                    WHERE assetId = %s
-                    AND timestamp >= DATE_SUB(NOW(), INTERVAL 1 MINUTE)
-                    ORDER BY createdAt DESC
+                    WHERE "assetId" = %s
+                    AND timestamp >= NOW() - INTERVAL '1 minute'
+                    ORDER BY "createdAt" DESC
                     LIMIT 1
                 """
                 

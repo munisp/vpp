@@ -1,4 +1,21 @@
-import { int, mysqlEnum, mysqlTable, text, timestamp, boolean, json, varchar } from "drizzle-orm/mysql-core";
+import {
+  boolean,
+  integer as int,
+  json,
+  pgEnum,
+  pgTable,
+  serial,
+  text,
+  timestamp,
+  varchar,
+} from "drizzle-orm/pg-core";
+
+export const carbonCertificatesStatusEnum = pgEnum("carbon_certificates_status", ["minted", "retired"]);
+export const carbonCertificatesEmissionFactorSourceEnum = pgEnum("carbon_certificates_emission_factor_source", ["live"]);
+export const dynamicTariffsStatusEnum = pgEnum("dynamic_tariffs_status", ["published", "superseded"]);
+export const dynamicTariffsCountryEnum = pgEnum("dynamic_tariffs_country", ["nigeria", "tanzania"]);
+export const energyAdvisorReportsKindEnum = pgEnum("energy_advisor_reports_kind", ["recommendations", "weekly_digest"]);
+
 
 /**
  * Innovations schema — tables backing the five innovation features:
@@ -17,10 +34,10 @@ import { int, mysqlEnum, mysqlTable, text, timestamp, boolean, json, varchar } f
  * recommendation set / weekly digest, including the exact computed facts
  * the advice was derived from and whether the LLM was available.
  */
-export const energyAdvisorReports = mysqlTable("energy_advisor_reports", {
-  id: int("id").autoincrement().primaryKey(),
+export const energyAdvisorReports = pgTable("energy_advisor_reports", {
+  id: serial("id").primaryKey(),
   userId: int("userId").notNull(),
-  kind: mysqlEnum("kind", ["recommendations", "weekly_digest"]).notNull(),
+  kind: energyAdvisorReportsKindEnum("kind").notNull(),
   periodStart: timestamp("periodStart").notNull(),
   periodEnd: timestamp("periodEnd").notNull(),
 
@@ -49,11 +66,11 @@ export type InsertEnergyAdvisorReport = typeof energyAdvisorReports.$inferInsert
  * time-of-use tariffs. History is never overwritten: publishing a new
  * version supersedes the previous one.
  */
-export const dynamicTariffs = mysqlTable("dynamic_tariffs", {
-  id: int("id").autoincrement().primaryKey(),
-  country: mysqlEnum("country", ["nigeria", "tanzania"]).notNull(),
+export const dynamicTariffs = pgTable("dynamic_tariffs", {
+  id: serial("id").primaryKey(),
+  country: dynamicTariffsCountryEnum("country").notNull(),
   version: int("version").notNull(),
-  status: mysqlEnum("status", ["published", "superseded"]).default("published").notNull(),
+  status: dynamicTariffsStatusEnum("status").default("published").notNull(),
   effectiveFrom: timestamp("effectiveFrom").notNull(),
 
   // 24 hourly entries computed from real marketPrices history +
@@ -88,8 +105,8 @@ export type InsertDynamicTariff = typeof dynamicTariffs.$inferInsert;
  * Battery health snapshots — point-in-time analytics computed from real
  * SoC/power telemetry for a battery asset.
  */
-export const batteryHealthSnapshots = mysqlTable("battery_health_snapshots", {
-  id: int("id").autoincrement().primaryKey(),
+export const batteryHealthSnapshots = pgTable("battery_health_snapshots", {
+  id: serial("id").primaryKey(),
   assetId: int("assetId").notNull(),
   userId: int("userId").notNull(),
 
@@ -131,8 +148,8 @@ export type InsertBatteryHealthSnapshot = typeof batteryHealthSnapshots.$inferIn
  * Each row links a p2p_buy and a p2p_sell row from the trades table for a
  * (possibly partial) fill.
  */
-export const p2pMatches = mysqlTable("p2p_matches", {
-  id: int("id").autoincrement().primaryKey(),
+export const p2pMatches = pgTable("p2p_matches", {
+  id: serial("id").primaryKey(),
   buyOrderId: int("buyOrderId").notNull(),  // trades.id of the p2p_buy leg
   sellOrderId: int("sellOrderId").notNull(), // trades.id of the p2p_sell leg
   buyerId: int("buyerId").notNull(),
@@ -152,8 +169,8 @@ export type InsertP2pMatch = typeof p2pMatches.$inferInsert;
  * solar generation. certificateHash is a deterministic SHA-256 over the
  * certificate's factual fields, enabling public verification.
  */
-export const carbonCertificates = mysqlTable("carbon_certificates", {
-  id: int("id").autoincrement().primaryKey(),
+export const carbonCertificates = pgTable("carbon_certificates", {
+  id: serial("id").primaryKey(),
   userId: int("userId").notNull(),
   sequence: int("sequence").notNull(), // per-user mint sequence (1-based)
   certificateHash: varchar("certificateHash", { length: 64 }).notNull().unique(),
@@ -161,13 +178,13 @@ export const carbonCertificates = mysqlTable("carbon_certificates", {
   region: varchar("region", { length: 50 }).notNull(),
   energyWh: int("energyWh").notNull(), // always 100_000 (100 kWh) per certificate
   emissionFactorGramsPerKwh: int("emissionFactorGramsPerKwh").notNull(), // DB-backed factor used
-  emissionFactorSource: mysqlEnum("emissionFactorSource", ["live"]).notNull(), // only DB-backed factors are used
+  emissionFactorSource: carbonCertificatesEmissionFactorSourceEnum("emissionFactorSource").notNull(), // only DB-backed factors are used
   co2AvoidedGrams: int("co2AvoidedGrams").notNull(),
 
   periodStart: timestamp("periodStart").notNull(), // start of generation window covered
   periodEnd: timestamp("periodEnd").notNull(),     // timestamp when the 100 kWh threshold was crossed
 
-  status: mysqlEnum("status", ["minted", "retired"]).default("minted").notNull(),
+  status: carbonCertificatesStatusEnum("status").default("minted").notNull(),
   metadata: text("metadata"),
   mintedAt: timestamp("mintedAt").defaultNow().notNull(),
   createdAt: timestamp("createdAt").defaultNow().notNull(),

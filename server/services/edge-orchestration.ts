@@ -9,6 +9,8 @@ import { getDb } from '../db';
 import { sql } from 'drizzle-orm';
 import { createHash, createHmac } from 'crypto';
 import { kafkaPublisher } from '../integration/kafka-publisher';
+import type { SqlRow } from '../sql-row';
+import { jsonSetText } from '../sql-json';
 
 // Types for edge orchestration
 export interface EdgeGateway {
@@ -109,7 +111,7 @@ export class EdgeOrchestrationService {
       .update(`${gatewayId}-${Date.now()}-${Math.random()}`)
       .digest('hex');
 
-    const result = await db.execute(sql`
+    const result = await db.execute<SqlRow>(sql`
       INSERT INTO edge_gateways (
         gateway_id, name, site_id, community_id,
         hardware_model, firmware_version, primary_protocol, connection_endpoint,
@@ -124,12 +126,13 @@ export class EdgeOrchestrationService {
         ${options.maxManagedDevices || null}, ${certificateFingerprint},
         'offline', false, 0, NOW(), NOW()
       )
+      RETURNING id
     `);
 
     console.log(`[EdgeOrchestration] Registered gateway ${gatewayId}`);
 
     return {
-      id: (result as any).insertId,
+      id: Number(result.rows[0].id),
       gatewayId,
       name,
       siteId: options.siteId || null,
@@ -168,25 +171,24 @@ export class EdgeOrchestrationService {
     if (!db) throw new Error('Database not available');
 
     // Update gateway status
-    await db.execute(sql`
+    await db.execute<SqlRow>(sql`
       UPDATE edge_gateways SET
         status = 'online',
         last_heartbeat = NOW(),
         offline_mode = ${heartbeat.offlineMode},
         firmware_version = COALESCE(${heartbeat.firmwareVersion || null}, firmware_version),
-        metadata = JSON_SET(
-          COALESCE(metadata, '{}'),
-          '$.uptimeSeconds', ${heartbeat.uptimeSeconds},
-          '$.managedDevices', ${heartbeat.managedDevices},
-          '$.memoryUsagePercent', ${heartbeat.memoryUsagePercent || 0},
-          '$.storageUsagePercent', ${heartbeat.storageUsagePercent || 0}
-        ),
+        metadata = ${jsonSetText(sql`metadata`, {
+          uptimeSeconds: heartbeat.uptimeSeconds,
+          managedDevices: heartbeat.managedDevices,
+          memoryUsagePercent: heartbeat.memoryUsagePercent || 0,
+          storageUsagePercent: heartbeat.storageUsagePercent || 0,
+        })},
         updated_at = NOW()
       WHERE gateway_id = ${gatewayId}
     `);
 
     // Get pending commands for this gateway
-    const pendingResult = await db.execute(sql`
+    const pendingResult = await db.execute<SqlRow>(sql`
       SELECT ec.* FROM edge_commands ec
       JOIN edge_gateways eg ON eg.id = ec.gateway_id
       WHERE eg.gateway_id = ${gatewayId}
@@ -196,11 +198,11 @@ export class EdgeOrchestrationService {
       LIMIT 10
     `);
 
-    const pendingCommands = ((pendingResult as any)[0] || []).map(this.mapRowToCommand);
+    const pendingCommands = (pendingResult.rows || []).map(this.mapRowToCommand);
 
     // Mark commands as sent
     for (const cmd of pendingCommands) {
-      await db.execute(sql`
+      await db.execute<SqlRow>(sql`
         UPDATE edge_commands SET status = 'sent', sent_at = NOW()
         WHERE id = ${cmd.id}
       `);
@@ -234,10 +236,10 @@ export class EdgeOrchestrationService {
     if (!db) throw new Error('Database not available');
 
     // Get gateway ID
-    const gatewayResult = await db.execute(sql`
+    const gatewayResult = await db.execute<SqlRow>(sql`
       SELECT id FROM edge_gateways WHERE gateway_id = ${gatewayId}
     `);
-    const gateway = (gatewayResult as any)[0]?.[0];
+    const gateway = gatewayResult.rows[0];
     if (!gateway) throw new Error(`Gateway ${gatewayId} not found`);
 
     const commandId = this.generateCommandId();
@@ -245,17 +247,17 @@ export class EdgeOrchestrationService {
     const validUntil = new Date(Date.now() + (command.validForSeconds || 300) * 1000);
 
     // Check for duplicate idempotency key
-    const existingResult = await db.execute(sql`
+    const existingResult = await db.execute<SqlRow>(sql`
       SELECT id, status FROM edge_commands
       WHERE idempotency_key = ${idempotencyKey}
     `);
-    const existing = (existingResult as any)[0]?.[0];
+    const existing = existingResult.rows[0];
     if (existing) {
       console.log(`[EdgeOrchestration] Duplicate command with idempotency key ${idempotencyKey}`);
       return this.getCommand(existing.id) as Promise<EdgeCommand>;
     }
 
-    const result = await db.execute(sql`
+    const result = await db.execute<SqlRow>(sql`
       INSERT INTO edge_commands (
         gateway_id, command_id, idempotency_key,
         target_device_id, target_asset_id, command_type, command_payload,
@@ -266,10 +268,11 @@ export class EdgeOrchestrationService {
         ${command.commandType}, ${JSON.stringify(command.payload)},
         ${command.priority || 5}, ${validUntil}, 'queued', NOW(), NOW()
       )
+      RETURNING id
     `);
 
     // Update pending count
-    await db.execute(sql`
+    await db.execute<SqlRow>(sql`
       UPDATE edge_gateways SET
         pending_commands_count = pending_commands_count + 1,
         updated_at = NOW()
@@ -294,7 +297,7 @@ export class EdgeOrchestrationService {
     }
 
     return {
-      id: (result as any).insertId,
+      id: Number(result.rows[0].id),
       gatewayId: gateway.id,
       commandId,
       idempotencyKey,
@@ -353,7 +356,7 @@ export class EdgeOrchestrationService {
       updateFields.completedAt = new Date();
     }
 
-    await db.execute(sql`
+    await db.execute<SqlRow>(sql`
       UPDATE edge_commands SET
         status = ${acknowledgment.status},
         acknowledged_at = ${updateFields.acknowledgedAt || null},
@@ -366,12 +369,12 @@ export class EdgeOrchestrationService {
 
     // Update pending count if completed or failed
     if (acknowledgment.status === 'completed' || acknowledgment.status === 'failed') {
-      await db.execute(sql`
+      await db.execute<SqlRow>(sql`
         UPDATE edge_gateways eg
-        JOIN edge_commands ec ON ec.gateway_id = eg.id
-        SET eg.pending_commands_count = GREATEST(0, eg.pending_commands_count - 1),
-            eg.updated_at = NOW()
-        WHERE ec.command_id = ${commandId}
+        SET pending_commands_count = GREATEST(0, eg.pending_commands_count - 1),
+            updated_at = NOW()
+        FROM edge_commands ec
+        WHERE ec.gateway_id = eg.id AND ec.command_id = ${commandId}
       `);
     }
 
@@ -401,13 +404,13 @@ export class EdgeOrchestrationService {
     }
 
     // Check sequence number to detect gaps
-    const lastSeqResult = await db.execute(sql`
-      SELECT MAX(JSON_EXTRACT(metadata, '$.sequenceNumber')) as last_seq
+    const lastSeqResult = await db.execute<SqlRow>(sql`
+      SELECT MAX((t.metadata::jsonb ->> 'sequenceNumber')::numeric) as last_seq
       FROM telemetry t
-      JOIN devices d ON d.id = t.assetId
-      WHERE d.deviceId = ${telemetry.deviceId}
+      JOIN devices d ON d.id = t."assetId"
+      WHERE d."deviceId" = ${telemetry.deviceId}
     `);
-    const lastSeq = (lastSeqResult as any)[0]?.[0]?.last_seq || 0;
+    const lastSeq = lastSeqResult.rows[0]?.last_seq || 0;
 
     if (telemetry.sequenceNumber <= lastSeq) {
       return { accepted: false, reason: 'Duplicate or out-of-order telemetry' };
@@ -418,19 +421,19 @@ export class EdgeOrchestrationService {
     }
 
     // Get device and asset IDs
-    const deviceResult = await db.execute(sql`
-      SELECT id, assetId FROM devices WHERE deviceId = ${telemetry.deviceId}
+    const deviceResult = await db.execute<SqlRow>(sql`
+      SELECT id, "assetId" FROM devices WHERE "deviceId" = ${telemetry.deviceId}
     `);
-    const device = (deviceResult as any)[0]?.[0];
+    const device = deviceResult.rows[0];
     if (!device) {
       return { accepted: false, reason: 'Unknown device' };
     }
 
     // Store telemetry
-    await db.execute(sql`
+    await db.execute<SqlRow>(sql`
       INSERT INTO telemetry (
-        assetId, timestamp, power, energy, voltage, current, frequency,
-        stateOfCharge, temperature, metadata, createdAt
+        "assetId", timestamp, power, energy, voltage, current, frequency,
+        "stateOfCharge", temperature, metadata, "createdAt"
       ) VALUES (
         ${device.assetId}, ${telemetry.timestamp},
         ${telemetry.measurements.power || null},
@@ -455,34 +458,34 @@ export class EdgeOrchestrationService {
     const db = await getDb();
     if (!db) throw new Error('Database not available');
 
-    const gatewayResult = await db.execute(sql`
+    const gatewayResult = await db.execute<SqlRow>(sql`
       SELECT * FROM edge_gateways WHERE gateway_id = ${gatewayId}
     `);
-    const gateway = (gatewayResult as any)[0]?.[0];
+    const gateway = gatewayResult.rows[0];
     if (!gateway) throw new Error(`Gateway ${gatewayId} not found`);
 
     // Get command statistics
-    const statsResult = await db.execute(sql`
+    const statsResult = await db.execute<SqlRow>(sql`
       SELECT
-        COUNT(CASE WHEN status = 'failed' AND created_at > DATE_SUB(NOW(), INTERVAL 24 HOUR) THEN 1 END) as failed_24h,
-        AVG(TIMESTAMPDIFF(SECOND, sent_at, acknowledged_at)) as avg_response_time
+        COUNT(CASE WHEN status = 'failed' AND created_at > (NOW() - INTERVAL '24 hour') THEN 1 END) as failed_24h,
+        AVG(EXTRACT(EPOCH FROM (acknowledged_at - sent_at))) as avg_response_time
       FROM edge_commands
       WHERE gateway_id = ${gateway.id}
     `);
-    const stats = (statsResult as any)[0]?.[0] || {};
+    const stats = statsResult.rows[0] || {};
 
     // Get managed devices count
-    const devicesResult = await db.execute(sql`
+    const devicesResult = await db.execute<SqlRow>(sql`
       SELECT COUNT(*) as count FROM devices d
-      JOIN assets a ON a.id = d.assetId
-      WHERE a.userId IN (
+      JOIN assets a ON a.id = d."assetId"
+      WHERE a."userId" IN (
         SELECT user_id FROM community_members WHERE community_id = ${gateway.community_id}
-        UNION SELECT userId FROM assets WHERE id IN (
+        UNION SELECT "userId" FROM assets WHERE id IN (
           SELECT asset_id FROM der_capabilities WHERE protocols LIKE '%mqtt%'
         )
       )
     `);
-    const managedDevices = (devicesResult as any)[0]?.[0]?.count || 0;
+    const managedDevices = devicesResult.rows[0]?.count || 0;
 
     // Determine health status
     const issues: string[] = [];
@@ -553,8 +556,8 @@ export class EdgeOrchestrationService {
       query = sql`SELECT * FROM edge_gateways ORDER BY created_at DESC LIMIT 100`;
     }
 
-    const result = await db.execute(query);
-    return ((result as any)[0] || []).map(this.mapRowToGateway);
+    const result = await db.execute<SqlRow>(query);
+    return (result.rows || []).map(this.mapRowToGateway);
   }
 
   /**
@@ -571,8 +574,8 @@ export class EdgeOrchestrationService {
       query = sql`SELECT * FROM edge_commands WHERE command_id = ${commandId}`;
     }
 
-    const result = await db.execute(query);
-    const row = (result as any)[0]?.[0];
+    const result = await db.execute<SqlRow>(query);
+    const row = result.rows[0];
     return row ? this.mapRowToCommand(row) : null;
   }
 
@@ -583,14 +586,14 @@ export class EdgeOrchestrationService {
     const db = await getDb();
     if (!db) throw new Error('Database not available');
 
-    const result = await db.execute(sql`
+    const result = await db.execute<SqlRow>(sql`
       UPDATE edge_commands
       SET status = 'expired'
       WHERE status IN ('queued', 'sent')
         AND valid_until < NOW()
     `);
 
-    const expiredCount = (result as any).affectedRows || 0;
+    const expiredCount = result.rowCount || 0;
     if (expiredCount > 0) {
       console.log(`[EdgeOrchestration] Expired ${expiredCount} commands`);
     }

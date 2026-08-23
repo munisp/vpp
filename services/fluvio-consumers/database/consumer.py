@@ -1,5 +1,5 @@
 """
-Fluvio consumer for storing telemetry data in MySQL database
+Fluvio consumer for storing telemetry data in the PostgreSQL database
 """
 
 import json
@@ -9,7 +9,7 @@ import sys
 from datetime import datetime
 from typing import Optional
 
-import mysql.connector
+import psycopg2
 from dotenv import load_dotenv
 from fluvio import Fluvio, Offset
 from loguru import logger
@@ -25,10 +25,12 @@ class DatabaseConsumer:
         self.fluvio_topic = os.getenv("FLUVIO_TOPIC", "telemetry")
         self.db_config = {
             "host": os.getenv("DB_HOST", "localhost"),
-            "port": int(os.getenv("DB_PORT", "3306")),
-            "user": os.getenv("DB_USER", "root"),
+            "port": int(os.getenv("DB_PORT", "5432")),
+            "user": os.getenv("DB_USER", "postgres"),
             "password": os.getenv("DB_PASSWORD", ""),
-            "database": os.getenv("DB_NAME", "vpp"),
+            "dbname": os.getenv("DB_NAME", "vpp"),
+            "sslmode": os.getenv("DB_SSLMODE", "require"),
+            "options": "-c timezone=UTC",
         }
         
         self.fluvio = None
@@ -41,10 +43,10 @@ class DatabaseConsumer:
         signal.signal(signal.SIGTERM, self.shutdown)
     
     def connect_database(self):
-        """Connect to MySQL database"""
+        """Connect to the PostgreSQL database"""
         logger.info(f"Connecting to database at {self.db_config['host']}:{self.db_config['port']}")
         
-        self.db_conn = mysql.connector.connect(**self.db_config)
+        self.db_conn = psycopg2.connect(**self.db_config)
         self.db_conn.autocommit = False
         
         logger.info("Database connected")
@@ -65,8 +67,8 @@ class DatabaseConsumer:
             
             query = """
                 INSERT INTO telemetry (
-                    assetId, timestamp, power, energy, voltage, current,
-                    frequency, powerFactor, stateOfCharge, createdAt
+                    "assetId", timestamp, power, energy, voltage, current,
+                    frequency, "stateOfCharge", metadata, "createdAt"
                 ) VALUES (
                     %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW()
                 )
@@ -80,8 +82,11 @@ class DatabaseConsumer:
                 telemetry.voltage,
                 telemetry.current,
                 telemetry.frequency,
-                telemetry.power_factor,
                 telemetry.battery_level,
+                json.dumps({
+                    "deviceId": telemetry.device_id,
+                    "powerFactor": telemetry.power_factor,
+                }),
             )
             
             cursor.execute(query, values)

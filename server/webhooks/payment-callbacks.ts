@@ -241,7 +241,7 @@ async function updatePaymentFromCallback(
       eq(payments.status, 'pending') // Optimistic lock - only update if still pending
     ));
 
-  if (Number(result[0].affectedRows) === 0) {
+  if ((result.rowCount ?? 0) === 0) {
     console.log(`[PaymentCallback] Payment ${pmt.id} was settled concurrently, skipping post-payment actions`);
     return false;
   }

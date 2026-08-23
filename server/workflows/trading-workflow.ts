@@ -214,9 +214,9 @@ export async function automatedTradingWorkflow(
         assetId: input.assetId,
         createdAt: new Date().toISOString(),
       }),
-    });
+    }).returning({ id: trades.id });
 
-    const tradeId = Number(tradeResult[0]?.insertId);
+    const tradeId = Number(tradeResult[0].id);
     if (!tradeId) {
       throw new Error('Failed to create trade record');
     }
@@ -329,9 +329,9 @@ export async function p2pTradingWorkflow(
         duration: input.duration,
         escrowStatus: 'locked',
       }),
-    });
+    }).returning({ id: trades.id });
     
-    tradeId = Number(sellerTradeResult[0].insertId);
+    tradeId = Number(sellerTradeResult[0].id);
     
     // Create buyer's trade record
     const buyerTradeResult = await db.insert(trades).values({
@@ -350,8 +350,8 @@ export async function p2pTradingWorkflow(
         linkedTradeId: tradeId,
         escrowStatus: 'locked',
       }),
-    });
-    const buyerTradeId = Number(buyerTradeResult[0]?.insertId);
+    }).returning({ id: trades.id });
+    const buyerTradeId = Number(buyerTradeResult[0].id);
 
     // Step 3: Lock buyer's funds (create pending payment)
     console.log(`[P2PTradingWorkflow] Locking ${totalAmount} cents for buyer ${input.buyerId}`);

@@ -16,7 +16,7 @@ This document describes the VPP platform's IoT data ingestion and processing pip
 ### 2. MQTT Service (`server/_core/mqtt.ts`)
 - Subscribes to MQTT topics
 - Validates incoming telemetry data
-- Stores data in MySQL/TiDB database
+- Stores data in a PostgreSQL database
 - Broadcasts real-time updates via WebSocket
 
 ### 3. WebSocket Service (`server/_core/websocket.ts`)
@@ -205,17 +205,17 @@ kafka-topics --create --topic vpp-telemetry --bootstrap-server localhost:9092
 ### Current System (MQTT + Database)
 - **Throughput**: ~10,000 messages/second
 - **Latency**: 50-100ms
-- **Storage**: MySQL/TiDB
+- **Storage**: PostgreSQL
 
 ### With Fluvio
 - **Throughput**: 1,000,000+ messages/second
 - **Latency**: <10ms
-- **Storage**: Fluvio (persistent) + MySQL (aggregated)
+- **Storage**: Fluvio (persistent) + PostgreSQL (aggregated)
 
 ### With Kafka
 - **Throughput**: 100,000+ messages/second
 - **Latency**: 10-50ms
-- **Storage**: Kafka (persistent) + MySQL (aggregated)
+- **Storage**: Kafka (persistent) + PostgreSQL (aggregated)
 
 ## Recommendations
 

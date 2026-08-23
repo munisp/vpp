@@ -152,6 +152,7 @@ describe('grid command client', () => {
         { startPeriodSeconds: 0, limitWatts: 11000 },
         { startPeriodSeconds: 900, limitWatts: -7000 },
       ],
+      validTo: new Date(Date.now() + 1_800_000),
     });
     expect(result.status).toBe('Accepted');
     expect(fetchMock).toHaveBeenCalledOnce();
@@ -171,6 +172,7 @@ describe('grid command client', () => {
         purpose: 'TxProfile',
         stackLevel: 1,
         periods: [{ startPeriodSeconds: 0, limitWatts: 11000 }],
+        validTo: new Date(Date.now() + 1_800_000),
       })
     ).rejects.toBeInstanceOf(GridCommandError);
   });
@@ -198,6 +200,7 @@ describe('grid command client', () => {
         purpose: 'TxProfile',
         stackLevel: 1,
         periods: [],
+        validTo: new Date(Date.now() + 1_800_000),
       })
     ).rejects.toThrow(/at least one schedule period/);
   });

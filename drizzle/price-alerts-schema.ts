@@ -1,11 +1,19 @@
-import { int, mysqlTable, text, timestamp, boolean, varchar } from "drizzle-orm/mysql-core";
+import {
+  boolean,
+  integer as int,
+  pgTable,
+  serial,
+  text,
+  timestamp,
+  varchar,
+} from "drizzle-orm/pg-core";
 
 /**
  * Price Alerts - User-configured alerts for market price thresholds
  * Triggers notifications when market prices reach specified levels
  */
-export const priceAlerts = mysqlTable("price_alerts", {
-  id: int("id").autoincrement().primaryKey(),
+export const priceAlerts = pgTable("price_alerts", {
+  id: serial("id").primaryKey(),
   userId: int("userId").notNull(),
   
   // Alert configuration
@@ -35,7 +43,7 @@ export const priceAlerts = mysqlTable("price_alerts", {
   maxTriggers: int("maxTriggers"), // null = unlimited
   
   createdAt: timestamp("createdAt").defaultNow().notNull(),
-  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().$onUpdate(() => new Date()).notNull(),
 });
 
 export type PriceAlert = typeof priceAlerts.$inferSelect;

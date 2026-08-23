@@ -5,7 +5,7 @@ import { mlopsPipeline } from '../../services/mlops-pipeline';
 export const mlopsRouter = router({
     listModels: protectedProcedure
       .input(z.object({
-        status: z.enum(['training', 'validating', 'staged', 'deployed', 'deprecated', 'failed']).optional(),
+        status: z.enum(['training', 'validating', 'staging', 'production', 'deprecated', 'failed']).optional(),
       }).optional())
       .query(async ({ input }) => {
         return mlopsPipeline.listModels(input?.status);

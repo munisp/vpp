@@ -354,6 +354,11 @@ class CoordinationRequest(BaseModel):
     shared_import_limit_w: list[float]
     # Aggregate net export cap per interval across all sites (watts).
     shared_export_limit_w: list[float] | None = None
+    # Aggregate net import the grid wants the fleet to follow, per interval.
+    # A cap can only push consumption down; a target is two-sided, so the
+    # multiplier may go negative and pay sites to absorb energy in intervals
+    # where the fleet is under target. The cap still binds.
+    shared_import_target_w: list[float] | None = None
     max_iterations: int = Field(default=50, ge=1, le=500)
     # Convergence tolerance on shared-limit violation, in watts.
     tolerance_w: float = Field(default=100.0, gt=0)
@@ -372,6 +377,15 @@ class CoordinationRequest(BaseModel):
             raise ValueError("shared_import_limit_w length must equal the horizon")
         if self.shared_export_limit_w is not None and len(self.shared_export_limit_w) != horizon:
             raise ValueError("shared_export_limit_w length must equal the horizon")
+        if self.shared_import_target_w is not None:
+            if len(self.shared_import_target_w) != horizon:
+                raise ValueError("shared_import_target_w length must equal the horizon")
+            for t, target in enumerate(self.shared_import_target_w):
+                if target > self.shared_import_limit_w[t]:
+                    raise ValueError(
+                        "shared_import_target_w may not exceed shared_import_limit_w at "
+                        f"interval {t}: the fleet cannot be asked to breach its own cap"
+                    )
         ids = [s.request.site.site_id for s in self.sites]
         if len(set(ids)) != len(ids):
             raise ValueError("site_id values must be unique")
@@ -386,5 +400,11 @@ class CoordinationResponse(BaseModel):
     max_violation_w: float
     converged: bool
     shadow_prices_cents_per_kwh: list[float]
+    # Aggregate net import (import minus export) of the returned plan, per
+    # interval: what the fleet said it would do in answer to the price.
+    aggregate_net_w: list[float] = Field(default_factory=list)
+    # Signed distance from shared_import_target_w per interval, None when the
+    # request carried only a cap so zeros cannot be read as "on target".
+    target_deviation_w: list[float] | None = None
     sites: list[DispatchResponse]
     diagnostics: dict[str, str | float | int | bool] = Field(default_factory=dict)

@@ -10,11 +10,21 @@ import { MpesaGateway } from './mpesa';
 import { AirtelMoneyGateway } from './airtel';
 import { TigoPesaGateway } from './tigo';
 import * as credDb from '../payment-credentials-db';
+import { observing, type Observation } from '../services/degraded-operation';
 
 // Register all payment gateways
 PaymentGatewayFactory.register('mpesa', MpesaGateway);
 PaymentGatewayFactory.register('airtel_money', AirtelMoneyGateway);
 PaymentGatewayFactory.register('tigo_pesa', TigoPesaGateway);
+
+/**
+ * These gateways report a refusal in the response rather than by throwing, so a
+ * returned `success: false` is a reachable-but-not-working provider — recorded as
+ * one faulted call, which is what lets a run of refusals open an outage.
+ */
+function observeResponse(response: { success: boolean }): Observation {
+  return response.success ? 'reachable' : 'faulted';
+}
 
 /**
  * Payment Gateway Manager
@@ -77,7 +87,18 @@ export class PaymentGatewayManager {
     });
 
     try {
-      const response = await gateway.initiatePayment(request);
+      // Observed here rather than inside each gateway: this is the one place every
+      // provider's outbound call passes through, so posture reflects real money
+      // traffic instead of a prober the provider answers while payments fail.
+      const response = await observing(
+        {
+          dependency: 'payment_gateway',
+          observedBy: 'server',
+          operation: `${gatewayId} initiate payment`,
+          resultObservation: observeResponse,
+        },
+        () => gateway.initiatePayment(request)
+      );
 
       // Log the response
       await credDb.logPaymentGatewayRequest({
@@ -117,7 +138,15 @@ export class PaymentGatewayManager {
     const gateway = await this.getGateway(gatewayId, environment);
     
     try {
-      const response = await gateway.queryPaymentStatus(transactionId);
+      const response = await observing(
+        {
+          dependency: 'payment_gateway',
+          observedBy: 'server',
+          operation: `${gatewayId} query status`,
+          resultObservation: observeResponse,
+        },
+        () => gateway.queryPaymentStatus(transactionId)
+      );
 
       // Log the query
       await credDb.logPaymentGatewayRequest({

@@ -103,11 +103,11 @@ export const tradingStrategiesRouter = router({
           totalProfit: 0,
           averagePrice: 0,
         },
-      });
+      }).returning({ id: tradingStrategies.id });
 
       return {
         success: true,
-        strategyId: Number(result.insertId),
+        strategyId: result.id,
         message: 'Strategy created successfully',
       };
     }),

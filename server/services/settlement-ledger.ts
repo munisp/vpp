@@ -7,8 +7,10 @@
 
 import { createHash } from 'crypto';
 import { getDb } from '../db';
-import { eq, desc, and, gte, lte, sql } from 'drizzle-orm';
+import { eq, desc, and, gte, lte, sql, type SQL } from 'drizzle-orm';
 import { kafkaPublisher } from '../integration/kafka-publisher';
+import { requireCapability } from './degraded-operation';
+import type { SqlRow } from '../sql-row';
 
 // Import schema (will be available after schema update)
 interface SettlementEvent {
@@ -82,6 +84,99 @@ const GENESIS_HASH = '0000000000000000000000000000000000000000000000000000000000
 /** Retries allowed when concurrent writers race for the same chain slot. */
 const CHAIN_APPEND_MAX_ATTEMPTS = 5;
 
+/**
+ * Version tag of the hash pre-image. It is part of the hash, so a future change
+ * to the covered field set is detectable instead of silently invalidating rows.
+ */
+const CHAIN_HASH_VERSION = 'v2';
+
+/**
+ * Fields covered by the event hash. Every settled monetary and metering value is
+ * included: a hash over the descriptive columns alone would let an UPDATE change
+ * `net_amount` while the chain still verified.
+ */
+interface ChainHashFields {
+  previousHash: string;
+  eventType: string;
+  userId: number;
+  counterpartyId: number | null;
+  sourceType: string;
+  sourceId: number;
+  energyWh: number | null;
+  powerKw: number | null;
+  durationMinutes: number | null;
+  ratePerUnit: number | null;
+  grossAmount: number | null;
+  fees: number | null;
+  netAmount: number | null;
+  currency: string;
+  measurementMethod: string | null;
+  baselineMethod: string | null;
+  eventData: string;
+}
+
+function nullableField(value: number | string | null | undefined): string {
+  return value === null || value === undefined ? '' : String(value);
+}
+
+/**
+ * `power_kw` is a whole-kilowatt column, so a fractional kW figure is rounded to
+ * fit it rather than failing the insert. Precision is not lost from the record:
+ * the energy figure is in watt-hours and callers keep the exact watts in
+ * `event_data`. The rounded value is what gets hashed, so the chain covers the
+ * number the row actually holds.
+ */
+function wholeKilowatts(value: number | null | undefined): number | null {
+  if (value === null || value === undefined) return null;
+  if (!Number.isFinite(value)) {
+    throw new Error(`Settlement power must be a finite number, received ${value}`);
+  }
+  return Math.round(value);
+}
+
+/**
+ * Money and metering columns are whole minor units and whole watt-hours. A
+ * fractional value here means the caller has a unit bug, and rounding it away
+ * would settle an amount nobody computed, so it is refused.
+ */
+function wholeUnits(value: number | null | undefined, field: string): number | null {
+  if (value === null || value === undefined) return null;
+  if (!Number.isInteger(value)) {
+    throw new Error(`Settlement ${field} must be whole units, received ${value}`);
+  }
+  return value;
+}
+
+/** Raw-SQL numeric columns arrive as `number | string | null` depending on type. */
+function numberOrNull(value: unknown): number | null {
+  return value === null || value === undefined ? null : Number(value);
+}
+
+function chainHash(fields: ChainHashFields): string {
+  const preImage = [
+    CHAIN_HASH_VERSION,
+    fields.previousHash,
+    fields.eventType,
+    String(fields.userId),
+    nullableField(fields.counterpartyId),
+    fields.sourceType,
+    String(fields.sourceId),
+    nullableField(fields.energyWh),
+    nullableField(fields.powerKw),
+    nullableField(fields.durationMinutes),
+    nullableField(fields.ratePerUnit),
+    nullableField(fields.grossAmount),
+    nullableField(fields.fees),
+    nullableField(fields.netAmount),
+    fields.currency,
+    nullableField(fields.measurementMethod),
+    nullableField(fields.baselineMethod),
+    fields.eventData,
+  ].join('|');
+
+  return createHash('sha256').update(preImage).digest('hex');
+}
+
 export class SettlementLedgerService {
   
   /**
@@ -98,10 +193,10 @@ export class SettlementLedgerService {
       try {
         return await this.appendEvent(input);
       } catch (error: any) {
+        // PostgreSQL reports unique violations as SQLSTATE 23505.
         const isChainConflict =
-          error?.code === 'ER_DUP_ENTRY' ||
-          error?.errno === 1062 ||
-          /duplicate entry/i.test(String(error?.message ?? ''));
+          error?.code === '23505' ||
+          /duplicate key value violates unique constraint/i.test(String(error?.message ?? ''));
 
         if (!isChainConflict) throw error;
 
@@ -124,14 +219,14 @@ export class SettlementLedgerService {
     if (!db) throw new Error('Database not available');
 
     // Get the previous event to chain from
-    const previousEvents = await db.execute(sql`
+    const previousEvents = await db.execute<SqlRow>(sql`
       SELECT event_hash, sequence_number 
       FROM settlement_events 
       ORDER BY sequence_number DESC 
       LIMIT 1
     `);
     
-    const previousEvent = (previousEvents as any)[0]?.[0];
+    const previousEvent = previousEvents.rows[0];
     const previousHash = previousEvent?.event_hash || GENESIS_HASH;
     const sequenceNumber = Number(previousEvent?.sequence_number || 0) + 1;
 
@@ -142,12 +237,36 @@ export class SettlementLedgerService {
       sequenceNumber,
     });
 
-    // Calculate hash: SHA-256(previousHash + eventType + userId + sourceType + sourceId + eventData)
-    const hashInput = `${previousHash}|${input.eventType}|${input.userId}|${input.sourceType}|${input.sourceId}|${eventData}`;
-    const eventHash = createHash('sha256').update(hashInput).digest('hex');
+    const energyWh = wholeUnits(input.energyWh, 'energyWh');
+    const powerKw = wholeKilowatts(input.powerKw);
+    const durationMinutes = wholeUnits(input.durationMinutes, 'durationMinutes');
+    const ratePerUnit = wholeUnits(input.ratePerUnit, 'ratePerUnit');
+    const grossAmount = wholeUnits(input.grossAmount, 'grossAmount');
+    const fees = wholeUnits(input.fees, 'fees');
+    const netAmount = wholeUnits(input.netAmount, 'netAmount');
+
+    const eventHash = chainHash({
+      previousHash,
+      eventType: input.eventType,
+      userId: input.userId,
+      counterpartyId: input.counterpartyId ?? null,
+      sourceType: input.sourceType,
+      sourceId: input.sourceId,
+      energyWh,
+      powerKw,
+      durationMinutes,
+      ratePerUnit,
+      grossAmount,
+      fees,
+      netAmount,
+      currency: input.currency,
+      measurementMethod: input.measurementMethod ?? null,
+      baselineMethod: input.baselineMethod ?? null,
+      eventData,
+    });
 
     // Insert the event
-    const result = await db.execute(sql`
+    const result = await db.execute<SqlRow>(sql`
       INSERT INTO settlement_events (
         event_hash, previous_hash, sequence_number, event_type,
         user_id, counterparty_id, source_type, source_id,
@@ -157,12 +276,13 @@ export class SettlementLedgerService {
         event_data, created_at
       ) VALUES (
         ${eventHash}, ${previousHash}, ${sequenceNumber}, ${input.eventType},
-        ${input.userId}, ${input.counterpartyId || null}, ${input.sourceType}, ${input.sourceId},
-        ${input.energyWh || null}, ${input.powerKw || null}, ${input.durationMinutes || null}, ${input.ratePerUnit || null},
-        ${input.grossAmount || null}, ${input.fees || null}, ${input.netAmount || null}, ${input.currency},
-        ${input.measurementMethod || null}, ${input.baselineMethod || null}, 'pending',
+        ${input.userId}, ${input.counterpartyId ?? null}, ${input.sourceType}, ${input.sourceId},
+        ${energyWh}, ${powerKw}, ${durationMinutes}, ${ratePerUnit},
+        ${grossAmount}, ${fees}, ${netAmount}, ${input.currency},
+        ${input.measurementMethod ?? null}, ${input.baselineMethod ?? null}, 'pending',
         ${eventData}, NOW()
       )
+      RETURNING id
     `);
 
     console.log(`[SettlementLedger] Created event ${eventHash.substring(0, 16)}... seq=${sequenceNumber} type=${input.eventType}`);
@@ -185,7 +305,7 @@ export class SettlementLedgerService {
     }
 
     return {
-      id: (result as any).insertId,
+      id: Number(result.rows[0].id),
       eventHash,
       previousHash,
       sequenceNumber,
@@ -194,13 +314,13 @@ export class SettlementLedgerService {
       counterpartyId: input.counterpartyId || null,
       sourceType: input.sourceType,
       sourceId: input.sourceId,
-      energyWh: input.energyWh || null,
-      powerKw: input.powerKw || null,
-      durationMinutes: input.durationMinutes || null,
-      ratePerUnit: input.ratePerUnit || null,
-      grossAmount: input.grossAmount || null,
-      fees: input.fees || null,
-      netAmount: input.netAmount || null,
+      energyWh,
+      powerKw,
+      durationMinutes,
+      ratePerUnit,
+      grossAmount,
+      fees,
+      netAmount,
       currency: input.currency,
       measurementMethod: input.measurementMethod || null,
       baselineMethod: input.baselineMethod || null,
@@ -223,31 +343,32 @@ export class SettlementLedgerService {
     const db = await getDb();
     if (!db) throw new Error('Database not available');
 
-    let query = sql`
-      SELECT id, event_hash, previous_hash, sequence_number, event_type,
-             user_id, source_type, source_id, event_data
-      FROM settlement_events
+    const columns = sql`
+      id, event_hash, previous_hash, sequence_number, event_type,
+      user_id, counterparty_id, source_type, source_id,
+      energy_wh, power_kw, duration_minutes, rate_per_unit,
+      gross_amount, fees, net_amount, currency,
+      measurement_method, baseline_method, event_data
     `;
 
+    let query: SQL;
     if (fromSequence !== undefined && toSequence !== undefined) {
       query = sql`
-        SELECT id, event_hash, previous_hash, sequence_number, event_type,
-               user_id, source_type, source_id, event_data
+        SELECT ${columns}
         FROM settlement_events
         WHERE sequence_number >= ${fromSequence} AND sequence_number <= ${toSequence}
         ORDER BY sequence_number ASC
       `;
     } else {
       query = sql`
-        SELECT id, event_hash, previous_hash, sequence_number, event_type,
-               user_id, source_type, source_id, event_data
+        SELECT ${columns}
         FROM settlement_events
         ORDER BY sequence_number ASC
       `;
     }
 
-    const events = await db.execute(query);
-    const eventList = (events as any)[0] || [];
+    const events = await db.execute<SqlRow>(query);
+    const eventList = events.rows || [];
     
     const errors: Array<{ sequenceNumber: number; error: string }> = [];
     let previousHash = GENESIS_HASH;
@@ -261,9 +382,27 @@ export class SettlementLedgerService {
         });
       }
 
-      // Recalculate and verify event hash
-      const hashInput = `${event.previous_hash}|${event.event_type}|${event.user_id}|${event.source_type}|${event.source_id}|${event.event_data}`;
-      const calculatedHash = createHash('sha256').update(hashInput).digest('hex');
+      // Recalculate and verify event hash over every covered column, so an
+      // UPDATE to a settled amount breaks verification.
+      const calculatedHash = chainHash({
+        previousHash: event.previous_hash,
+        eventType: event.event_type,
+        userId: Number(event.user_id),
+        counterpartyId: numberOrNull(event.counterparty_id),
+        sourceType: event.source_type,
+        sourceId: Number(event.source_id),
+        energyWh: numberOrNull(event.energy_wh),
+        powerKw: numberOrNull(event.power_kw),
+        durationMinutes: numberOrNull(event.duration_minutes),
+        ratePerUnit: numberOrNull(event.rate_per_unit),
+        grossAmount: numberOrNull(event.gross_amount),
+        fees: numberOrNull(event.fees),
+        netAmount: numberOrNull(event.net_amount),
+        currency: event.currency,
+        measurementMethod: event.measurement_method ?? null,
+        baselineMethod: event.baseline_method ?? null,
+        eventData: event.event_data,
+      });
 
       if (calculatedHash !== event.event_hash) {
         errors.push({
@@ -320,8 +459,8 @@ export class SettlementLedgerService {
 
     query = sql`${query} ORDER BY sequence_number DESC LIMIT ${limit} OFFSET ${offset}`;
 
-    const result = await db.execute(query);
-    return ((result as any)[0] || []).map(this.mapRowToEvent);
+    const result = await db.execute<SqlRow>(query);
+    return (result.rows || []).map(this.mapRowToEvent);
   }
 
   /**
@@ -336,7 +475,7 @@ export class SettlementLedgerService {
     if (!db) throw new Error('Database not available');
 
     // Get all events in the period
-    const eventsResult = await db.execute(sql`
+    const eventsResult = await db.execute<SqlRow>(sql`
       SELECT * FROM settlement_events
       WHERE user_id = ${userId}
         AND created_at >= ${periodStart}
@@ -344,7 +483,7 @@ export class SettlementLedgerService {
       ORDER BY sequence_number ASC
     `);
 
-    const events = (eventsResult as any)[0] || [];
+    const events = eventsResult.rows || [];
 
     // Calculate aggregates
     let totalEnergyExportedWh = 0;
@@ -462,7 +601,11 @@ export class SettlementLedgerService {
   }
 
   /**
-   * Record a dispatch completion event
+   * Record a dispatch completion event.
+   *
+   * @throws DegradedOperationError when the meter path is down or unobserved:
+   * the compensation below is owed for measured energy, so an unmeasurable
+   * period must not produce a ledger event that looks measured.
    */
   async recordDispatchCompletion(
     userId: number,
@@ -474,6 +617,7 @@ export class SettlementLedgerService {
     compensation: number,
     currency: 'NGN' | 'TZS' | 'USD'
   ): Promise<SettlementEvent> {
+    await requireCapability('metered_settlement');
     const energyWh = Math.round((actualPowerWatts * durationMinutes) / 60);
     const platformFee = Math.round(compensation * 0.30); // 30% platform fee
 
@@ -485,10 +629,10 @@ export class SettlementLedgerService {
     try {
       const db = await getDb();
       if (db) {
-        const setpointResult = await db.execute(sql`
+        const setpointResult = await db.execute<SqlRow>(sql`
           SELECT target_power_watts FROM dispatch_setpoints WHERE id = ${dispatchId} LIMIT 1
         `);
-        const setpoint = (setpointResult as any)[0]?.[0];
+        const setpoint = setpointResult.rows[0];
         if (setpoint && setpoint.target_power_watts !== null && setpoint.target_power_watts !== undefined) {
           const target = Number(setpoint.target_power_watts);
           targetPowerWatts = target;
@@ -525,7 +669,8 @@ export class SettlementLedgerService {
   }
 
   /**
-   * Record a DR event completion
+   * Record a DR event completion. Refuses for the same reason as a dispatch
+   * completion: the reduction being paid for is measured against telemetry.
    */
   async recordDRCompletion(
     userId: number,
@@ -537,6 +682,7 @@ export class SettlementLedgerService {
     compensationRate: number,
     currency: 'NGN' | 'TZS' | 'USD'
   ): Promise<SettlementEvent> {
+    await requireCapability('metered_settlement');
     const energyWh = Math.round((actualReductionKw * 1000 * durationMinutes) / 60);
     const grossAmount = Math.round((energyWh / 1000) * compensationRate);
     const platformFee = Math.round(grossAmount * 0.30);

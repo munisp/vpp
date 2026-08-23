@@ -55,8 +55,8 @@ export async function createPriceAlert(data: InsertPriceAlert) {
   const db = await getDb();
   if (!db) throw new Error("Database not available");
   
-  const result = await db.insert(priceAlerts).values(data);
-  return result[0].insertId;
+  const result = await db.insert(priceAlerts).values(data).returning({ id: priceAlerts.id });
+  return result[0].id;
 }
 
 /**

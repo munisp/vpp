@@ -256,7 +256,7 @@ async function getHistoricalPerformance(): Promise<number> {
       )`,
     })
     .from(drResponses)
-    .where(gte(drResponses.responseTime, sql`DATE_SUB(NOW(), INTERVAL 30 DAY)`));
+    .where(gte(drResponses.responseTime, sql`(NOW() - INTERVAL '30 day')`));
 
   return Math.round(result[0]?.avgPerformance || 80);
 }

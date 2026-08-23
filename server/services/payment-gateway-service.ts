@@ -11,8 +11,18 @@ import { tigoPesaService } from './tigo-pesa-service';
 import { getDb } from '../db';
 import { payments, paymentCredentials } from '../../drizzle/schema';
 import { eq } from 'drizzle-orm';
+import { observing, requireCapability } from './degraded-operation';
 
 export type PaymentGateway = 'mpesa' | 'airtel_money' | 'tigo_pesa';
+
+/** The fields of a Daraja reversal response this service reads. */
+interface MpesaReversalResponse {
+  ResponseCode?: string | number;
+  ResponseDescription?: string;
+  ConversationID?: string;
+  OriginatorConversationID?: string;
+  errorMessage?: string;
+}
 
 export interface PaymentRequest {
   gateway: PaymentGateway;
@@ -58,9 +68,9 @@ class PaymentGatewayService {
           accountReference: request.accountReference,
           transactionDesc: request.transactionDesc,
         }),
-      });
+      }).returning({ id: payments.id });
 
-      const paymentId = paymentRecord[0]?.insertId;
+      const paymentId = paymentRecord[0]?.id;
       if (!paymentId) throw new Error('Failed to create payment record');
 
       // Route to appropriate gateway
@@ -378,6 +388,11 @@ class PaymentGatewayService {
         };
       }
 
+      // Money leaving the platform needs a gateway that is answering: while an
+      // outage is open, a reversal attempt would be recorded against a provider
+      // known to be unreachable.
+      await requireCapability('settlement_payout');
+
       // Process refund through the appropriate gateway. A refund only succeeds
       // when the gateway confirms it; otherwise the payment is flagged for
       // manual review and NEVER marked as refunded.
@@ -520,28 +535,40 @@ class PaymentGatewayService {
       );
       const accessToken = tokenResponse.data.access_token;
 
-      const response = await axios.post(
-        `${apiUrl}/mpesa/reversal/v1/request`,
+      const response = await observing(
         {
-          Initiator: initiator,
-          SecurityCredential: securityCredential,
-          CommandID: 'TransactionReversal',
-          TransactionID: mpesaReceiptNumber,
-          Amount: Math.round(payment.amount / 100), // cents -> currency units
-          ReceiverParty: credentials.shortcode,
-          RecieverIdentifierType: '11',
-          ResultURL: callbackUrl,
-          QueueTimeOutURL: callbackUrl,
-          Remarks: reason,
-          Occasion: `Refund for payment ${payment.id}`,
+          dependency: 'payment_gateway',
+          observedBy: 'server',
+          operation: 'mpesa transaction reversal',
+          resultObservation: reversal =>
+            reversal.data.ResponseCode === '0' || reversal.data.ResponseCode === 0
+              ? 'reachable'
+              : 'faulted',
         },
-        {
-          headers: {
-            Authorization: `Bearer ${accessToken}`,
-            'Content-Type': 'application/json',
-          },
-          timeout: 30000,
-        }
+        () =>
+          axios.post<MpesaReversalResponse>(
+            `${apiUrl}/mpesa/reversal/v1/request`,
+            {
+              Initiator: initiator,
+              SecurityCredential: securityCredential,
+              CommandID: 'TransactionReversal',
+              TransactionID: mpesaReceiptNumber,
+              Amount: Math.round(payment.amount / 100), // cents -> currency units
+              ReceiverParty: credentials.shortcode,
+              RecieverIdentifierType: '11',
+              ResultURL: callbackUrl,
+              QueueTimeOutURL: callbackUrl,
+              Remarks: reason,
+              Occasion: `Refund for payment ${payment.id}`,
+            },
+            {
+              headers: {
+                Authorization: `Bearer ${accessToken}`,
+                'Content-Type': 'application/json',
+              },
+              timeout: 30000,
+            }
+          )
       );
 
       const data = response.data;

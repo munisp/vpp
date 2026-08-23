@@ -10,7 +10,11 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 vi.mock('../db', () => ({
   getDb: vi.fn(() => Promise.resolve({
     insert: vi.fn(() => ({
-      values: vi.fn(() => Promise.resolve([{ insertId: 1 }])),
+      // node-postgres has no insertId: the generated key comes back from
+      // `.returning()`.
+      values: vi.fn(() => ({
+        returning: vi.fn(() => Promise.resolve([{ id: 1 }])),
+      })),
     })),
     select: vi.fn(() => ({
       from: vi.fn(() => ({
@@ -35,6 +39,23 @@ vi.mock('../db', () => ({
     })),
   })),
 }));
+
+// The payout guard reads dependency posture from its own tables; these tests
+// exercise the refund logic, and the guard's refusals are covered by
+// server/degraded-operation.test.ts.
+vi.mock('./degraded-operation', async () => {
+  const actual =
+    await vi.importActual<typeof import('./degraded-operation')>('./degraded-operation');
+  return {
+    ...actual,
+    requireCapability: vi.fn(async () => ({
+      posture: 'available' as const,
+      missing: [],
+      evidenceLimit: null,
+    })),
+    observing: vi.fn(async (_input: unknown, call: () => Promise<unknown>) => call()),
+  };
+});
 
 // Mock payment services
 vi.mock('./mpesa-service', () => ({

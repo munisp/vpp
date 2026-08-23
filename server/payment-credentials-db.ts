@@ -55,9 +55,9 @@ export async function savePaymentCredentials(data: {
       createdBy: data.createdBy,
       isActive: "false",
       isValidated: "false",
-    });
+    }).returning({ id: paymentCredentials.id });
 
-    return result[0]?.insertId || 0;
+    return result[0].id || 0;
   }
 }
 
@@ -205,9 +205,9 @@ export async function logPaymentGatewayRequest(data: {
       : null,
     status: data.status,
     errorMessage: data.errorMessage || null,
-  });
+  }).returning({ id: paymentGatewayLogs.id });
 
-  return result[0]?.insertId || 0;
+  return result[0].id || 0;
 }
 
 export async function getPaymentGatewayLogs(filters: {

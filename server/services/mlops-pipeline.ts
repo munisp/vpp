@@ -10,6 +10,7 @@ import { sql } from 'drizzle-orm';
 import { createHash } from 'crypto';
 import { kafkaPublisher } from '../integration/kafka-publisher';
 import { redisCache } from './redis-cache';
+import type { SqlRow } from '../sql-row';
 
 // Types for MLOps
 export interface ModelVersion {
@@ -27,7 +28,7 @@ export interface ModelVersion {
   validationMetrics: Record<string, number>;
   artifactPath: string | null;
   artifactHash: string | null;
-  status: 'training' | 'validating' | 'staged' | 'deployed' | 'deprecated' | 'failed';
+  status: 'training' | 'validating' | 'staging' | 'production' | 'deprecated' | 'failed';
   deployedAt: Date | null;
   deprecatedAt: Date | null;
   createdAt: Date;
@@ -123,9 +124,9 @@ export class MLOpsPipelineService {
       ? createHash('sha256').update(`${model.artifactPath}-${Date.now()}`).digest('hex')
       : null;
 
-    const result = await db.execute(sql`
+    const result = await db.execute<SqlRow>(sql`
       INSERT INTO model_registry (
-        model_name, version, model_type, framework,
+        model_name, model_version, model_type, framework,
         input_schema, output_schema, hyperparameters,
         training_data_start, training_data_end, training_samples,
         validation_metrics, artifact_path, artifact_hash,
@@ -139,8 +140,9 @@ export class MLOpsPipelineService {
         ${model.trainingSamples || null},
         ${JSON.stringify(model.validationMetrics)},
         ${model.artifactPath || null}, ${artifactHash},
-        'staged', NOW(), NOW()
+        'staging', NOW(), NOW()
       )
+      RETURNING id
     `);
 
     console.log(`[MLOps] Registered model ${model.modelName} v${model.version}`);
@@ -149,7 +151,7 @@ export class MLOpsPipelineService {
     try {
       await kafkaPublisher.publishMLOpsTrainingRun({
         runId: `run-${Date.now()}`,
-        modelId: ((result as any).insertId).toString(),
+        modelId: (Number(result.rows[0].id)).toString(),
         modelName: model.modelName,
         modelVersion: model.version,
         metricsJson: JSON.stringify(model.validationMetrics),
@@ -159,7 +161,7 @@ export class MLOpsPipelineService {
       console.error('[MLOps] Error publishing to Kafka:', error);
     }
 
-    return this.getModel((result as any).insertId) as Promise<ModelVersion>;
+    return this.getModel(Number(result.rows[0].id)) as Promise<ModelVersion>;
   }
 
   /**
@@ -169,11 +171,11 @@ export class MLOpsPipelineService {
     const db = await getDb();
     if (!db) throw new Error('Database not available');
 
-    const result = await db.execute(sql`
+    const result = await db.execute<SqlRow>(sql`
       SELECT * FROM model_registry WHERE id = ${modelId}
     `);
 
-    const row = (result as any)[0]?.[0];
+    const row = result.rows[0];
     return row ? this.mapRowToModel(row) : null;
   }
 
@@ -184,14 +186,14 @@ export class MLOpsPipelineService {
     const db = await getDb();
     if (!db) throw new Error('Database not available');
 
-    const result = await db.execute(sql`
+    const result = await db.execute<SqlRow>(sql`
       SELECT * FROM model_registry
-      WHERE model_name = ${modelName} AND status = 'deployed'
+      WHERE model_name = ${modelName} AND status = 'production'
       ORDER BY deployed_at DESC
       LIMIT 1
     `);
 
-    const row = (result as any)[0]?.[0];
+    const row = result.rows[0];
     return row ? this.mapRowToModel(row) : null;
   }
 
@@ -206,18 +208,18 @@ export class MLOpsPipelineService {
     if (!model) throw new Error('Model not found');
 
     // Deprecate currently deployed version
-    await db.execute(sql`
+    await db.execute<SqlRow>(sql`
       UPDATE model_registry SET
         status = 'deprecated',
         deprecated_at = NOW(),
         updated_at = NOW()
-      WHERE model_name = ${model.modelName} AND status = 'deployed'
+      WHERE model_name = ${model.modelName} AND status = 'production'
     `);
 
     // Deploy new version
-    await db.execute(sql`
+    await db.execute<SqlRow>(sql`
       UPDATE model_registry SET
-        status = 'deployed',
+        status = 'production',
         deployed_at = NOW(),
         updated_at = NOW()
       WHERE id = ${modelId}
@@ -256,7 +258,7 @@ export class MLOpsPipelineService {
     const db = await getDb();
     if (!db) return;
 
-    await db.execute(sql`
+    await db.execute<SqlRow>(sql`
       INSERT INTO model_predictions (
         model_id, input_hash, predicted_value, actual_value,
         latency_ms, features, created_at
@@ -276,7 +278,7 @@ export class MLOpsPipelineService {
     const db = await getDb();
     if (!db) return;
 
-    await db.execute(sql`
+    await db.execute<SqlRow>(sql`
       UPDATE model_predictions SET actual_value = ${actualValue}
       WHERE input_hash = ${inputHash} AND actual_value IS NULL
     `);
@@ -382,7 +384,7 @@ export class MLOpsPipelineService {
     const db = await getDb();
     if (!db) throw new Error('Database not available');
 
-    const result = await db.execute(sql`
+    const result = await db.execute<SqlRow>(sql`
       INSERT INTO model_drift_events (
         model_id, drift_type, severity, detected_at,
         metric_name, baseline_value, current_value, threshold,
@@ -395,10 +397,11 @@ export class MLOpsPipelineService {
         ${JSON.stringify(event.affectedFeatures)}, ${event.recommendedAction},
         NOW()
       )
+      RETURNING id
     `);
 
     return {
-      id: (result as any).insertId,
+      id: Number(result.rows[0].id),
       modelId,
       detectedAt: new Date(),
       actionTaken: null,
@@ -418,10 +421,10 @@ export class MLOpsPipelineService {
     const db = await getDb();
     if (!db) return {};
 
-    const result = await db.execute(sql`
+    const result = await db.execute<SqlRow>(sql`
       SELECT
         AVG(ABS(predicted_value - actual_value)) as mae,
-        SQRT(AVG(POW(predicted_value - actual_value, 2))) as rmse,
+        SQRT(AVG(POWER(predicted_value - actual_value, 2))) as rmse,
         AVG(ABS(predicted_value - actual_value) / NULLIF(actual_value, 0)) * 100 as mape,
         COUNT(*) as count
       FROM model_predictions
@@ -431,7 +434,7 @@ export class MLOpsPipelineService {
         AND actual_value IS NOT NULL
     `);
 
-    const row = (result as any)[0]?.[0];
+    const row = result.rows[0];
     return {
       mae: row?.mae || 0,
       rmse: row?.rmse || 0,
@@ -451,7 +454,7 @@ export class MLOpsPipelineService {
     const db = await getDb();
     if (!db) return { mean: 0, std: 0, min: 0, max: 0 };
 
-    const result = await db.execute(sql`
+    const result = await db.execute<SqlRow>(sql`
       SELECT
         AVG(predicted_value) as mean,
         STDDEV(predicted_value) as std,
@@ -463,7 +466,7 @@ export class MLOpsPipelineService {
         AND created_at <= ${windowEnd}
     `);
 
-    const row = (result as any)[0]?.[0];
+    const row = result.rows[0];
     return {
       mean: row?.mean || 0,
       std: row?.std || 0,
@@ -514,7 +517,7 @@ export class MLOpsPipelineService {
     const db = await getDb();
     if (!db) return [];
 
-    const result = await db.execute(sql`
+    const result = await db.execute<SqlRow>(sql`
       SELECT features FROM model_predictions
       WHERE model_id = ${modelId}
         AND created_at >= ${windowStart}
@@ -523,7 +526,7 @@ export class MLOpsPipelineService {
       LIMIT 1000
     `);
 
-    return (result as any)[0] || [];
+    return result.rows || [];
   }
 
   /**
@@ -626,7 +629,7 @@ export class MLOpsPipelineService {
 
     const jobId = `retrain_${Date.now().toString(36)}_${Math.random().toString(36).substring(2, 6)}`;
 
-    const result = await db.execute(sql`
+    const result = await db.execute<SqlRow>(sql`
       INSERT INTO retraining_jobs (
         model_id, job_id, trigger_type, triggered_by,
         status, training_config, created_at
@@ -635,12 +638,13 @@ export class MLOpsPipelineService {
         ${options.triggeredBy || null}, 'queued',
         ${JSON.stringify(options.trainingConfig || {})}, NOW()
       )
+      RETURNING id
     `);
 
     console.log(`[MLOps] Triggered retraining job ${jobId} for model ${model.modelName}`);
 
     return {
-      id: (result as any).insertId,
+      id: Number(result.rows[0].id),
       modelId,
       jobId,
       triggerType: options.triggerType,
@@ -679,7 +683,7 @@ export class MLOpsPipelineService {
       setFields.push('completed_at = NOW()');
     }
 
-    await db.execute(sql`
+    await db.execute<SqlRow>(sql`
       UPDATE retraining_jobs SET
         status = COALESCE(${update.status || null}, status),
         new_model_version = COALESCE(${update.newModelVersion || null}, new_model_version),
@@ -704,11 +708,11 @@ export class MLOpsPipelineService {
     const periodStart = new Date(Date.now() - periodHours * 3600000);
 
     // Get prediction metrics
-    const metricsResult = await db.execute(sql`
+    const metricsResult = await db.execute<SqlRow>(sql`
       SELECT
         COUNT(*) as prediction_count,
         AVG(ABS(predicted_value - actual_value)) as mae,
-        SQRT(AVG(POW(predicted_value - actual_value, 2))) as rmse,
+        SQRT(AVG(POWER(predicted_value - actual_value, 2))) as rmse,
         AVG(ABS(predicted_value - actual_value) / NULLIF(actual_value, 0)) * 100 as mape,
         AVG(latency_ms) as latency_avg,
         MAX(latency_ms) as latency_max
@@ -717,21 +721,21 @@ export class MLOpsPipelineService {
         AND created_at >= ${periodStart}
         AND actual_value IS NOT NULL
     `);
-    const metrics = (metricsResult as any)[0]?.[0] || {};
+    const metrics = metricsResult.rows[0] || {};
 
     // Get latency percentiles
-    const latencyResult = await db.execute(sql`
+    const latencyResult = await db.execute<SqlRow>(sql`
       SELECT latency_ms FROM model_predictions
       WHERE model_id = ${modelId}
         AND created_at >= ${periodStart}
       ORDER BY latency_ms
     `);
-    const latencies = ((latencyResult as any)[0] || []).map((r: any) => r.latency_ms);
+    const latencies = (latencyResult.rows || []).map((r: any) => r.latency_ms);
     const p50Index = Math.floor(latencies.length * 0.5);
     const p99Index = Math.floor(latencies.length * 0.99);
 
     // Get error rate
-    const errorResult = await db.execute(sql`
+    const errorResult = await db.execute<SqlRow>(sql`
       SELECT
         COUNT(CASE WHEN actual_value IS NULL THEN 1 END) as errors,
         COUNT(*) as total
@@ -739,17 +743,17 @@ export class MLOpsPipelineService {
       WHERE model_id = ${modelId}
         AND created_at >= ${periodStart}
     `);
-    const errorStats = (errorResult as any)[0]?.[0] || {};
+    const errorStats = errorResult.rows[0] || {};
     const errorRate = errorStats.total > 0 ? errorStats.errors / errorStats.total : 0;
 
     // Get drift score
-    const driftResult = await db.execute(sql`
+    const driftResult = await db.execute<SqlRow>(sql`
       SELECT COUNT(*) as drift_count FROM model_drift_events
       WHERE model_id = ${modelId}
         AND detected_at >= ${periodStart}
         AND resolved_at IS NULL
     `);
-    const driftCount = (driftResult as any)[0]?.[0]?.drift_count || 0;
+    const driftCount = driftResult.rows[0]?.drift_count || 0;
     const driftScore = Math.min(1, driftCount * 0.2); // 0.2 per unresolved drift event
 
     return {
@@ -786,8 +790,8 @@ export class MLOpsPipelineService {
       query = sql`SELECT * FROM model_registry ORDER BY created_at DESC`;
     }
 
-    const result = await db.execute(query);
-    return ((result as any)[0] || []).map(this.mapRowToModel);
+    const result = await db.execute<SqlRow>(query);
+    return (result.rows || []).map(this.mapRowToModel);
   }
 
   /**
@@ -813,15 +817,15 @@ export class MLOpsPipelineService {
       `;
     }
 
-    const result = await db.execute(query);
-    return ((result as any)[0] || []).map(this.mapRowToDriftEvent);
+    const result = await db.execute<SqlRow>(query);
+    return (result.rows || []).map(this.mapRowToDriftEvent);
   }
 
   private mapRowToModel(row: any): ModelVersion {
     return {
       id: row.id,
       modelName: row.model_name,
-      version: row.version,
+      version: row.model_version,
       modelType: row.model_type,
       framework: row.framework,
       inputSchema: row.input_schema ? JSON.parse(row.input_schema) : {},

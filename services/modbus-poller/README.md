@@ -13,6 +13,21 @@ publishes decoded readings to the VPP server.
 * Publish unsigned: every batch carries an HMAC-SHA256 signature over
   `"<unix timestamp>.<body>"` using `GRID_PROTOCOL_SHARED_SECRET`, and a
   rejected publish is an error rather than a dropped batch.
+* Lose a reading because the platform was unreachable, or hide that it did.
+
+## When the platform is unreachable
+
+Readings carry the timestamp of the register read, so delivering them late is
+still accurate — dropping them destroys the only record that the meter was read,
+which is what settlement is computed from. Undelivered readings are therefore
+held in a bounded spool and replayed oldest-first on the next cycle, and stay
+there until the platform accepts them.
+
+The spool is bounded (`spool_max_readings`, sent in batches of
+`publish_batch_size`). When it fills, the oldest readings are discarded and
+counted: `dropped`/`dropped_total` on an error log is a hole in the meter
+history, not a quiet device. A spool smaller than one batch is rejected at
+startup.
 
 ## Running
 

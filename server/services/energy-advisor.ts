@@ -457,8 +457,8 @@ export async function getAdvice(userId: number, kind: AdvisorKind, opts?: { bypa
         recommendations,
         ruleBasedTips,
         digest,
-      });
-      reportId = Number((insert as any)[0]?.insertId ?? (insert as any).insertId ?? 0) || null;
+      }).returning({ id: energyAdvisorReports.id });
+      reportId = Number(insert[0].id ?? 0) || null;
     }
   } catch (error) {
     console.error('[EnergyAdvisor] Failed to persist report:', error);

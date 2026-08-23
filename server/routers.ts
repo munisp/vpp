@@ -62,6 +62,7 @@ import { solarYieldRouter } from './routers/solarYield';
 import { ntlDetectionRouter } from './routers/ntlDetection';
 import { priceAlertEngineRouter } from './routers/priceAlertEngine';
 import { complianceReportsRouter } from './routers/complianceReports';
+import { controlWindowsRouter } from './routers/controlWindows';
 
 // Next-gen VPP routers
 import {
@@ -77,6 +78,11 @@ import {
   complianceRouter,
   blockchainRouter,
   derCapabilitiesRouter,
+  priceSignalRouter,
+  fleetTelemetryRouter,
+  locationalFlexibilityRouter,
+  matterLoadsRouter,
+  degradedOperationRouter,
 } from './routers/nextgen';
 
 // Start performance alerting
@@ -152,6 +158,7 @@ export const appRouter = router({
   carbonCredits: carbonCreditsRouter,
   gridAnomaly: gridAnomalyRouter,
   v2gOptimizer: v2gOptimizerRouter,
+  controlWindows: controlWindowsRouter,
   energyWallet: energyWalletRouter,
   communityPools: communityPoolsRouter,
   drForecast: drForecastRouter,
@@ -166,6 +173,11 @@ export const appRouter = router({
   evCharging: evChargingRouter,
   forecasting: forecastingRouter,
   optimization: optimizationRouter,
+  priceSignal: priceSignalRouter,
+  fleetTelemetry: fleetTelemetryRouter,
+  locationalFlexibility: locationalFlexibilityRouter,
+  matterLoads: matterLoadsRouter,
+  degradedOperation: degradedOperationRouter,
   settlement: settlementRouter,
   edge: edgeRouter,
   carbon: carbonRouter,

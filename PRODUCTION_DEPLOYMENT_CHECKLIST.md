@@ -77,7 +77,7 @@ This checklist ensures all critical components are properly configured before pr
   - [ ] Environment variable set: `REDIS_URL`
 
 - [ ] **Database**
-  - [ ] MySQL/TiDB deployed
+  - [ ] PostgreSQL deployed
   - [ ] Database created
   - [ ] Schema migrated: `pnpm db:push`
   - [ ] Connection tested

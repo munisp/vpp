@@ -107,7 +107,7 @@ export async function getEnergyFlowData(
     // For now, we'll aggregate all telemetry data
 
     const timeFormat = interval === 'hour' 
-      ? sql`DATE_FORMAT(${telemetry.timestamp}, '%Y-%m-%d %H:00:00')`
+      ? sql`to_char(${telemetry.timestamp}, 'YYYY-MM-DD HH24:00:00')`
       : sql`DATE(${telemetry.timestamp})`;
 
     const result = await db

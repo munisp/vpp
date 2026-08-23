@@ -1,23 +1,37 @@
-import { int, mysqlEnum, mysqlTable, text, timestamp, varchar, boolean } from "drizzle-orm/mysql-core";
+import {
+  boolean,
+  integer as int,
+  pgEnum,
+  pgTable,
+  serial,
+  text,
+  timestamp,
+  varchar,
+} from "drizzle-orm/pg-core";
 
-/**
- * Achievement Definitions
- */
-export const achievements = mysqlTable("achievements", {
-  id: int("id").autoincrement().primaryKey(),
-  name: varchar("name", { length: 100 }).notNull(),
-  description: text("description"),
-  icon: varchar("icon", { length: 50 }), // Icon name from lucide-react
-  category: mysqlEnum("category", ["participation", "performance", "milestone", "special"]).notNull(),
-  
-  // Criteria
-  criteriaType: mysqlEnum("criteria_type", [
+export const leaderboardEntriesPeriodEnum = pgEnum("leaderboard_entries_period", ["daily", "weekly", "monthly", "all_time"]);
+export const achievementsCriteriaTypeEnum = pgEnum("achievements_criteria_type", [
     "events_participated",
     "total_reduction",
     "reliability_score",
     "consecutive_events",
     "compensation_earned",
-  ]).notNull(),
+  ]);
+export const achievementsCategoryEnum = pgEnum("achievements_category", ["participation", "performance", "milestone", "special"]);
+
+
+/**
+ * Achievement Definitions
+ */
+export const achievements = pgTable("achievements", {
+  id: serial("id").primaryKey(),
+  name: varchar("name", { length: 100 }).notNull(),
+  description: text("description"),
+  icon: varchar("icon", { length: 50 }), // Icon name from lucide-react
+  category: achievementsCategoryEnum("category").notNull(),
+  
+  // Criteria
+  criteriaType: achievementsCriteriaTypeEnum("criteria_type").notNull(),
   criteriaValue: int("criteria_value").notNull(), // Threshold to unlock
   
   // Rewards
@@ -34,8 +48,8 @@ export type InsertAchievement = typeof achievements.$inferInsert;
 /**
  * User Achievements
  */
-export const userAchievements = mysqlTable("user_achievements", {
-  id: int("id").autoincrement().primaryKey(),
+export const userAchievements = pgTable("user_achievements", {
+  id: serial("id").primaryKey(),
   userId: int("user_id").notNull(),
   achievementId: int("achievement_id").notNull(),
   
@@ -51,12 +65,12 @@ export type InsertUserAchievement = typeof userAchievements.$inferInsert;
 /**
  * Leaderboard Entries
  */
-export const leaderboardEntries = mysqlTable("leaderboard_entries", {
-  id: int("id").autoincrement().primaryKey(),
+export const leaderboardEntries = pgTable("leaderboard_entries", {
+  id: serial("id").primaryKey(),
   userId: int("user_id").notNull(),
   
   // Period
-  period: mysqlEnum("period", ["daily", "weekly", "monthly", "all_time"]).notNull(),
+  period: leaderboardEntriesPeriodEnum("period").notNull(),
   periodStart: timestamp("period_start").notNull(),
   periodEnd: timestamp("period_end").notNull(),
   
@@ -73,7 +87,7 @@ export const leaderboardEntries = mysqlTable("leaderboard_entries", {
   rewardPaid: boolean("reward_paid").default(false).notNull(),
   
   createdAt: timestamp("created_at").defaultNow().notNull(),
-  updatedAt: timestamp("updated_at").defaultNow().onUpdateNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().$onUpdate(() => new Date()).notNull(),
 });
 
 export type LeaderboardEntry = typeof leaderboardEntries.$inferSelect;

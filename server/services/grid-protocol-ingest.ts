@@ -25,6 +25,7 @@ import {
   gridProtocolInstructions,
   ocppIdTags,
 } from '../../drizzle/grid-protocol-schema';
+import { recordObservation } from './degraded-operation';
 
 /** Signed requests older than this are replays and are rejected. */
 export const SIGNATURE_MAX_AGE_SECONDS = 300;
@@ -95,7 +96,7 @@ export function verifyGridSignature(
   }
 }
 
-async function requireDb() {
+export async function requireDb() {
   const db = await getDb();
   if (!db) {
     throw new GridProtocolError(
@@ -106,7 +107,7 @@ async function requireDb() {
   return db;
 }
 
-async function requireStation(chargePointId: string) {
+export async function requireStation(chargePointId: string) {
   const db = await requireDb();
   const rows = await db
     .select()
@@ -174,7 +175,7 @@ export async function handleHeartbeat(chargePointId: string): Promise<{ currentT
   return { currentTime: new Date().toISOString() };
 }
 
-const OCPP_STATUS_MAP: Record<string, 'available' | 'occupied' | 'charging' | 'faulted' | 'offline'> = {
+export const OCPP_STATUS_MAP: Record<string, 'available' | 'occupied' | 'charging' | 'faulted' | 'offline'> = {
   Available: 'available',
   Preparing: 'occupied',
   Charging: 'charging',
@@ -465,6 +466,14 @@ export async function handleMeterValues(
     })
     .where(eq(chargingSessions.id, session.id));
 
+  // A stored meter register is the settlement measurement itself, so it is the
+  // strongest evidence the meter path works.
+  await recordObservation({
+    dependency: 'meter_telemetry',
+    observation: 'reachable',
+    observedBy: 'server',
+    operation: 'ocpp meter values stored',
+  });
   return { recorded };
 }
 
@@ -504,7 +513,7 @@ function readMeterStart(metadata: string | null): number {
   return meterStart;
 }
 
-function safeParse(value: string | null): Record<string, unknown> | null {
+export function safeParse(value: string | null): Record<string, unknown> | null {
   if (!value) return null;
   try {
     const parsed: unknown = JSON.parse(value);
@@ -516,7 +525,7 @@ function safeParse(value: string | null): Record<string, unknown> | null {
   }
 }
 
-function parseTimestamp(value: string, field: string): Date {
+export function parseTimestamp(value: string, field: string): Date {
   const parsed = new Date(value);
   if (Number.isNaN(parsed.getTime())) {
     throw new GridProtocolError(400, `${field} is not a valid timestamp`);
@@ -583,7 +592,12 @@ export async function handleOpenADREvent(event: OpenADREvent): Promise<OpenADRDe
       decisionReason: decision.reason,
       payload: JSON.stringify(event),
     })
-    .onDuplicateKeyUpdate({
+    .onConflictDoUpdate({
+      target: [
+        gridProtocolInstructions.source,
+        gridProtocolInstructions.externalId,
+        gridProtocolInstructions.modificationNumber,
+      ],
       set: {
         eventStatus: event.status,
         decision: decision.optType === 'optIn' ? 'opt_in' : 'opt_out',
@@ -679,7 +693,12 @@ export async function handleSep2Controls(controls: Sep2Control[]): Promise<{ sto
         decisionReason: 'DER control recorded for dispatch evaluation',
         payload: JSON.stringify(control),
       })
-      .onDuplicateKeyUpdate({
+      .onConflictDoUpdate({
+        target: [
+          gridProtocolInstructions.source,
+          gridProtocolInstructions.externalId,
+          gridProtocolInstructions.modificationNumber,
+        ],
         set: {
           eventStatus: String(control.status),
           startTime: start,
@@ -768,6 +787,16 @@ export async function handleModbusReadings(
       .where(eq(devices.id, device.id));
     stored += deviceReadings.length;
   }
+
+  // Stored measurements are the only honest evidence that the meter path works,
+  // so the arrival of real samples is what marks `meter_telemetry` reachable —
+  // not a poller that says it is running.
+  await recordObservation({
+    dependency: 'meter_telemetry',
+    observation: 'reachable',
+    observedBy: 'server',
+    operation: 'modbus readings stored',
+  });
   return { stored };
 }
 

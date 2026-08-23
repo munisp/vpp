@@ -6,13 +6,16 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"testing"
 	"time"
 
+	"github.com/vpp/grid-protocols/internal/control"
 	"github.com/vpp/grid-protocols/internal/ocpp16"
+	"github.com/vpp/grid-protocols/internal/ocppmux"
 )
 
 const testSecret = "0123456789abcdef0123456789abcdef"
@@ -45,7 +48,15 @@ func newAPI(t *testing.T) *httptest.Server {
 	if err != nil {
 		t.Fatalf("central system: %v", err)
 	}
-	api, err := New(central, testSecret)
+	commander, err := ocppmux.New(central, nil, nil)
+	if err != nil {
+		t.Fatalf("mux: %v", err)
+	}
+	supervisor, err := control.New(commander, control.Options{})
+	if err != nil {
+		t.Fatalf("supervisor: %v", err)
+	}
+	api, err := New(commander, testSecret, supervisor)
 	if err != nil {
 		t.Fatalf("api: %v", err)
 	}
@@ -140,6 +151,34 @@ func TestCommandForOfflineChargePointIsUnavailable(t *testing.T) {
 	}
 }
 
+func profileBody(validFrom, validTo string, stackLevel int, purpose string, fallback bool) string {
+	profile := map[string]any{
+		"chargingProfileId":      7,
+		"stackLevel":             stackLevel,
+		"chargingProfilePurpose": purpose,
+		"chargingProfileKind":    "Relative",
+		"chargingSchedule": map[string]any{
+			"chargingRateUnit":       "W",
+			"chargingSchedulePeriod": []map[string]any{{"startPeriod": 0, "limit": 3600}},
+		},
+	}
+	if validFrom != "" {
+		profile["validFrom"] = validFrom
+	}
+	if validTo != "" {
+		profile["validTo"] = validTo
+	}
+	body, err := json.Marshal(map[string]any{
+		"charge_point_id": "CP-1",
+		"fallback":        fallback,
+		"request":         map[string]any{"connectorId": 1, "csChargingProfiles": profile},
+	})
+	if err != nil {
+		panic(err)
+	}
+	return string(body)
+}
+
 func TestValidationErrors(t *testing.T) {
 	server := newAPI(t)
 	cases := map[string]struct {
@@ -151,6 +190,26 @@ func TestValidationErrors(t *testing.T) {
 		"missing transaction":  {"/admin/remote-stop", `{"charge_point_id":"CP-1","request":{}}`},
 		"empty schedule": {"/admin/charging-profile",
 			`{"charge_point_id":"CP-1","request":{"connectorId":1,"csChargingProfiles":{"chargingSchedule":{"chargingRateUnit":"W","chargingSchedulePeriod":[]}}}}`},
+		// A profile with no validTo would keep running on the charge point after the
+		// platform is gone, so it never reaches the hardware.
+		"unbounded profile": {"/admin/charging-profile", profileBody("", "", 1, "TxDefaultProfile", false)},
+		"expired window": {"/admin/charging-profile",
+			profileBody("", time.Now().Add(-time.Minute).UTC().Format(time.RFC3339), 1, "TxDefaultProfile", false)},
+		"inverted window": {"/admin/charging-profile",
+			profileBody(time.Now().Add(30*time.Minute).UTC().Format(time.RFC3339),
+				time.Now().Add(10*time.Minute).UTC().Format(time.RFC3339), 1, "TxDefaultProfile", false)},
+		"window beyond the maximum": {"/admin/charging-profile",
+			profileBody("", time.Now().Add(6*time.Hour).UTC().Format(time.RFC3339), 1, "TxDefaultProfile", false)},
+		// The standing fallback must not outrank a bounded profile.
+		"fallback above stack level 0": {"/admin/charging-profile",
+			profileBody("", "", 3, "TxDefaultProfile", true)},
+		"fallback that expires": {"/admin/charging-profile",
+			profileBody("", time.Now().Add(10*time.Minute).UTC().Format(time.RFC3339), 0, "TxDefaultProfile", true)},
+		"fallback as a transaction profile": {"/admin/charging-profile",
+			profileBody("", "", 0, "TxProfile", true)},
+		// An unfiltered clear would wipe every profile including the fallback.
+		"clear with no selector": {"/admin/clear-charging-profile",
+			`{"charge_point_id":"CP-1","request":{}}`},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -163,7 +222,7 @@ func TestValidationErrors(t *testing.T) {
 }
 
 func TestNewRequiresSecretAndCentralSystem(t *testing.T) {
-	if _, err := New(nil, testSecret); err == nil {
+	if _, err := New(nil, testSecret, nil); err == nil {
 		t.Fatal("expected a missing central system to be rejected")
 	}
 	central, err := ocpp16.NewCentralSystem(nopBackend{}, ocpp16.Options{
@@ -172,7 +231,19 @@ func TestNewRequiresSecretAndCentralSystem(t *testing.T) {
 	if err != nil {
 		t.Fatalf("central system: %v", err)
 	}
-	if _, err := New(central, "short"); err == nil {
+	commander, err := ocppmux.New(central, nil, nil)
+	if err != nil {
+		t.Fatalf("mux: %v", err)
+	}
+	supervisor, err := control.New(commander, control.Options{})
+	if err != nil {
+		t.Fatalf("supervisor: %v", err)
+	}
+	if _, err := New(commander, "short", supervisor); err == nil {
 		t.Fatal("expected a short shared secret to be rejected")
+	}
+	// Without a supervisor nothing would ever close an expired control window.
+	if _, err := New(commander, testSecret, nil); err == nil {
+		t.Fatal("expected a missing control supervisor to be rejected")
 	}
 }

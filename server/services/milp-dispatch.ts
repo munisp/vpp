@@ -7,6 +7,8 @@
  * a heuristic and present the result as optimized.
  */
 
+import { observing } from './degraded-operation';
+
 export type MilpObjective =
   | 'minimize_cost'
   | 'maximize_revenue'
@@ -142,7 +144,30 @@ export function assertMilpOptimizerConfigured(): void {
   }
 }
 
+/**
+ * Every call to the optimizer is recorded as an observation of it, on both the
+ * success and the failure path, so `dependencyPostures()` reports what real
+ * traffic saw rather than what a health endpoint claims. An HTTP answer counts
+ * as `faulted` (it is up, but not usable); a transport failure or timeout counts
+ * as `unreachable`.
+ */
 async function post<TRequest, TResponse>(
+  path: string,
+  body: TRequest,
+  timeoutMs: number
+): Promise<TResponse> {
+  return observing(
+    {
+      dependency: 'optimizer',
+      observedBy: 'server',
+      operation: `POST ${path}`,
+      faultedWhen: error => error instanceof MilpOptimizerError && error.statusCode !== undefined,
+    },
+    () => postOnce<TRequest, TResponse>(path, body, timeoutMs)
+  );
+}
+
+async function postOnce<TRequest, TResponse>(
   path: string,
   body: TRequest,
   timeoutMs: number
@@ -213,6 +238,56 @@ export async function solveMilpDispatch(
     );
   }
   return result;
+}
+
+export interface CoordinationRequest {
+  sites: Array<{ request: MilpDispatchRequest }>;
+  shared_import_limit_w: number[];
+  shared_export_limit_w?: number[] | null;
+  /**
+   * Aggregate net import the grid wants the fleet to follow. Two-sided, unlike
+   * the cap: the coordination price may go negative to pay sites for absorbing
+   * energy in an interval the fleet is under target.
+   */
+  shared_import_target_w?: number[] | null;
+  max_iterations?: number;
+  tolerance_w?: number;
+  step_size_cents_per_kwh?: number;
+}
+
+export interface CoordinationResponse {
+  status: MilpDispatchResponse['status'];
+  solver: string;
+  iterations: number;
+  max_violation_w: number;
+  converged: boolean;
+  /** Coordination component of the price per interval, signed, cents/kWh. */
+  shadow_prices_cents_per_kwh: number[];
+  /** Aggregate net import of the plans the sites returned, per interval. */
+  aggregate_net_w: number[];
+  /** Signed distance from the target; null when the request carried only a cap. */
+  target_deviation_w: number[] | null;
+  sites: MilpDispatchResponse[];
+  diagnostics: Record<string, string | number | boolean>;
+}
+
+/**
+ * Coordinate several sites over a shared grid connection.
+ *
+ * Returns a non-converged result rather than throwing, because the caller needs
+ * the residual to decide: an unconverged *cap* plan still breaches a physical
+ * limit, whereas an unconverged *target* plan merely misses a profile. Neither
+ * may be presented as a plan that met the request.
+ */
+export async function solveCoordination(
+  request: CoordinationRequest,
+  options?: { timeoutMs?: number }
+): Promise<CoordinationResponse> {
+  return post<CoordinationRequest, CoordinationResponse>(
+    '/optimize/coordinate',
+    request,
+    options?.timeoutMs ?? DEFAULT_TIMEOUT_MS
+  );
 }
 
 export async function optimizerHealth(): Promise<{ solver: string; available_solvers: string[] }> {

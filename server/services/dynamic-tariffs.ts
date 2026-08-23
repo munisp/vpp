@@ -241,10 +241,10 @@ export async function publishTariff(country: TariffCountry, effectiveFrom: Date,
       periods: schedule.periods,
       learnedFrom: schedule.learnedFrom,
       publishedBy: adminUserId,
-    });
+    }).returning({ id: dynamicTariffs.id });
 
     return {
-      id: Number((insert as any)[0]?.insertId ?? (insert as any).insertId ?? 0) || null,
+      id: Number(insert[0].id ?? 0) || null,
       country,
       version: nextVersion,
       effectiveFrom: effectiveFrom.toISOString(),

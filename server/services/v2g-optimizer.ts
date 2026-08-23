@@ -22,6 +22,7 @@ import { marketPrices } from '../../drizzle/schema';
 import { v2gSchedules } from '../../drizzle/grid-intel-schema';
 import { pricePredictionService } from '../ml/price-prediction';
 import { evCharging } from './ev-charging';
+import type { SqlRow } from '../sql-row';
 
 export interface ScheduleInterval {
   startTime: Date;
@@ -84,21 +85,19 @@ export class V2gOptimizerService {
     if (ev.userId !== userId) throw new Error('EV does not belong to this user');
 
     // Vehicle parameters — real record or explicit input; fail loud if unknown
-    const batteryCapacityKwh = input.batteryCapacityKwh
-      ?? ((ev.usableBatteryKwh || ev.batteryCapacityKwh) ? (ev.usableBatteryKwh || ev.batteryCapacityKwh)! / 10 : null);
+    const batteryCapacityKwh = input.batteryCapacityKwh ?? ev.usableBatteryKwh ?? ev.batteryCapacityKwh;
     if (!batteryCapacityKwh || batteryCapacityKwh <= 0) {
       throw new Error('Vehicle battery capacity unknown: provide batteryCapacityKwh or update the EV record');
     }
-    const startSoc = input.startSocPercent
-      ?? (ev.currentSocPercent !== null ? ev.currentSocPercent / 100 : null);
+    const startSoc = input.startSocPercent ?? ev.currentSocPercent;
     if (startSoc === null) {
       throw new Error('Current state of charge unknown: provide startSocPercent or update the EV record');
     }
-    const maxChargeKw = input.maxChargeKw ?? (ev.maxChargingPowerKw ? ev.maxChargingPowerKw / 10 : null);
+    const maxChargeKw = input.maxChargeKw ?? ev.maxChargingPowerKw;
     if (!maxChargeKw || maxChargeKw <= 0) {
       throw new Error('Max charging power unknown: provide maxChargeKw or update the EV record');
     }
-    const maxDischargeKw = input.maxDischargeKw ?? (ev.maxDischargingPowerKw ? ev.maxDischargingPowerKw / 10 : 0);
+    const maxDischargeKw = input.maxDischargeKw ?? ev.maxDischargingPowerKw ?? 0;
 
     const now = new Date();
     const departure = new Date(input.departureTime);
@@ -255,8 +254,8 @@ export class V2gOptimizerService {
       naiveBaselineCostCents,
       expectedRevenueCents,
       status: 'active',
-    });
-    const scheduleId = Number((insertResult as any)[0]?.insertId);
+    }).returning({ id: v2gSchedules.id });
+    const scheduleId = Number(insertResult[0].id);
 
     console.log(`[V2GOptimizer] Schedule ${scheduleId} for EV ${input.evId}: ${intervals.length} intervals, cost=${expectedCostCents}c, revenue=${expectedRevenueCents}c, naive=${naiveBaselineCostCents}c (source=${source})`);
 
@@ -363,7 +362,7 @@ export class V2gOptimizerService {
     if (schedule.status !== 'active' && schedule.status !== 'draft') {
       throw new Error(`Cannot cancel a schedule with status ${schedule.status}`);
     }
-    await db.execute(sql`UPDATE v2g_schedules SET status = 'cancelled' WHERE id = ${scheduleId}`);
+    await db.execute<SqlRow>(sql`UPDATE v2g_schedules SET status = 'cancelled' WHERE id = ${scheduleId}`);
     return this.getSchedule(scheduleId);
   }
 }

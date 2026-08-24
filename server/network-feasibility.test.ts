@@ -12,6 +12,7 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 
 import {
   SCALES,
+  engineForStatus,
   getGridModelServiceUrl,
   isNetworkFeasibilityConfigured,
   limitingElementOf,
@@ -115,6 +116,27 @@ describe('studyFeasibility without a database', () => {
     expect(study.status).not.toBe('feasible');
     // No model means no request: the solver is not asked to invent a network.
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('engineForStatus', () => {
+  // The stored study requires status and engine to agree, so a status that
+  // solved nothing must not inherit the engine the service names in its
+  // diagnostics — otherwise the row is rejected and the evidence is lost.
+  it('names no engine for a study that concluded nothing', () => {
+    expect(engineForStatus('model_unavailable', 'pandapower')).toBeNull();
+    expect(engineForStatus('service_unavailable', 'pandapower')).toBeNull();
+  });
+
+  it('names the engine that produced an answer', () => {
+    expect(engineForStatus('feasible', 'pandapower')).toBe('pandapower');
+    expect(engineForStatus('violations', 'pandapower')).toBe('pandapower');
+    expect(engineForStatus('not_converged', 'pandapower')).toBe('pandapower');
+  });
+
+  it('falls back to the service name when the engine is not reported as text', () => {
+    expect(engineForStatus('feasible', undefined)).toBe('gridmodel');
+    expect(engineForStatus('feasible', 3)).toBe('gridmodel');
   });
 });
 

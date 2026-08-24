@@ -45,6 +45,13 @@ import {
   handleTransactionEvent201,
 } from '../services/ocpp201-ingest';
 
+import {
+  ConformanceError,
+  clearProofCache,
+  recordRun,
+} from '../services/protocol-conformance';
+import { CONFORMANCE_ADAPTERS } from '../../shared/protocol-conformance-copy';
+
 const chargePointId = z.string().min(1).max(64);
 
 function envelope<T extends z.ZodTypeAny>(payload: T) {
@@ -480,6 +487,84 @@ gridProtocolRouter.post(
   '/matter/node-removed',
   handler(matterNodeRemovedSchema, input => handleMatterNodeRemoved(input), 'matter_controller')
 );
+/**
+ * Conformance runs, posted by whichever service executed the vector set. The
+ * result is reported case by case: a runner cannot submit a bare "passed",
+ * because a pass with nothing behind it is exactly the claim this table exists
+ * to replace.
+ */
+const conformanceRunSchema = z.object({
+  adapter: z.enum(CONFORMANCE_ADAPTERS as unknown as [string, ...string[]]),
+  adapter_version: z.string().min(1).max(64),
+  protocol_version: z.string().min(1).max(32),
+  device_model: z.string().min(1).max(191),
+  device_identifier: z.string().min(1).max(191).optional(),
+  target: z.enum(['simulator', 'device']),
+  vector_set_id: z.string().min(1).max(128),
+  vector_set_version: z.string().min(1).max(32),
+  operator: z.string().min(1).max(191),
+  started_at: z.string().datetime(),
+  completed_at: z.string().datetime(),
+  artifact_checksum: z.string().regex(/^[0-9a-fA-F]{64}$/).optional(),
+  artifact_uri: z.string().max(1000).optional(),
+  detail: z.string().max(4000).optional(),
+  refused_reason: z.string().min(1).max(500).optional(),
+  cases: z
+    .array(
+      z.object({
+        case_id: z.string().min(1).max(128),
+        name: z.string().min(1).max(255),
+        requirement: z.string().min(1).max(2000),
+        outcome: z.enum(['pass', 'fail', 'skipped']),
+        detail: z.string().max(4000).optional(),
+        evidence: z.unknown().optional(),
+      })
+    )
+    .max(2000),
+});
+
+gridProtocolRouter.post(
+  '/conformance/run',
+  handler(conformanceRunSchema, async input => {
+    try {
+      const recorded = await recordRun({
+        adapter: input.adapter as (typeof CONFORMANCE_ADAPTERS)[number],
+        adapterVersion: input.adapter_version,
+        protocolVersion: input.protocol_version,
+        deviceModel: input.device_model,
+        deviceIdentifier: input.device_identifier,
+        target: input.target,
+        vectorSetId: input.vector_set_id,
+        vectorSetVersion: input.vector_set_version,
+        operator: input.operator,
+        startedAt: new Date(input.started_at),
+        completedAt: new Date(input.completed_at),
+        artifactChecksum: input.artifact_checksum,
+        artifactUri: input.artifact_uri,
+        detail: input.detail,
+        refused: input.refused_reason ? { reason: input.refused_reason } : undefined,
+        cases: input.cases.map(one => ({
+          caseId: one.case_id,
+          name: one.name,
+          requirement: one.requirement,
+          outcome: one.outcome,
+          detail: one.detail,
+          evidence: one.evidence,
+        })),
+      });
+      // A fresh pass should change what dispatch stamps immediately, not after
+      // the read cache happens to lapse.
+      clearProofCache();
+      return recorded;
+    } catch (error) {
+      if (error instanceof ConformanceError) {
+        throw new GridProtocolError(error.status, error.message);
+      }
+      throw error;
+    }
+  })
+);
+
 gridProtocolRouter.post(
   '/modbus/readings',
   handler(modbusSchema, input => handleModbusReadings(input.readings))

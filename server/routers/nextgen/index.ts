@@ -24,3 +24,4 @@ export { modelHealthRouter } from './model-health';
 export { prepaidRouter } from './prepaid';
 export { networkModelRouter } from './network-model';
 export { designStudyRouter } from './design-study';
+export { protocolConformanceRouter } from './protocol-conformance';

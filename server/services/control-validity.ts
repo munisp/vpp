@@ -25,6 +25,7 @@ import {
   type ControlAssignment,
   type InsertControlAssignment,
 } from '../../drizzle/control-schema';
+import { controlProtocolProof } from './protocol-conformance';
 
 export type ControlProtocol = 'ocpp16' | 'sep2' | 'openadr' | 'modbus' | 'mqtt';
 /**
@@ -210,6 +211,21 @@ export async function recordControlAssignment(
   const db = await requireDb();
 
   const subTargetRef = input.subTargetRef ?? 0;
+
+  // Stamped at issue time. A control that went out over an adapter with no
+  // passing conformance run is still issued — commissioning has to start
+  // somewhere — but the record says so, so an incident review can tell an
+  // untested wire from a tested one instead of guessing from dates.
+  let protocolProof: Awaited<ReturnType<typeof controlProtocolProof>> | null = null;
+  try {
+    protocolProof = await controlProtocolProof(input.protocol);
+  } catch (error) {
+    // Conformance evidence is an audit aid, not an actuation gate: failing to
+    // read it must not stop a dispatch the operator asked for. The label is
+    // left null, which reads as "not assessed" rather than as proven.
+    console.error('[ControlValidity] could not resolve protocol conformance proof:', error);
+  }
+
   const values: InsertControlAssignment = {
     protocol: input.protocol,
     targetRef: input.targetRef,
@@ -228,6 +244,8 @@ export async function recordControlAssignment(
     fallbackLimitWatts: input.fallbackLimitWatts,
     delivery: input.delivery,
     deliveryDetail: input.deliveryDetail,
+    protocolProof: protocolProof?.state,
+    protocolProofRunId: protocolProof?.conformanceRunId ?? undefined,
   };
 
   // One transaction: a superseded predecessor without its successor would leave

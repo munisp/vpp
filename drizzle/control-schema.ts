@@ -73,6 +73,20 @@ export const controlAssignmentsDeliveryEnum = pgEnum("control_assignments_delive
   "rejected",
   "unconfirmed",
 ]);
+/**
+ * Whether the wire that carried this control had been shown to work.
+ *
+ * `proven` means a conformance run over this protocol passed every case inside
+ * the deployment's evidence window (see drizzle/conformance-schema.ts).
+ * `claimed_unproven` and `suite_failed` mean the platform commanded hardware
+ * over an adapter nobody had proved — legitimate during commissioning, but it
+ * has to be findable afterwards rather than inferred. `no_suite` is the honest
+ * answer for MQTT, which has no vector set here.
+ */
+export const controlAssignmentsProtocolProofEnum = pgEnum(
+  "control_assignments_protocol_proof",
+  ["proven", "claimed_unproven", "suite_failed", "proof_stale", "no_suite"]
+);
 export const controlAssignmentsFallbackOutcomeEnum = pgEnum(
   "control_assignments_fallback_outcome",
   ["applied", "device_offline", "rejected", "unconfirmed", "not_required"]
@@ -120,6 +134,14 @@ export const controlAssignments = pgTable(
      */
     delivery: controlAssignmentsDeliveryEnum("delivery").notNull(),
     deliveryDetail: text("delivery_detail"),
+    /**
+     * Proof state of `protocol` when this control was issued, frozen here rather
+     * than resolved at read time: proving the adapter next month does not make
+     * last month's dispatch proven.
+     */
+    protocolProof: controlAssignmentsProtocolProofEnum("protocol_proof"),
+    /** The passing run the `proven` label rests on. */
+    protocolProofRunId: int("protocol_proof_run_id"),
     /** Set when a newer assignment took over the same target before expiry. */
     supersededAt: timestamp("superseded_at"),
     /**

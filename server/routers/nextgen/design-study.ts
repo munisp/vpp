@@ -72,10 +72,10 @@ const runInput = z
       windCapexCentsPerKw: z.number().nonnegative().optional(),
       batteryCapexCentsPerKwh: z.number().nonnegative().optional(),
       inverterCapexCentsPerKw: z.number().nonnegative().optional(),
-      backupCapexCents: z.number().nonnegative().optional(),
+      backupCapexCentsPerKw: z.number().nonnegative().optional(),
       fixedOpexPercentOfCapexPerYear: z.number().min(0).max(100).optional(),
       batteryReplacementYear: z.number().int().min(1).max(40).optional(),
-      batteryReplacementFraction: z.number().min(0).max(1).optional(),
+      batteryReplacementCostFraction: z.number().min(0).max(2).optional(),
     }),
     sweep: z.object({
       pvKw: z.array(z.number().nonnegative()).max(20).optional(),

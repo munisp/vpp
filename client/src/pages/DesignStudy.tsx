@@ -156,11 +156,35 @@ export default function DesignStudy() {
 
   const candidates = useMemo(() => result?.candidates ?? [], [result]);
 
+  /**
+   * The genset is the diesel baseline this design is costed against, so it has
+   * to cover the peak of the load the *server* will read. For a metered study
+   * that peak lives in the meter, not in the (hidden) textarea, so the study is
+   * refused here rather than sized against a backup unrelated to the site.
+   */
+  function backupPeakW(declared: number[]): number | null {
+    if (loadSource !== 'metered') {
+      return declared.length > 0 ? Math.max(...declared) : null;
+    }
+    const preview = meteredPreview.data;
+    if (!preview || !preview.available) return null;
+    return preview.peakW;
+  }
+
   function submit() {
     const load = parseSeries(loadText);
     const solar = parseSeries(solarText);
     if (loadSource !== 'metered' && (load.length < 24 || load.some(Number.isNaN))) {
       toast.error('The load profile needs at least 24 comma-separated numbers in watts');
+      return;
+    }
+    const peakW = backupPeakW(load);
+    if (peakW === null || !(peakW > 0)) {
+      toast.error(
+        loadSource === 'metered'
+          ? 'The metered peak for this node and window is not available, so the diesel baseline cannot be sized to the site. Read the meter above first.'
+          : 'The load profile has no positive demand, so there is nothing to size a backup against.'
+      );
       return;
     }
     run.mutate({
@@ -187,7 +211,7 @@ export default function DesignStudy() {
       ],
       backup: {
         kind: 'genset',
-        maxW: Math.max(...(load.length > 0 ? load : [10_000])) * 1.2,
+        maxW: peakW * 1.2,
         energyCostCentsPerKwh: Number(dieselCents),
         fuelLitresPerKwh: 0.33,
         emissionsGPerKwh: 800,

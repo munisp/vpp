@@ -92,10 +92,10 @@ export interface EconomicsInput {
   windCapexCentsPerKw?: number;
   batteryCapexCentsPerKwh?: number;
   inverterCapexCentsPerKw?: number;
-  backupCapexCents?: number;
+  backupCapexCentsPerKw?: number;
   fixedOpexPercentOfCapexPerYear?: number;
   batteryReplacementYear?: number;
-  batteryReplacementFraction?: number;
+  batteryReplacementCostFraction?: number;
 }
 
 export interface SweepInput {
@@ -395,13 +395,13 @@ function optimizerRequest(input: RunStudyInput, load: ProfileInput): OptimizerRe
     ['wind_capex_cents_per_kw', input.economics.windCapexCentsPerKw],
     ['battery_capex_cents_per_kwh', input.economics.batteryCapexCentsPerKwh],
     ['inverter_capex_cents_per_kw', input.economics.inverterCapexCentsPerKw],
-    ['backup_capex_cents', input.economics.backupCapexCents],
+    ['backup_capex_cents_per_kw', input.economics.backupCapexCentsPerKw],
     [
       'fixed_opex_percent_of_capex_per_year',
       input.economics.fixedOpexPercentOfCapexPerYear,
     ],
     ['battery_replacement_year', input.economics.batteryReplacementYear],
-    ['battery_replacement_fraction', input.economics.batteryReplacementFraction],
+    ['battery_replacement_cost_fraction', input.economics.batteryReplacementCostFraction],
   ];
   for (const [key, value] of optional) {
     if (value !== undefined) economics[key] = value;

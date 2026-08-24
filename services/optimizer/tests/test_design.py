@@ -124,6 +124,22 @@ class TestValidation:
                 battery_kwh=[float(step) for step in range(21)],
             )
 
+    def test_a_misspelled_assumption_is_refused_rather_than_defaulted(self):
+        # A key nobody reads would leave capex at its default and quietly change
+        # LCOE and payback, so the request is rejected instead.
+        with pytest.raises(ValidationError, match="backup_capex_cents"):
+            Economics(
+                discount_rate_percent=12.0,
+                project_years=20,
+                pv_capex_cents_per_kw=90_000.0,
+                battery_capex_cents_per_kwh=35_000.0,
+                backup_capex_cents=250_000.0,
+            )
+
+    def test_an_unknown_top_level_key_is_refused(self):
+        with pytest.raises(ValidationError, match="diesel_price"):
+            design_request(diesel_price=100.0)
+
     def test_a_partial_day_profile_is_refused(self):
         with pytest.raises(ValidationError, match="whole number of days"):
             design_request(

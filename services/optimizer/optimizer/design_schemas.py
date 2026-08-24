@@ -22,7 +22,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .schemas import SolveStatus
 
@@ -49,7 +49,18 @@ class DesignStatus(str, Enum):
     NO_FEASIBLE_CANDIDATE = "no_feasible_candidate"
 
 
-class LoadProfile(BaseModel):
+class RequestModel(BaseModel):
+    """Base for everything a caller sends.
+
+    Unknown keys are rejected rather than ignored: a misspelled assumption that
+    fell back to a default would change capex, LCOE and payback silently, and a
+    study is only worth what its inputs are known to be.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class LoadProfile(RequestModel):
     """Site demand. `source` is not cosmetic: a study run on a synthetic
     profile must not be read as a study of the site's measured demand."""
 
@@ -67,7 +78,7 @@ class LoadProfile(BaseModel):
         return self
 
 
-class ResourceProfile(BaseModel):
+class ResourceProfile(RequestModel):
     """Per-interval output of one unit of installed capacity, i.e. a capacity
     factor series. 1.0 means the array produces its nameplate in that hour."""
 
@@ -88,7 +99,7 @@ class ResourceProfile(BaseModel):
         return self
 
 
-class BackupSource(BaseModel):
+class BackupSource(RequestModel):
     """The dispatchable source that covers whatever the renewable plus storage
     cannot: a diesel genset, or a grid connection.
 
@@ -118,7 +129,7 @@ class BackupSource(BaseModel):
         return self
 
 
-class Economics(BaseModel):
+class Economics(RequestModel):
     """Costs and the discounting they are evaluated under. Every figure is a
     caller input: the service holds no cost library."""
 
@@ -146,7 +157,7 @@ class Economics(BaseModel):
         return self
 
 
-class SizingSweep(BaseModel):
+class SizingSweep(RequestModel):
     """The candidate sizings to evaluate. Explicit rather than a search range,
     so the same request always evaluates the same set."""
 
@@ -179,7 +190,7 @@ class SizingSweep(BaseModel):
         return self
 
 
-class DesignRequest(BaseModel):
+class DesignRequest(RequestModel):
     interval_minutes: int = Field(gt=0, le=1440)
     load: LoadProfile
     resources: list[ResourceProfile] = Field(min_length=1)

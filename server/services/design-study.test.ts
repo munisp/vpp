@@ -1,3 +1,7 @@
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
 import { describe, expect, it } from 'vitest';
 
 import { SCALES, inputDigest } from './design-study';
@@ -62,6 +66,47 @@ describe('design study input digest', () => {
 
   it('is a sha-256 hex digest, so it can be quoted in a report', () => {
     expect(inputDigest(request)).toMatch(/^[0-9a-f]{64}$/);
+  });
+});
+
+/**
+ * The optimizer ignores nothing it is sent any more, but this pair of files is
+ * where a silent mismatch used to be possible: an economics key spelled one way
+ * here and another way in the Python model was dropped, and the study answered
+ * on a default capex nobody stated. Read both sides and compare the names.
+ */
+describe('optimizer economics wire format', () => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const serviceSource = readFileSync(join(here, 'design-study.ts'), 'utf8');
+  const schemaSource = readFileSync(
+    join(here, '../../services/optimizer/optimizer/design_schemas.py'),
+    'utf8'
+  );
+
+  function sentEconomicsKeys(): string[] {
+    const body = serviceSource.slice(
+      serviceSource.indexOf('function optimizerRequest'),
+      serviceSource.indexOf('const sweep:')
+    );
+    return [...body.matchAll(/'([a-z0-9_]+)'/g)].map(match => match[1]);
+  }
+
+  function pythonEconomicsFields(): string[] {
+    const body = schemaSource.slice(
+      schemaSource.indexOf('class Economics('),
+      schemaSource.indexOf('class SizingSweep(')
+    );
+    return [...body.matchAll(/^ {4}([a-z0-9_]+):/gm)].map(match => match[1]);
+  }
+
+  it('sends only assumption names the optimizer declares', () => {
+    const declared = pythonEconomicsFields();
+    expect(declared).toContain('backup_capex_cents_per_kw');
+    expect(declared).toContain('battery_replacement_cost_fraction');
+
+    const sent = sentEconomicsKeys();
+    expect(sent.length).toBeGreaterThan(5);
+    expect(sent.filter(key => !declared.includes(key))).toEqual([]);
   });
 });
 

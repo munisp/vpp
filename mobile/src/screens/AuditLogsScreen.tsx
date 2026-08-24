@@ -98,7 +98,7 @@ export default function AuditLogsScreen() {
         </Text>
         <Text style={styles.logMetaText}>
           <Ionicons name="time-outline" size={12} color="#6b7280" />{' '}
-          {new Date(item.timestamp).toLocaleString()}
+          {new Date(item.createdAt).toLocaleString()}
         </Text>
       </View>
     </TouchableOpacity>
@@ -309,7 +309,7 @@ export default function AuditLogsScreen() {
               <View style={styles.detailRow}>
                 <Text style={styles.detailLabel}>Timestamp</Text>
                 <Text style={styles.detailValue}>
-                  {new Date(selectedLog.timestamp).toLocaleString()}
+                  {new Date(selectedLog.createdAt).toLocaleString()}
                 </Text>
               </View>
 

@@ -21,7 +21,7 @@ import unittest
 from unittest.mock import AsyncMock, MagicMock, patch, call
 
 # ---------------------------------------------------------------------------
-# Minimal stubs so we can import main.py without real Temporal / MySQL
+# Minimal stubs so we can import main.py without real Temporal / PostgreSQL
 # ---------------------------------------------------------------------------
 
 # Stub temporalio

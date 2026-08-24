@@ -229,6 +229,9 @@ importers:
       openai:
         specifier: ^4.67.0
         version: 4.104.0(ws@8.18.3)(zod@4.1.12)
+      openpaygo:
+        specifier: 0.0.6
+        version: 0.0.6
       parquetjs:
         specifier: ^0.11.2
         version: 0.11.2
@@ -1985,6 +1988,9 @@ packages:
     engines: {node: '>=10.0'}
     peerDependencies:
       tslib: '2'
+
+  '@juanelas/base64@1.1.5':
+    resolution: {integrity: sha512-mjAF27LzwfYobdwqnxZgeucbKT5wRRNvILg3h5OvCWK+3F7mw/A1tnjHnNiTYtLmTvT/bM1jA5AX7eQawDGs1w==}
 
   '@medv/finder@4.0.2':
     resolution: {integrity: sha512-RraNY9SCcx4KZV0Dh6BEW6XEW2swkqYca74pkFFRw6hHItSHiy+O/xMnpbofjYbzXj0tSpBGthUF1hHTsr3vIQ==}
@@ -3910,6 +3916,9 @@ packages:
   basic-ftp@5.3.1:
     resolution: {integrity: sha512-bopVNp6ugyA150DDuZfPFdt1KZ5a94ZDiwX4hMgZDzF+GttD80lEy8kj98kbyhLXnPvhtIo93mdnLIjpCAeeOw==}
     engines: {node: '>=10.0.0'}
+
+  bigint-conversion@2.4.3:
+    resolution: {integrity: sha512-eM76IXlhXQD6HAoE6A7QLQ3jdC04EJdjH3zrlU1Jtt4/jj+O/pMGjGR5FY8/55FOIBsK25kly0RoG4GA4iKdvg==}
 
   bindings@1.2.1:
     resolution: {integrity: sha512-u4cBQNepWxYA55FunZSM7wMi55yQaN0otnhhilNoWHq0MfOfJeQx0v0mRRpolGOExPjZcl6FtB0BB8Xkb88F0g==}
@@ -5951,6 +5960,10 @@ packages:
         optional: true
       zod:
         optional: true
+
+  openpaygo@0.0.6:
+    resolution: {integrity: sha512-RcFp0+qu7MWv7fbjNIm5XgO8LIqa1ARVpF9GsiOJDJY6snUoLE/QJM+l7yLch+vA29Vu//xJj0t8XZPOOeIFvQ==}
+    engines: {node: '>=18.19.0'}
 
   own-keys@1.0.1:
     resolution: {integrity: sha512-qFOyK5PjiWZd+QQIh+1jhdb9LpxTF0qs7Pm8o5QHYZ0M3vKqSqzsZaEB6oWlxZ+q2sJBMI/Ktgd2N5ZwQoRHfg==}
@@ -9702,6 +9715,8 @@ snapshots:
       '@jsonjoy.com/codegen': 1.0.0(tslib@2.8.1)
       tslib: 2.8.1
 
+  '@juanelas/base64@1.1.5': {}
+
   '@medv/finder@4.0.2': {}
 
   '@mermaid-js/parser@0.6.3':
@@ -11961,6 +11976,10 @@ snapshots:
 
   basic-ftp@5.3.1:
     optional: true
+
+  bigint-conversion@2.4.3:
+    dependencies:
+      '@juanelas/base64': 1.1.5
 
   bindings@1.2.1:
     optional: true
@@ -14443,6 +14462,11 @@ snapshots:
       zod: 4.1.12
     transitivePeerDependencies:
       - encoding
+
+  openpaygo@0.0.6:
+    dependencies:
+      bigint-conversion: 2.4.3
+      buffer: 6.0.3
 
   own-keys@1.0.1:
     dependencies:

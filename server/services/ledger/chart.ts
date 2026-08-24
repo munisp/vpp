@@ -140,6 +140,7 @@ export const TRANSFER_CODES: Record<string, number> = {
   buyer_payment_captured: 1,
   member_payout_settled: 2,
   buyer_payment_reversed: 3,
+  prepaid_credit_purchased: 4,
 };
 
 export function describeAccount(ref: AccountRef): string {

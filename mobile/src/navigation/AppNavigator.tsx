@@ -37,6 +37,7 @@ import ForecastAccuracyScreen from '../screens/ForecastAccuracyScreen';
 import PriceSignalsScreen from '../screens/PriceSignalsScreen';
 import CommunityTelemetryScreen from '../screens/CommunityTelemetryScreen';
 import ResilienceScreen from '../screens/ResilienceScreen';
+import PrepaidEnergyScreen from '../screens/PrepaidEnergyScreen';
 import DigitalTwinScreen from '../screens/DigitalTwinScreen';
 import LocationalFlexibilityScreen from '../screens/LocationalFlexibilityScreen';
 import MatterLoadsScreen from '../screens/MatterLoadsScreen';
@@ -178,6 +179,7 @@ export default function AppNavigator() {
       <Stack.Screen name="PriceSignals" component={PriceSignalsScreen} />
       <Stack.Screen name="CommunityTelemetry" component={CommunityTelemetryScreen} />
       <Stack.Screen name="Resilience" component={ResilienceScreen} />
+      <Stack.Screen name="PrepaidEnergy" component={PrepaidEnergyScreen} />
       <Stack.Screen name="DigitalTwin" component={DigitalTwinScreen} />
       <Stack.Screen name="LocationalFlexibility" component={LocationalFlexibilityScreen} />
       <Stack.Screen name="MatterLoads" component={MatterLoadsScreen} />

@@ -77,6 +77,7 @@ import V2G from "@/pages/V2G";
 import Wallet from "@/pages/Wallet";
 import CommunityPools from "@/pages/CommunityPools";
 import MicrogridResilience from "@/pages/MicrogridResilience";
+import PrepaidEnergy from "@/pages/PrepaidEnergy";
 import DRForecast from "@/pages/DRForecast";
 import SmsCenter from "@/pages/SmsCenter";
 import SolarYield from "@/pages/SolarYield";
@@ -310,6 +311,7 @@ function Router() {
       <Route path="/grid/compliance-reports" component={ComplianceReports} />
       <Route path="/community-pools" component={CommunityPools} />
       <Route path="/community/resilience" component={MicrogridResilience} />
+      <Route path="/money/prepaid" component={PrepaidEnergy} />
       <Route path="/sms-center" component={SmsCenter} />
       <Route path="/energy-analytics" component={Analytics} />
       <Route path="/404" component={NotFound} />

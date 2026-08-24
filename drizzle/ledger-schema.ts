@@ -68,6 +68,14 @@ export const ledgerPostingKindEnum = pgEnum('ledger_posting_kind', [
   'member_payout_settled',
   /** A confirmed payment was reversed by the provider. */
   'buyer_payment_reversed',
+  /**
+   * A prepaid customer's confirmed payment for energy they have not taken yet:
+   * the funds sit at the gateway and the platform owes them that energy. The
+   * matching consumption is deliberately not posted — energy taken is measured in
+   * watt-hours, and converting each meter reading to minor units would post a
+   * rounding residue as revenue.
+   */
+  'prepaid_credit_purchased',
 ]);
 
 /**

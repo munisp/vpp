@@ -7,6 +7,7 @@ import {
   serial,
   text,
   timestamp,
+  uniqueIndex,
   varchar,
 } from "drizzle-orm/pg-core";
 
@@ -286,20 +287,28 @@ export type InsertPayment = typeof payments.$inferInsert;
 /**
  * Tokens table - stores prepaid electricity tokens
  */
-export const tokens = pgTable("tokens", {
-  id: serial("id").primaryKey(),
-  userId: int("userId").notNull(),
-  paymentId: int("paymentId").notNull(),
-  tokenCode: varchar("tokenCode", { length: 50 }).notNull().unique(),
-  energyKwh: int("energyKwh").notNull(),
-  amount: int("amount").notNull(), // in cents
-  validUntil: timestamp("validUntil").notNull(),
-  status: tokensStatusEnum("status").default("active").notNull(),
-  usedAt: timestamp("usedAt"),
-  metadata: text("metadata"),
-  createdAt: timestamp("createdAt").defaultNow().notNull(),
-  updatedAt: timestamp("updatedAt").defaultNow().$onUpdate(() => new Date()).notNull(),
-});
+export const tokens = pgTable(
+  "tokens",
+  {
+    id: serial("id").primaryKey(),
+    userId: int("userId").notNull(),
+    paymentId: int("paymentId").notNull(),
+    tokenCode: varchar("tokenCode", { length: 50 }).notNull(),
+    energyKwh: int("energyKwh").notNull(),
+    amount: int("amount").notNull(), // in cents
+    validUntil: timestamp("validUntil").notNull(),
+    status: tokensStatusEnum("status").default("active").notNull(),
+    usedAt: timestamp("usedAt"),
+    metadata: text("metadata"),
+    createdAt: timestamp("createdAt").defaultNow().notNull(),
+    updatedAt: timestamp("updatedAt").defaultNow().$onUpdate(() => new Date()).notNull(),
+  },
+  // A meter token is unique to the device that will accept it, not to the world:
+  // two customers' meters can legitimately be handed the same digits. The code is
+  // therefore unique per customer, so one customer's vend cannot displace
+  // another's or be looked up by them.
+  (table) => [uniqueIndex("tokens_user_code_unique").on(table.userId, table.tokenCode)]
+);
 
 export type Token = typeof tokens.$inferSelect;
 export type InsertToken = typeof tokens.$inferInsert;

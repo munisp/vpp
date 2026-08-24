@@ -4,6 +4,7 @@ import { TRPCError } from '@trpc/server';
 import * as db from '../db';
 import * as notifications from '../_core/notifications';
 import * as paymentGateway from '../_core/paymentGateway';
+import { issuePrepaidTokenForPayment } from '../services/prepaid-issuance-entry';
 import { payments, tokens, billings } from '../../drizzle/schema';
 import { eq, desc, and, inArray, sql } from 'drizzle-orm';
 
@@ -294,48 +295,67 @@ export const paymentsRouter = router({
               });
             }
 
-            let tokenCode: string;
-            try {
-              tokenCode = paymentGateway.generateSTSToken(energyKwh, payment.amount);
-            } catch (stsError) {
-              if (stsError instanceof Error && stsError.message === 'STS_VENDING_NOT_CONFIGURED') {
-                // No STS vending provider configured: record the owed token as
-                // pending issuance instead of fabricating a token code.
+            // Prepaid vending goes through the prepaid account layer first: it
+            // posts the purchase to the ledger and vends an OpenPAYGO token the
+            // customer's meter accepts, and it is idempotent per payment. The
+            // legacy STS path below is only reached when this payment has no
+            // prepaid account behind it.
+            const prepaid = await issuePrepaidTokenForPayment({
+              paymentId: payment.id,
+              issuedBy: ctx.user.id,
+            });
+            if (prepaid.issued) {
+              const vended = await db.getTokenByPaymentId(payment.id);
+              if (vended) {
+                token = vended;
+              }
+            }
+
+            if (token === null) {
+              try {
+                const tokenCode = paymentGateway.generateSTSToken(energyKwh, payment.amount);
                 token = await db.createToken({
                   userId: ctx.user.id,
                   paymentId: payment.id,
-                  tokenCode: `PENDING_ISSUANCE_${payment.id}`,
+                  tokenCode,
                   energyKwh,
                   amount: payment.amount,
                   validUntil: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000), // 1 year
-                  status: 'pending_issuance',
+                  status: 'active',
                 });
+              } catch (stsError) {
+                if (stsError instanceof Error && stsError.message === 'STS_VENDING_NOT_CONFIGURED') {
+                  // Neither a prepaid account nor an STS provider: the energy is
+                  // owed and recorded as unissued, with the prepaid layer's own
+                  // reason, instead of a token code nobody vended.
+                  token = await db.createToken({
+                    userId: ctx.user.id,
+                    paymentId: payment.id,
+                    tokenCode: `PENDING_ISSUANCE_${payment.id}`,
+                    energyKwh,
+                    amount: payment.amount,
+                    validUntil: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000), // 1 year
+                    status: 'pending_issuance',
+                  });
 
-                await notifications.sendPushNotification({
-                  userId: ctx.user.id,
-                  title: 'Token Pending Issuance',
-                  body: `Your payment was confirmed. Your ${energyKwh} kWh token will be delivered once it is vended by the provider.`,
-                  data: { paymentId: String(payment.id), type: 'token_pending_issuance' },
-                });
+                  await notifications.sendPushNotification({
+                    userId: ctx.user.id,
+                    title: 'Token Pending Issuance',
+                    body: `Your payment was confirmed. Your ${energyKwh} kWh token will be delivered once it is vended by the provider.`,
+                    data: { paymentId: String(payment.id), type: 'token_pending_issuance' },
+                  });
 
-                return {
-                  success: true,
-                  message: 'Payment verified successfully. Your token is pending issuance and will be delivered once vended.',
-                  token,
-                };
+                  return {
+                    success: true,
+                    message: prepaid.retryScheduled
+                      ? `Payment verified. The token has not been vended yet (${prepaid.reason}); issuance is being retried.`
+                      : `Payment verified. The token has not been vended (${prepaid.reason ?? 'no vending provider is configured'}) and will be delivered once it is.`,
+                    token,
+                  };
+                }
+                throw stsError;
               }
-              throw stsError;
             }
-
-            token = await db.createToken({
-              userId: ctx.user.id,
-              paymentId: payment.id,
-              tokenCode,
-              energyKwh,
-              amount: payment.amount,
-              validUntil: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000), // 1 year
-              status: 'active',
-            });
           }
 
           // Send notifications
@@ -437,14 +457,34 @@ export const paymentsRouter = router({
         // A payment issues exactly one token; a second call returns the token
         // that was already vended rather than issuing free energy.
         const alreadyIssued = await db.getTokenByPaymentId(payment.id);
+        if (alreadyIssued && alreadyIssued.status !== 'pending_issuance') {
+          return {
+            success: true,
+            token: alreadyIssued,
+            message: 'Token already issued for this payment.',
+          };
+        }
+
+        // A row still reading `pending_issuance` is an obligation, not a token,
+        // so this is the retry: prepaid vending is attempted (again) and, if it
+        // succeeds, that placeholder becomes the real code.
+        const prepaid = await issuePrepaidTokenForPayment({
+          paymentId: payment.id,
+          issuedBy: ctx.user.id,
+        });
+        if (prepaid.issued) {
+          const vended = await db.getTokenByPaymentId(payment.id);
+          if (vended) {
+            return { success: true, token: vended, message: 'Token issued for this payment.' };
+          }
+        }
         if (alreadyIssued) {
           return {
             success: true,
             token: alreadyIssued,
-            message:
-              alreadyIssued.status === 'pending_issuance'
-                ? 'Token is pending issuance and will be delivered once vended by the STS provider.'
-                : 'Token already issued for this payment.',
+            message: prepaid.retryScheduled
+              ? `Not vended yet (${prepaid.reason}); issuance is being retried.`
+              : `Not vended (${prepaid.reason ?? 'no vending provider is configured'}). The energy stays owed until it is.`,
           };
         }
 
@@ -515,9 +555,9 @@ export const paymentsRouter = router({
     .input(z.object({ tokenCode: z.string() }))
     .query(async ({ ctx, input }) => {
       try {
-        const token = await db.getTokenByCode(input.tokenCode);
-        
-        if (!token || token.userId !== ctx.user.id) {
+        const token = await db.getTokenByCode(input.tokenCode, ctx.user.id);
+
+        if (!token) {
           throw new TRPCError({
             code: 'NOT_FOUND',
             message: 'Token not found.',

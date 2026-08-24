@@ -21,3 +21,4 @@ export { eventStreamRouter } from './event-stream';
 export { lakehouseRouter } from './lakehouse';
 export { diagnosticsRouter } from './diagnostics';
 export { modelHealthRouter } from './model-health';
+export { prepaidRouter } from './prepaid';

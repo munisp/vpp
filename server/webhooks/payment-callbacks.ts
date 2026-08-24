@@ -12,6 +12,7 @@ import { payments, billings, paymentGatewayLogs, tokens, users } from '../../dri
 import { eq, and } from 'drizzle-orm';
 import { sendPushNotification } from '../_core/sendNotification';
 import { resolveGatewayEnvironment } from '../payment-gateways/environment';
+import { issuePrepaidTokenForPayment } from '../services/prepaid-issuance-entry';
 
 // Environment configuration - single authoritative source, never a request value
 const PAYMENTS_ENV = resolveGatewayEnvironment();
@@ -311,15 +312,31 @@ async function executePostPaymentActions(
         }
 
         const existing = await db
-          .select({ id: tokens.id })
+          .select({ id: tokens.id, status: tokens.status })
           .from(tokens)
           .where(eq(tokens.paymentId, payment.id))
           .limit(1);
 
-        if (existing.length > 0) {
+        if (existing.length > 0 && existing[0].status !== 'pending_issuance') {
           console.log(`[PostPayment] Token already recorded for payment ${payment.id}`);
           break;
         }
+
+        // Vend through the prepaid account layer when the payer has one: it posts
+        // the purchase to the ledger and produces a code the customer's meter
+        // accepts. Idempotent per payment, so a replayed callback returns the
+        // token already vended rather than issuing a second one.
+        const prepaid = await issuePrepaidTokenForPayment({ paymentId: payment.id });
+        if (prepaid.issued) {
+          console.log(`[PostPayment] Vended prepaid token for payment ${payment.id}`);
+          break;
+        }
+        console.log(
+          `[PostPayment] Payment ${payment.id} not vended (${prepaid.reason ?? 'no prepaid account'}); ` +
+            `retry scheduled: ${prepaid.retryScheduled}`
+        );
+
+        if (existing.length > 0) break;
 
         await db.insert(tokens).values({
           userId: payment.userId,

@@ -24,9 +24,19 @@ import {
   alerts,
 } from "../../drizzle/schema";
 import { smsCommandLog, type InsertSmsCommandLog } from "../../drizzle/trust-access-schema";
+import { prepaidAccounts, prepaidTokens } from "../../drizzle/prepaid-schema";
+import { prepaidBalance } from "./prepaid-accounting";
 import { sendSMS } from "../_core/notifications";
 
-export type SmsCommand = "BALANCE" | "STATUS" | "TOKEN_LAST" | "OUTAGE" | "HELP" | "UNKNOWN";
+export type SmsCommand =
+  | "BALANCE"
+  | "STATUS"
+  | "TOKEN_LAST"
+  | "TOKEN_RESEND"
+  | "PREPAID_CREDIT"
+  | "OUTAGE"
+  | "HELP"
+  | "UNKNOWN";
 
 export interface SmsProcessResult {
   logId: number | null;
@@ -61,7 +71,11 @@ export function parseCommand(text: string): SmsCommand {
   const t = text.trim().toUpperCase().replace(/\s+/g, " ");
   if (t === "BALANCE" || t === "BAL") return "BALANCE";
   if (t === "STATUS") return "STATUS";
+  // Resend is matched before the bare TOKEN commands so "TOKEN RESEND" is not
+  // read as a request for the last token.
+  if (t === "TOKEN RESEND" || t === "RESEND" || t === "RESEND TOKEN") return "TOKEN_RESEND";
   if (t === "TOKEN LAST" || t === "TOKEN" || t === "LAST TOKEN") return "TOKEN_LAST";
+  if (t === "CREDIT" || t === "UNITS" || t === "PREPAID") return "PREPAID_CREDIT";
   if (t === "OUTAGE" || t.startsWith("OUTAGE ")) return "OUTAGE";
   if (t === "HELP" || t === "") return "HELP";
   return "UNKNOWN";
@@ -174,6 +188,9 @@ async function buildTokenLastReply(userId: number): Promise<string> {
   const db = await getDb();
   if (!db) throw new Error("Database not available");
 
+  const vend = await latestPrepaidVend(userId);
+  if (vend) return describeVend(vend);
+
   const rows = await db
     .select()
     .from(tokens)
@@ -199,6 +216,102 @@ async function buildTokenLastReply(userId: number): Promise<string> {
     ? new Date(token.usedAt).toISOString().slice(0, 10)
     : new Date(token.validUntil).toISOString().slice(0, 10);
   return `VPP Token: your last token (${token.energyKwh} kWh) is ${token.status.toUpperCase()} as of ${when}. Buy new credit to receive a fresh token.`;
+}
+
+/**
+ * The customer's newest prepaid vend, if they have a prepaid account.
+ *
+ * Prepaid tokens are the vends that actually came from the OpenPAYGO encoder, so
+ * they are preferred over the legacy `tokens` rows, which may still hold a
+ * `PENDING_ISSUANCE_<id>` placeholder from before a vending keyring existed.
+ */
+async function latestPrepaidVend(userId: number): Promise<{
+  code: string;
+  energyWh: number;
+  status: "issued" | "redeemed" | "void";
+  redeemedAt: Date | null;
+} | null> {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+
+  const rows = await db
+    .select({
+      code: prepaidTokens.tokenCode,
+      energyWh: prepaidTokens.energyWh,
+      status: prepaidTokens.status,
+      redeemedAt: prepaidTokens.redeemedAt,
+    })
+    .from(prepaidTokens)
+    .innerJoin(prepaidAccounts, eq(prepaidTokens.accountId, prepaidAccounts.id))
+    .where(eq(prepaidAccounts.userId, userId))
+    .orderBy(desc(prepaidTokens.issuedAt))
+    .limit(1);
+
+  return rows[0] ?? null;
+}
+
+function describeVend(vend: {
+  code: string;
+  energyWh: number;
+  status: "issued" | "redeemed" | "void";
+  redeemedAt: Date | null;
+}): string {
+  const kwh = (vend.energyWh / 1000).toFixed(2);
+  if (vend.status === "issued") {
+    return `VPP Token: ${vend.code}. Energy: ${kwh} kWh. Enter it on your meter.`;
+  }
+  if (vend.status === "redeemed") {
+    const when = vend.redeemedAt ? new Date(vend.redeemedAt).toISOString().slice(0, 10) : "an earlier date";
+    return `VPP Token: your last token (${kwh} kWh) was already entered on ${when} and cannot be used again. Buy credit to receive a new token.`;
+  }
+  return `VPP Token: your last token (${kwh} kWh) was cancelled and cannot be used. Contact your VPP agent.`;
+}
+
+/** TOKEN RESEND: re-send the last vended code. Never vends a new one. */
+async function buildTokenResendReply(userId: number): Promise<string> {
+  const vend = await latestPrepaidVend(userId);
+  if (!vend) {
+    return "VPP Token: there is no token on your prepaid account to resend. Buy credit via M-Pesa/Airtel/Tigo to receive one.";
+  }
+  return describeVend(vend);
+}
+
+/**
+ * CREDIT: prepaid energy credit.
+ *
+ * Remaining credit is only stated where a meter measures it. On an account with
+ * no meter integration the reply says the platform cannot see what is left,
+ * rather than quoting the credited total as if it were the remaining balance.
+ */
+async function buildPrepaidCreditReply(userId: number): Promise<string> {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+
+  const accounts = await db
+    .select()
+    .from(prepaidAccounts)
+    .where(eq(prepaidAccounts.userId, userId))
+    .orderBy(desc(prepaidAccounts.id))
+    .limit(3);
+
+  if (accounts.length === 0) {
+    return "VPP Credit: no prepaid meter is registered to your account. Contact your VPP agent to enrol your meter.";
+  }
+
+  const parts = accounts.map((account) => {
+    const balance = prepaidBalance({
+      creditedWh: account.creditedWh,
+      consumedWh: account.consumedWh,
+      meterIntegrated: account.meterAssetId !== null,
+    });
+    const credited = (balance.creditedWh / 1000).toFixed(2);
+    if (balance.remainingWh === null) {
+      return `${account.meterSerial}: ${credited} kWh bought; remaining unknown (no meter reading reaching the platform)`;
+    }
+    return `${account.meterSerial}: ${(balance.remainingWh / 1000).toFixed(2)} kWh left of ${credited} kWh bought`;
+  });
+
+  return `VPP Credit: ${parts.join("; ")}.`;
 }
 
 /** OUTAGE: persist a real outage alert row for operations follow-up. */
@@ -230,6 +343,8 @@ function buildHelpReply(): string {
     "BALANCE - wallet balance",
     "STATUS - your system status",
     "TOKEN LAST - your last prepaid token",
+    "TOKEN RESEND - resend that token",
+    "CREDIT - prepaid energy left",
     "OUTAGE - report a power outage",
     "HELP - this message",
   ].join(" ");
@@ -272,6 +387,16 @@ export async function processInboundSms(params: {
     case "TOKEN_LAST":
       reply = userId != null
         ? await buildTokenLastReply(userId)
+        : "VPP: phone number not linked to an account. Please register via the VPP app or your agent.";
+      break;
+    case "TOKEN_RESEND":
+      reply = userId != null
+        ? await buildTokenResendReply(userId)
+        : "VPP: phone number not linked to an account. Please register via the VPP app or your agent.";
+      break;
+    case "PREPAID_CREDIT":
+      reply = userId != null
+        ? await buildPrepaidCreditReply(userId)
         : "VPP: phone number not linked to an account. Please register via the VPP app or your agent.";
       break;
     case "OUTAGE":

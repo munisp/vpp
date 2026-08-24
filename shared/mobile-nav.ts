@@ -76,6 +76,12 @@ export const MOBILE_NAV_GROUPS: MobileNavGroup[] = [
         icon: '🛡️',
         keywords: ['island', 'autonomy', 'critical', 'backup', 'outage', 'clinic'],
       },
+      {
+        screen: 'ServiceReliability',
+        label: 'Supply Reliability',
+        icon: '📉',
+        keywords: ['saidi', 'saifi', 'outage', 'interruption', 'availability'],
+      },
       { screen: 'Gamification', label: 'Rewards', icon: '🏆' },
       { screen: 'QRPayment', label: 'QR Payment', icon: '📷' },
       { screen: 'QRDeviceRegistration', label: 'Register Device', icon: '📲' },

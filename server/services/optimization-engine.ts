@@ -22,6 +22,7 @@ import {
   MilpDispatchResponse,
   MilpOptimizerError,
   assertMilpOptimizerConfigured,
+  checkPlanAgainstNetwork,
   isMilpOptimizerConfigured,
   solveMilpDispatch,
 } from './milp-dispatch';
@@ -337,6 +338,35 @@ export class OptimizationEngine {
     // heuristic schedule stored under the optimizer's name.
     await requireCapability('optimizer_dispatch');
     const result = await solveMilpDispatch(milpRequest);
+
+    // Optimal against prices is not the same as carryable by the wires. A plan
+    // that overloads an element is refused outright; a plan that could not be
+    // checked is issued, but the schedule says so rather than implying the
+    // network was consulted.
+    const network = await checkPlanAgainstNetwork(result, {
+      assetIds: eligible.map(asset => asset.assetId),
+      subjectReference: `dispatch:${this.siteIdFor(request)}`,
+    });
+    if (network.status === 'violations') {
+      throw new MilpOptimizerError(
+        `refusing to issue this plan: ${
+          network.limitingElement ?? 'an element'
+        } is over its limit in interval ${network.intervalIndex ?? 0}` +
+          (network.worst
+            ? ` (${network.worst.value.toFixed(1)} against ${network.worst.limit.toFixed(1)}, ${
+                network.worst.kind
+              })`
+            : '')
+      );
+    }
+    if (!network.checked) {
+      warnings.push(
+        `network-unchecked (${network.status}): ${
+          network.reason ?? 'no feasibility study was produced'
+        } — this schedule has not been shown to be within network limits`
+      );
+    }
+
     return {
       setpoints: this.milpSetpoints(result, request, assets, contexts, scheduleStart, intervalMinutes),
       solver: result.solver,

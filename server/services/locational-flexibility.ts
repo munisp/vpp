@@ -32,6 +32,12 @@ import {
   gridNodes,
 } from '../../drizzle/locational-flexibility-schema';
 import { recordDegradedAction, requireCapability } from './degraded-operation';
+import {
+  studyFeasibility,
+  worstViolation,
+  type CandidateChange,
+  type FeasibilityStatus,
+} from './network-feasibility';
 import { settlementLedger } from './settlement-ledger';
 import type { SqlRow } from '../sql-row';
 
@@ -444,6 +450,26 @@ export async function clearRequirement(
     });
   }
 
+  // The wires get a say before the money does. Awards that would push an element
+  // past its rating are refused naming that element; awards cleared while the
+  // network could not be checked are kept, but stamped so nobody later reads
+  // them as network-approved.
+  const network = await networkCheckForClearing({
+    requirementId,
+    nodeId: requirement.nodeId,
+    direction: requirement.direction as FlexibilityDirection,
+    awards,
+  });
+  for (const refusal of network.refused) {
+    const index = awards.findIndex(award => award.offerId === refusal.offerId);
+    if (index === -1) continue;
+    const [dropped] = awards.splice(index, 1);
+    remaining += dropped.awardedPowerW;
+    ineligible.push({ offerId: dropped.offerId, assetId: dropped.assetId, reason: refusal.reason });
+  }
+  // The clearing price is the last award still standing, not the last one priced.
+  clearingPrice = awards.length > 0 ? awards[awards.length - 1].priceCentsPerKwh : null;
+
   for (const award of awards) {
     await db.insert(flexibilityAwards).values({
       requirementId,
@@ -452,6 +478,8 @@ export async function clearRequirement(
       userId: award.userId,
       awardedPowerW: award.awardedPowerW,
       priceCentsPerKwh: award.priceCentsPerKwh,
+      networkCheckStatus: network.status,
+      networkStudyId: network.studyId,
     });
     await db
       .update(flexibilityOffers)
@@ -494,6 +522,134 @@ export async function clearRequirement(
     ineligible,
     notAwarded,
   };
+}
+
+/**
+ * Signed candidate injection an award represents, watts.
+ *
+ * Telemetry and the feasibility service are both generation-positive, so
+ * reducing import and increasing export are the same arithmetic: net injection
+ * rises. Reducing export lowers it.
+ */
+export function awardCandidateDeltaW(
+  direction: FlexibilityDirection,
+  awardedPowerW: number
+): number {
+  return direction === 'import_reduction' ? awardedPowerW : -awardedPowerW;
+}
+
+export interface ClearingNetworkCheck {
+  /**
+   * What the network check amounted to; anything but `feasible` means the awards
+   * are network-unchecked. Null only when there was nothing to check.
+   */
+  status: FeasibilityStatus | null;
+  studyId: number | null;
+  refused: { offerId: number; reason: string }[];
+}
+
+/**
+ * Check a merit-order award list against the network, one award at a time.
+ *
+ * Incremental on purpose: a single study over all awards can say the feeder is
+ * overloaded but not which award overloaded it, and refusing the whole clearing
+ * because the marginal 3 kW broke a transformer would deny relief the operator
+ * asked for. Cheapest first, each award admitted only if it introduces no
+ * violation the base case did not already have — a feeder already over its
+ * voltage band is not the fault of the award that turns load down.
+ *
+ * Where the study cannot be run at all, every award is admitted and the caller
+ * stamps them with why they are unchecked. Refusing the market because the
+ * feasibility service is down would be its own outage.
+ */
+async function networkCheckForClearing(input: {
+  requirementId: number;
+  nodeId: number;
+  direction: FlexibilityDirection;
+  awards: ClearingResult['awards'];
+}): Promise<ClearingNetworkCheck> {
+  if (input.awards.length === 0) {
+    return { status: null, studyId: null, refused: [] };
+  }
+
+  const subjectReference = `requirement:${input.requirementId}`;
+  const base = await studyFeasibility({
+    subject: 'flexibility_clearing',
+    subjectReference,
+    nodeId: input.nodeId,
+  });
+  if (base.status !== 'feasible' && base.status !== 'violations') {
+    return { status: base.status, studyId: base.studyId, refused: [] };
+  }
+  const preExisting = new Set(base.violations.map(violation => violation.element));
+
+  const admitted: CandidateChange[] = [];
+  const refused: { offerId: number; reason: string }[] = [];
+  let lastStudyId = base.studyId;
+
+  for (const award of input.awards) {
+    const candidate: CandidateChange[] = [
+      ...admitted,
+      {
+        bus: '',
+        delta_p_w: awardCandidateDeltaW(input.direction, award.awardedPowerW),
+        reference: `award-offer-${award.offerId}`,
+      },
+    ];
+    const trial = await studyFeasibility({
+      subject: 'flexibility_clearing',
+      subjectReference,
+      nodeId: input.nodeId,
+      candidate: await withNodeBus(input.nodeId, candidate),
+    });
+    lastStudyId = trial.studyId;
+    if (trial.status !== 'feasible' && trial.status !== 'violations') {
+      // The service answered for the base case and then stopped answering. The
+      // awards already admitted stay admitted, the rest are unchecked, and the
+      // status says so rather than implying the remainder passed.
+      return { status: trial.status, studyId: trial.studyId, refused };
+    }
+    const introduced = trial.violations.filter(
+      violation => !preExisting.has(violation.element)
+    );
+    const worst = worstViolation(introduced);
+    if (worst !== null) {
+      refused.push({
+        offerId: award.offerId,
+        reason: `Refused on network grounds: ${worst.element} would reach ${worst.value.toFixed(
+          1
+        )} against a limit of ${worst.limit.toFixed(1)} (${worst.kind})`,
+      });
+      continue;
+    }
+    admitted.push(candidate[candidate.length - 1]);
+  }
+
+  return { status: 'feasible', studyId: lastStudyId, refused };
+}
+
+/**
+ * Put the node's own bus code on each candidate change.
+ *
+ * The market speaks in node ids and the solver in bus codes; they are the same
+ * places (`grid_nodes` is the bus table), so this is a lookup rather than a
+ * mapping that could drift.
+ */
+async function withNodeBus(
+  nodeId: number,
+  candidate: CandidateChange[]
+): Promise<CandidateChange[]> {
+  const db = await requireDb();
+  const rows = await db
+    .select({ code: gridNodes.code })
+    .from(gridNodes)
+    .where(eq(gridNodes.id, nodeId))
+    .limit(1);
+  const code = rows[0]?.code;
+  if (code === undefined) {
+    throw new LocationalFlexibilityError(`Unknown grid node ${nodeId}`);
+  }
+  return candidate.map(change => ({ ...change, bus: change.bus === '' ? code : change.bus }));
 }
 
 /** The single reason an offer cannot be cleared, or null when it can. */

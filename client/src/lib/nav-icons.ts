@@ -78,6 +78,7 @@ export const NAV_ICONS: Record<string, LucideIcon> = {
   '/v2g': CalendarClock,
   '/grid/price-signals': Coins,
   '/grid/locational-flexibility': MapPin,
+  '/grid/network-feasibility': Network,
   '/grid/forecast-accuracy': Target,
   '/grid/anomalies': AlertTriangle,
   '/grid/dr-forecast': CloudSun,

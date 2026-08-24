@@ -7,7 +7,17 @@
  * a heuristic and present the result as optimized.
  */
 
+import { inArray, eq } from 'drizzle-orm';
+
+import { getDb } from '../db';
+import { gridNodeAssets, gridNodes } from '../../drizzle/locational-flexibility-schema';
 import { observing } from './degraded-operation';
+import {
+  studyFeasibility,
+  worstViolation,
+  type FeasibilityStatus,
+  type FeasibilityViolation,
+} from './network-feasibility';
 
 export type MilpObjective =
   | 'minimize_cost'
@@ -238,6 +248,151 @@ export async function solveMilpDispatch(
     );
   }
   return result;
+}
+
+/**
+ * The network verdict on a solved plan.
+ *
+ * `no_linked_node` is separate from `model_unavailable`: the first says the
+ * platform does not know where these assets are on the network, the second says
+ * it knows where they are but not what the network there is made of. Both leave
+ * the plan network-unchecked, and neither may be reported as a plan the network
+ * can carry.
+ */
+export interface PlanNetworkCheck {
+  status: FeasibilityStatus | 'no_linked_node';
+  /** True only for a solved study inside every limit. */
+  checked: boolean;
+  studyId: number | null;
+  nodeCode: string | null;
+  reason: string | null;
+  limitingElement: string | null;
+  violations: FeasibilityViolation[];
+  /** The violation furthest past its limit, when there is one. */
+  worst: FeasibilityViolation | null;
+  /** Interval index the study was run for: the plan's heaviest. */
+  intervalIndex: number | null;
+}
+
+/**
+ * Check a solved plan against the network it would run over.
+ *
+ * The whole horizon is not solved bus-by-bus: the binding case is the interval
+ * where the plan pushes the most power through a node, so that interval is the
+ * one studied, per node. A plan that survives its own worst interval survives
+ * the rest; a plan that fails it must not be issued whichever other intervals
+ * are comfortable.
+ */
+export async function checkPlanAgainstNetwork(
+  plan: MilpDispatchResponse,
+  options: { assetIds: number[]; subjectReference?: string }
+): Promise<PlanNetworkCheck> {
+  const empty = {
+    checked: false,
+    studyId: null,
+    nodeCode: null,
+    limitingElement: null,
+    violations: [] as FeasibilityViolation[],
+    worst: null,
+    intervalIndex: null,
+  };
+  if (options.assetIds.length === 0) {
+    return {
+      ...empty,
+      status: 'no_linked_node',
+      reason: 'the plan contains no assets to locate on the network',
+    };
+  }
+
+  const located = await nodesForAssets(options.assetIds);
+  if (located.size === 0) {
+    return {
+      ...empty,
+      status: 'no_linked_node',
+      reason:
+        'no asset in this plan is linked to a grid node, so there is no place on the network to check it against',
+    };
+  }
+
+  // Worst interval per node, in the net-injection direction the solver reports:
+  // a setpoint is positive when the asset exports.
+  const worstByNode = new Map<number, { intervalIndex: number; deltaW: number }>();
+  for (const interval of plan.intervals) {
+    const perNode = new Map<number, number>();
+    for (const setpoint of interval.setpoints) {
+      const nodeId = located.get(Number(setpoint.asset_id));
+      if (nodeId === undefined) continue;
+      perNode.set(nodeId, (perNode.get(nodeId) ?? 0) + setpoint.power_w);
+    }
+    for (const [nodeId, deltaW] of perNode) {
+      const current = worstByNode.get(nodeId);
+      if (current === undefined || Math.abs(deltaW) > Math.abs(current.deltaW)) {
+        worstByNode.set(nodeId, { intervalIndex: interval.index, deltaW });
+      }
+    }
+  }
+
+  let firstUnchecked: PlanNetworkCheck | null = null;
+  let lastFeasible: PlanNetworkCheck | null = null;
+
+  for (const [nodeId, worst] of worstByNode) {
+    const nodeCode = await gridNodeCode(nodeId);
+    const study = await studyFeasibility({
+      subject: 'dispatch',
+      subjectReference: options.subjectReference,
+      nodeId,
+      candidate:
+        nodeCode === null
+          ? []
+          : [{ bus: nodeCode, delta_p_w: worst.deltaW, reference: `dispatch-node-${nodeId}` }],
+    });
+    const result: PlanNetworkCheck = {
+      status: study.status,
+      checked: study.status === 'feasible',
+      studyId: study.studyId,
+      nodeCode,
+      reason: study.reason,
+      limitingElement: study.limitingElement,
+      violations: study.violations,
+      worst: worstViolation(study.violations),
+      intervalIndex: worst.intervalIndex,
+    };
+    // A violation anywhere decides the plan; there is no averaging a transformer.
+    if (study.status === 'violations') return result;
+    if (study.status === 'feasible') lastFeasible = result;
+    else if (firstUnchecked === null) firstUnchecked = result;
+  }
+
+  return (
+    firstUnchecked ??
+    lastFeasible ?? {
+      ...empty,
+      status: 'model_unavailable',
+      reason: 'no node in this plan produced a study',
+    }
+  );
+}
+
+/** Which node each asset sits behind, for the assets that have a declared link. */
+async function nodesForAssets(assetIds: number[]): Promise<Map<number, number>> {
+  const db = await getDb();
+  if (!db) return new Map();
+  const rows = await db
+    .select({ assetId: gridNodeAssets.assetId, nodeId: gridNodeAssets.nodeId })
+    .from(gridNodeAssets)
+    .where(inArray(gridNodeAssets.assetId, assetIds));
+  return new Map(rows.map(row => [row.assetId, row.nodeId]));
+}
+
+async function gridNodeCode(nodeId: number): Promise<string | null> {
+  const db = await getDb();
+  if (!db) return null;
+  const rows = await db
+    .select({ code: gridNodes.code })
+    .from(gridNodes)
+    .where(eq(gridNodes.id, nodeId))
+    .limit(1);
+  return rows[0]?.code ?? null;
 }
 
 export interface CoordinationRequest {

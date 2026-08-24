@@ -45,6 +45,8 @@ export const dependencyEnum = pgEnum('dependency_name', [
   'payment_gateway',
   'market_broker',
   'meter_telemetry',
+  /** The network feasibility service (`services/gridmodel`). */
+  'network_model',
 ]);
 
 /** What a real interaction with the dependency showed. */

@@ -19,6 +19,8 @@
     "worker:dr:dev": "tsx watch server/workflows/dr-worker.ts",
     "worker:trading": "tsx server/workflows/trading-worker.ts",
     "worker:trading:dev": "tsx watch server/workflows/trading-worker.ts",
+    "worker:journeys": "tsx server/workflows/journey-worker.ts",
+    "worker:journeys:dev": "tsx watch server/workflows/journey-worker.ts",
     "pm2:start": "pm2 start ecosystem.config.js",
     "pm2:stop": "pm2 stop ecosystem.config.js",
     "pm2:restart": "pm2 restart ecosystem.config.js",

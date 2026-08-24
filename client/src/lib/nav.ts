@@ -148,6 +148,12 @@ export const NAV_GROUPS: NavGroup[] = [
       { label: 'Analytics Dashboard', path: '/admin/analytics-dashboard', adminOnly: true },
       { label: 'ML Predictions', path: '/admin/ml-predictions', adminOnly: true },
       { label: 'Workflows', path: '/admin/workflows', adminOnly: true, keywords: ['temporal'] },
+      {
+        label: 'Journey Assurance',
+        path: '/admin/journeys',
+        adminOnly: true,
+        keywords: ['journey', 'coverage', 'scenario', 'suite', 'temporal', 'evidence'],
+      },
       { label: 'Audit Logs', path: '/admin/audit-logs', adminOnly: true },
       { label: 'Cache Monitoring', path: '/admin/cache-monitoring', adminOnly: true, keywords: ['redis'] },
       { label: 'Performance', path: '/admin/performance', adminOnly: true },

@@ -245,6 +245,14 @@ class RedisCacheService {
   }
 
   /**
+   * Drop the cached price list. Writers must call this: otherwise a price an
+   * operator has just set is not the price the platform reports as current.
+   */
+  async invalidateMarketPrice(): Promise<boolean> {
+    return this.del('market:price:current');
+  }
+
+  /**
    * Cache user profile
    */
   async cacheUserProfile(userId: number, data: any): Promise<boolean> {

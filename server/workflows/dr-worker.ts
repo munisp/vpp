@@ -5,8 +5,14 @@
  * It should be run as a separate process for scalability.
  */
 
+import { createRequire } from 'node:module';
+
 import { NativeConnection, Worker } from '@temporalio/worker';
 import * as activities from './dr-event-activities';
+
+// The package is ESM, so `require` is not in scope; the workflow bundler still
+// wants a resolved path to the workflow module.
+const require = createRequire(import.meta.url);
 
 async function run() {
   // Validate required environment variables

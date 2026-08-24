@@ -6,6 +6,28 @@ import { energyWallet } from '../services/energy-wallet';
 const TopUpMethodSchema = z.enum(['mpesa', 'airtel_money', 'tigo_pesa']);
 
 /**
+ * A gateway that was never given credentials, or that could not be reached, is
+ * an unavailable dependency — not a fault in the caller's request and not an
+ * internal error that hides which provider is missing.
+ */
+function topUpError(error: unknown): TRPCError {
+  const message = error instanceof Error ? error.message : String(error);
+  if (/_NOT_CONFIGURED$/.test(message)) {
+    return new TRPCError({
+      code: 'SERVICE_UNAVAILABLE',
+      message: `${message}: no gateway credentials are stored, so no charge can be raised.`,
+    });
+  }
+  if (/UNREACHABLE|ETIMEDOUT|ECONNREFUSED|ENOTFOUND|fetch failed/i.test(message)) {
+    return new TRPCError({
+      code: 'SERVICE_UNAVAILABLE',
+      message: `The payment gateway could not be reached: ${message}`,
+    });
+  }
+  return new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: message || 'Top-up failed' });
+}
+
+/**
  * Energy wallet router. Balances are derived from the real payments/billings
  * ledger on every read (with an audit snapshot persisted per computation).
  * Top-ups go through the real payment gateways; *_NOT_CONFIGURED errors are
@@ -55,7 +77,7 @@ export const energyWalletRouter = router({
       return await energyWallet.maybeAutoTopUp(ctx.user.id);
     } catch (error: any) {
       console.error('[EnergyWallet] checkAutoTopUp error:', error);
-      throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: error.message || 'Auto top-up check failed' });
+      throw topUpError(error);
     }
   }),
 
@@ -73,7 +95,7 @@ export const energyWalletRouter = router({
         return await energyWallet.initiateTopUp(ctx.user.id, input.amountCents, input.method, input.phoneNumber, 'manual');
       } catch (error: any) {
         console.error('[EnergyWallet] requestTopUp error:', error);
-        throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: error.message || 'Top-up initiation failed' });
+        throw topUpError(error);
       }
     }),
 

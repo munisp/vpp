@@ -36,6 +36,32 @@ export type FeasibilityStatus =
   /** The solver service itself could not be reached or refused. */
   | 'service_unavailable';
 
+/**
+ * Statuses a solver actually produced an answer for, and so the only ones a
+ * stored study names an engine against.
+ */
+const SOLVED_STATUSES: ReadonlySet<FeasibilityStatus> = new Set<FeasibilityStatus>([
+  'feasible',
+  'violations',
+  'not_converged',
+]);
+
+/**
+ * The engine a study is stored against.
+ *
+ * A status that concluded nothing carries no engine even when the service named
+ * one in its diagnostics, because the stored study requires the two to agree:
+ * an engine attached to `model_unavailable` makes the study unstorable, which
+ * loses the very evidence a refusal cites.
+ */
+export function engineForStatus(
+  status: FeasibilityStatus,
+  reportedEngine: unknown
+): string | null {
+  if (!SOLVED_STATUSES.has(status)) return null;
+  return typeof reportedEngine === 'string' ? reportedEngine : 'gridmodel';
+}
+
 export type FeasibilitySubject = 'dispatch' | 'flexibility_clearing' | 'connection_enquiry';
 
 export type ViolationKind =
@@ -577,13 +603,13 @@ export async function studyFeasibility(input: StudyInput): Promise<FeasibilitySt
     });
   }
 
-  const engineRaw = response.diagnostics.engine;
+  const engine = engineForStatus(response.status, response.diagnostics.engine);
   return recordStudy(input, {
     status: response.status,
     reason: response.reason,
     request: payload,
     response,
-    engine: typeof engineRaw === 'string' ? engineRaw : 'gridmodel',
+    engine,
     buses: response.buses.length,
     violations: response.violations,
     hostingCapacity: response.hosting_capacity,
@@ -734,7 +760,11 @@ async function recordStudy(
       })
       .returning({ id: networkFeasibilityStudies.id });
     study.studyId = inserted[0]?.id ?? null;
-  } catch {
+  } catch (error) {
+    console.error(
+      `[network-feasibility] could not store the ${outcome.status} study for ${input.subject}:`,
+      error instanceof Error ? error.message : String(error)
+    );
     study.studyId = null;
   }
   return study;

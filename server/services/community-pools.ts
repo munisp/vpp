@@ -161,7 +161,14 @@ export class CommunityPoolsService {
     };
     const { exportPrice, importPrice } = await priceResolver.getPeriodPrices(periodStart, periodEnd);
 
-    const netValueCents = Math.round((surplusWh / 1000) * exportPrice) - Math.round((deficitWh / 1000) * importPrice);
+    // Store the prices at the scale the allocation is computed on, and compute
+    // the money from the stored figures, so the recorded run reproduces its own
+    // arithmetic instead of citing a price it did not divide.
+    const exportPriceCentsX100 = Math.round(exportPrice * 100);
+    const importPriceCentsX100 = Math.round(importPrice * 100);
+    const netValueCents =
+      Math.round((surplusWh / 1000) * (exportPriceCentsX100 / 100)) -
+      Math.round((deficitWh / 1000) * (importPriceCentsX100 / 100));
 
     // ---- Apply the allocation rule ----
     const shares = this.computeShares(rule, memberEnergy, totalGenerationWh, totalConsumptionWh);
@@ -185,8 +192,8 @@ export class CommunityPoolsService {
       totalConsumptionWh: Math.round(totalConsumptionWh),
       surplusWh: Math.round(surplusWh),
       deficitWh: Math.round(deficitWh),
-      exportPriceCents: Math.round(exportPrice * 100) / 100,
-      importPriceCents: Math.round(importPrice * 100) / 100,
+      exportPriceCentsX100,
+      importPriceCentsX100,
       netValueCents,
       status: 'computed',
       runBy,

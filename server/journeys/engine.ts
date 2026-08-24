@@ -15,7 +15,7 @@ import type { StepResult } from '../../shared/journeys';
 import { journeyById, journeyStepMeta } from '../../shared/journeys';
 import { principalFor, type JourneyPrincipal } from './caller';
 import { stepImplementation } from './registry';
-import { errorMessage, type Facts, type StepContext } from './step';
+import { errorMessage, MissingPriorFact, type Facts, type StepContext } from './step';
 import { finishRun, recordStep, startRun } from '../services/journey-runs';
 
 export class JourneyDefinitionError extends Error {}
@@ -54,7 +54,14 @@ async function contextFor(input: RunStepInput): Promise<StepContext> {
     input.counterpartyUserId === undefined || input.counterpartyUserId === input.memberUserId
       ? admin
       : await principal(input.counterpartyUserId);
-  return { member, admin, counterparty, prior: input.prior, runKey: input.runKey };
+  return {
+    member,
+    admin,
+    counterparty,
+    prior: input.prior,
+    runKey: input.runKey,
+    stepId: input.stepId,
+  };
 }
 
 /**
@@ -88,13 +95,28 @@ export async function runStep(input: RunStepInput): Promise<StepResult> {
       durationMs: Date.now() - startedAt,
     };
   } catch (error) {
-    result = {
-      stepId: input.stepId,
-      outcome: 'failed',
-      detail: errorMessage(error),
-      facts: { threw: true },
-      durationMs: Date.now() - startedAt,
-    };
+    // A step whose input is missing only because the step that would have
+    // produced it was blocked on something outside the platform is blocked for
+    // the same reason: calling it a failure would blame the platform for an
+    // absent dependency.
+    const upstream =
+      error instanceof MissingPriorFact ? input.prior[error.stepId]?.blockedOn : undefined;
+    result =
+      typeof upstream === 'string'
+        ? {
+            stepId: input.stepId,
+            outcome: 'blocked',
+            detail: `${errorMessage(error)} That step was blocked on ${upstream}.`,
+            facts: { blockedOn: upstream, blockedUpstream: error instanceof MissingPriorFact ? error.stepId : null },
+            durationMs: Date.now() - startedAt,
+          }
+        : {
+            stepId: input.stepId,
+            outcome: 'failed',
+            detail: errorMessage(error),
+            facts: { threw: true },
+            durationMs: Date.now() - startedAt,
+          };
   }
 
   await recordStep(input.runId, result);

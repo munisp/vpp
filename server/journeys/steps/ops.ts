@@ -181,22 +181,30 @@ export const degradedDrillSteps: Record<string, JourneyStep> = {
 
   'member-degraded-view': async ctx => {
     const status = await ctx.member.caller.degradedOperation.memberStatus();
-    const capabilities = (status as { capabilities?: Array<Record<string, unknown>> })
-      .capabilities ?? [];
-    if (!Array.isArray(capabilities) || capabilities.length === 0) {
+    if (!status) {
       return failed('A member is told nothing about what the platform can currently do.');
     }
-    const unexplained = capabilities.filter(
-      capability => capability.available === false && !capability.reason
-    ).length;
-    if (unexplained > 0) {
-      return failed('A capability is unavailable with no reason given to the member.', {
-        capabilities: capabilities.length,
-        unexplained,
+    // A member only needs to know whether the figures they are reading are
+    // still being measured and settled — and anything short of `available` has
+    // to say what is missing, or the member cannot tell a quiet platform from a
+    // blind one.
+    const postures = [
+      { name: 'settlement', ...status.settlement },
+      { name: 'control', ...status.control },
+    ];
+    const unexplained = postures.filter(
+      posture => posture.posture !== 'available' && !posture.limitation
+    );
+    if (unexplained.length > 0) {
+      return failed('A degraded capability is shown to a member with no limitation stated.', {
+        unexplained: unexplained.map(posture => posture.name).join(', '),
       });
     }
-    return passed('The member is told what the platform cannot do, and why.', {
-      capabilities: capabilities.length,
+    return passed('The member is told whether delivery is still measured and settled, and why not.', {
+      settlement: status.settlement.posture,
+      settlementLimit: status.settlement.limitation,
+      control: status.control.posture,
+      controlLimit: status.control.limitation,
     });
   },
 
@@ -301,43 +309,81 @@ export const modelLifecycleSteps: Record<string, JourneyStep> = {
 
   'drift-and-retraining': async ctx => {
     const deployed = await ctx.member.caller.mlops.getDeployedModel({ modelName: 'load_forecast' });
-    const modelId = (deployed as { model?: { id?: number }; id?: number }).model?.id
-      ?? (deployed as { id?: number }).id
-      ?? null;
-    if (modelId === null) {
-      return refused('No model is deployed, so there is nothing to check for drift.');
+    if (deployed === null) {
+      return refused('No model is in production under that name, so there is nothing to drift.', {
+        modelName: 'load_forecast',
+      });
     }
-    const drift = await ctx.member.caller.mlops.detectDrift({ modelId, windowHours: 24 });
-    const events = await ctx.member.caller.mlops.getRecentDriftEvents({ modelId, limit: 20 });
-    const verdict = (drift as { drift?: string; status?: string; detected?: boolean }).drift
-      ?? (drift as { status?: string }).status
-      ?? null;
-    if (verdict === null && (drift as { detected?: boolean }).detected === undefined) {
-      return failed('Drift detection returned no verdict.', { modelId });
+    const modelId = deployed.id;
+    // Drift is only meaningful against a recorded baseline, so a detection run
+    // that returns an event must have persisted it — an in-memory verdict no
+    // operator can read back later is not a detection at all.
+    const detected = await ctx.member.caller.mlops.detectDrift({ modelId, windowHours: 24 });
+    const events = await ctx.member.caller.mlops.getRecentDriftEvents({ modelId, limit: 50 });
+    const unrecorded = detected.filter(event => !events.some(row => row.id === event.id));
+    if (unrecorded.length > 0) {
+      return failed('Drift was reported without being recorded where it can be read back.', {
+        modelId,
+        detected: detected.length,
+        unrecorded: unrecorded.length,
+      });
     }
-    return passed('Drift is measured over a stated window, and its events are recorded.', {
+    // Retraining is the platform's answer to drift, so the journey asks for it
+    // and requires a queued job with an id an operator can follow.
+    const job = await ctx.member.caller.mlops.triggerRetraining({
       modelId,
-      driftEvents: count((events as { events?: unknown[] }).events),
+      triggerType: detected.length > 0 ? 'drift_detected' : 'manual',
+    });
+    if (job.status !== 'queued' || job.jobId.length === 0) {
+      return failed('Retraining was accepted without a queued job to follow.', {
+        modelId,
+        status: job.status,
+      });
+    }
+    return passed('Drift is measured over a stated window and answered with a queued retraining.', {
+      modelId,
+      version: deployed.version,
+      detected: detected.length,
+      recordedEvents: events.length,
+      retrainingJobId: job.jobId,
+      triggerType: job.triggerType,
     });
   },
 
   'prediction-surfaces': async ctx => {
     const metrics = await ctx.member.caller.mlPredictions.getModelMetrics();
     const predictions = await ctx.member.caller.mlPredictions.getPricePredictions({ hoursAhead: 24 });
-    const version = (metrics as { modelVersion?: string | null }).modelVersion ?? null;
-    const rows = (predictions as { predictions?: unknown[] }).predictions
-      ?? (Array.isArray(predictions) ? predictions : []);
-    if (Array.isArray(rows) && rows.length > 0 && version === null) {
-      return failed('Predictions are shown to members without naming the model behind them.', {
-        predictions: rows.length,
+    // A price curve is only worth showing a member if a fit stands behind it,
+    // so the curve and the metrics that describe that fit must agree.
+    if (predictions.length > 0 && !metrics.trained) {
+      return failed('A price curve is shown to members from a model that was never trained.', {
+        predictions: predictions.length,
+        trainingDataPoints: metrics.trainingDataPoints,
       });
     }
-    if (!Array.isArray(rows) || rows.length === 0) {
-      return refused('No prediction is offered rather than a made-up curve.', { hasMetrics: Boolean(metrics) });
+    if (predictions.length === 0) {
+      return refused('No prediction is offered rather than a curve with no fit behind it.', {
+        trained: metrics.trained,
+        trainingDataPoints: metrics.trainingDataPoints,
+      });
     }
-    return passed('Predictions name their model version.', {
-      predictions: rows.length,
-      modelVersion: version,
+    const unconfident = predictions.filter(point => point.confidence === null).length;
+    if (unconfident > 0) {
+      return failed('A trained model offers points whose confidence it cannot state.', {
+        predictions: predictions.length,
+        unconfident,
+      });
+    }
+    if (metrics.lastTrained === null) {
+      return failed('Predictions are shown with no record of when their model was fitted.', {
+        predictions: predictions.length,
+      });
+    }
+    return passed('Predictions carry the measured accuracy of the fit behind them.', {
+      predictions: predictions.length,
+      trainingDataPoints: metrics.trainingDataPoints,
+      accuracyPercent: metrics.accuracy,
+      r2Score: metrics.r2Score,
     });
   },
 
@@ -389,13 +435,23 @@ export const supportSteps: Record<string, JourneyStep> = {
   'diagnostic-evidence': async ctx => {
     const health = await ctx.admin.caller.diagnostics.health();
     const evidence = await ctx.admin.caller.diagnostics.evidence();
-    const sources = (evidence as { sources?: Array<Record<string, unknown>> }).sources ?? [];
-    if (!Array.isArray(sources) || sources.length === 0) {
+    if (evidence.observations.length === 0) {
       return failed('There is no evidence a diagnosis could be built from.');
     }
-    return passed('The evidence a diagnosis would cite is listed with its freshness.', {
-      sources: sources.length,
-      modelReachable: Boolean((health as { modelReachable?: boolean }).modelReachable),
+    // An observation that could not be read is unknown, not healthy, so a
+    // bundle where nothing was readable cannot ground a diagnosis at all.
+    if (evidence.availableCount === 0) {
+      return refused('No observation could be read, so nothing would be cited.', {
+        observations: evidence.observations.length,
+        unavailable: evidence.unavailableCount,
+      });
+    }
+    return passed('The evidence a diagnosis would cite is listed with what could not be read.', {
+      observations: evidence.observations.length,
+      available: evidence.availableCount,
+      unavailable: evidence.unavailableCount,
+      modelReachable: health.reachable,
+      modelPresent: health.modelPresent,
     });
   },
 
@@ -404,10 +460,23 @@ export const supportSteps: Record<string, JourneyStep> = {
       const run = await ctx.admin.caller.diagnostics.diagnose({
         question: `Journey run ${ctx.runKey}: why would a member's meter read zero while their inverter reports output?`,
       });
-      const findings = (run as { findings?: Array<{ citations?: unknown[] }> }).findings ?? [];
-      const uncited = findings.filter(
-        finding => !Array.isArray(finding.citations) || finding.citations.length === 0
-      ).length;
+      // A refusal is the honest outcome, but which one it is matters: no model
+      // means the dependency is missing, while a reachable model that would not
+      // answer usefully is the platform declining to invent one.
+      if (run.state === 'refused') {
+        if (!run.health.reachable || !run.health.modelPresent) {
+          return blocked('ollama', 'No local model answered, so nothing was diagnosed.', {
+            runId: run.runId,
+            reason: run.reason,
+          });
+        }
+        return refused('The model was reachable but the platform would not report a diagnosis.', {
+          runId: run.runId,
+          reason: run.reason,
+        });
+      }
+      const findings = run.findings;
+      const uncited = findings.filter(finding => finding.observationIds.length === 0).length;
       if (uncited > 0) {
         return failed('A diagnosis states a finding it cannot cite.', {
           findings: findings.length,
@@ -453,22 +522,29 @@ export const supportSteps: Record<string, JourneyStep> = {
       periodStart: daysAgo(30),
       periodEnd: new Date(),
     });
-    const reportId = (report as { report?: { id?: number }; reportId?: number }).report?.id
-      ?? (report as { reportId?: number }).reportId
-      ?? null;
-    if (reportId === null) {
+    const reportId = report.reportId;
+    if (typeof reportId !== 'number') {
       return failed('A compliance report was generated with no id to reference.');
     }
+    // The checksum is recomputed from the stored source data, so an auditor can
+    // tell a report that was edited after generation from one that was not.
     const checksum = await ctx.member.caller.complianceReports.getReportChecksum({ reportId });
-    const digest = (checksum as { checksum?: string }).checksum ?? null;
-    if (digest === null) {
+    if (checksum.storedChecksum.length === 0) {
       return failed('A compliance report carries no checksum, so it cannot be trusted later.', {
         reportId,
       });
     }
+    if (!checksum.valid) {
+      return failed('A freshly generated report does not verify against its own source data.', {
+        reportId,
+        storedChecksum: checksum.storedChecksum,
+        recomputedChecksum: checksum.recomputedChecksum,
+      });
+    }
     const listed = await ctx.admin.caller.complianceReports.listReports({ limit: 50 });
-    return passed('The report is generated and checksummed for later verification.', {
+    return passed('The report is generated and verifies against its own checksum.', {
       reportId,
+      checksum: checksum.storedChecksum,
       reports: count((listed as { reports?: unknown[] }).reports),
     });
   },
@@ -476,10 +552,8 @@ export const supportSteps: Record<string, JourneyStep> = {
   'platform-state': async ctx => {
     const stats = await ctx.admin.caller.admin.getSystemStats();
     const logs = await ctx.admin.caller.admin.getActivityLogs({ limit: 50 });
-    const users = (stats as { totalUsers?: number; stats?: { totalUsers?: number } }).totalUsers
-      ?? (stats as { stats?: { totalUsers?: number } }).stats?.totalUsers
-      ?? null;
-    if (users === null) {
+    const users = stats.users.total;
+    if (typeof users !== 'number') {
       return failed('The operator home reports no user count.');
     }
     if (users < 1) {
@@ -496,18 +570,68 @@ export const supportSteps: Record<string, JourneyStep> = {
 
 export const communitySteps: Record<string, JourneyStep> = {
   'pool-rules': async ctx => {
+    // Setting an allocation rule is a governance act, so the journey needs a
+    // community this member actually governs — belonging to one is not enough,
+    // and a membership still awaiting approval governs nothing.
     const communities = await ctx.member.caller.community.getUserCommunities();
-    let communityId = communities.length > 0 ? communities[0].id : null;
+    let communityId: number | null = null;
+    for (const community of communities) {
+      const members = await ctx.member.caller.community.getCommunityMembers({
+        communityId: community.id,
+      });
+      const governs = members.some(
+        member =>
+          member.userId === ctx.member.user.id &&
+          member.status === 'active' &&
+          (member.role === 'admin' || member.role === 'operator')
+      );
+      if (governs) {
+        communityId = community.id;
+        break;
+      }
+    }
+    let founded = false;
     if (communityId === null) {
       const created = await ctx.member.caller.community.createCommunity({
-        name: `Journey community ${ctx.member.user.id}`,
+        name: `Journey community ${ctx.member.user.id}-${ctx.runKey}`,
         communityType: 'residential',
         governanceModel: 'cooperative',
         allocationMethod: 'proportional_capacity',
       });
       communityId = created.id;
-      // Creating a community does not join it, and pool rules are a member act.
-      await ctx.member.caller.community.addMember({ communityId, role: 'admin' });
+      founded = true;
+    }
+    // Joining is a request, not an entitlement: the applicant cannot admit
+    // itself, and the community's admin decides. A rerun finds the counterparty
+    // already admitted, which is the same end state.
+    const existingMembers = await ctx.member.caller.community.getCommunityMembers({ communityId });
+    let application =
+      existingMembers.find(member => member.userId === ctx.counterparty.user.id) ?? null;
+    if (application === null) {
+      application = await ctx.counterparty.caller.community.addMember({ communityId });
+      if (application.status === 'active') {
+        return failed('A community admitted an applicant that no admin approved.', {
+          communityId,
+          memberId: application.id,
+        });
+      }
+      if (application.role !== 'member') {
+        return failed('An applicant chose its own role in a community it had not joined.', {
+          communityId,
+          role: application.role,
+        });
+      }
+    }
+    if (application.status === 'pending') {
+      const admitted = await ctx.member.caller.community.approveMember({
+        memberId: application.id,
+      });
+      if (admitted.status !== 'active') {
+        return failed('An approved applicant is still not an active member.', {
+          communityId,
+          status: admitted.status,
+        });
+      }
     }
     await ctx.member.caller.communityPools.setPoolRules({
       communityId,
@@ -521,7 +645,12 @@ export const communitySteps: Record<string, JourneyStep> = {
         ruleType: ruleType ?? 'none',
       });
     }
-    return passed('The pool’s allocation rule is set and reads back.', { communityId, ruleType });
+    return passed('The pool’s allocation rule is set and reads back.', {
+      communityId,
+      ruleType,
+      founded,
+      admittedMemberId: application.id,
+    });
   },
 
   'allocation-run': async ctx => {
@@ -558,6 +687,18 @@ export const communitySteps: Record<string, JourneyStep> = {
 
   'community-telemetry': async ctx => {
     const communityId = priorNumber(ctx, 'pool-rules', 'communityId');
+    // The scheduled rollup is opt-in per deployment, so the journey seeds the
+    // community's own telemetry and advances the series itself rather than
+    // reading whatever a cron happened to leave behind.
+    const asset = await ensureApprovedAsset(ctx, 'solar', 4_000);
+    const credential = await registerDevice(ctx, asset.id, 'smart_meter');
+    await ingestReadings(ctx, asset.id, credential, 6);
+    await ctx.admin.caller.fleetTelemetry.rollUp({
+      bucketMinutes: 15,
+      buckets: 4,
+      scopeType: 'community',
+      scopeId: communityId,
+    });
     const community = await ctx.member.caller.fleetTelemetry.community({
       communityId,
       bucketMinutes: 15,

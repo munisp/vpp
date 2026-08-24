@@ -17,27 +17,70 @@ import {
   refused,
   type JourneyStep,
 } from '../step';
-import { ensureApprovedAsset, ingestReadings, registerDevice } from '../fixtures';
+import {
+  ensureApprovedAsset,
+  ingestFlexibilityWindow,
+  ingestHistory,
+  ingestReadings,
+  registerDevice,
+} from '../fixtures';
+import { MIN_SITE_HISTORY_SAMPLES } from '../../services/price-signal';
 
 function minutesFromNow(minutes: number): Date {
   return new Date(Date.now() + minutes * 60 * 1000);
 }
 
+/**
+ * A flexibility delivery window a run can drive end to end: offers close when
+ * the window opens, so it starts far enough ahead for the offer and clearing
+ * steps, and it is short enough that the run can wait for it to elapse before
+ * delivery is measured.
+ */
+const DELIVERY_WINDOW_LEAD_MS = 90_000;
+const DELIVERY_WINDOW_LENGTH_MS = 60_000;
+
+async function waitUntil(epochMs: number): Promise<void> {
+  const remaining = epochMs - Date.now();
+  if (remaining <= 0) return;
+  await new Promise(resolve => setTimeout(resolve, remaining));
+}
+
 export const demandResponseSteps: Record<string, JourneyStep> = {
   enrol: async ctx => {
     await ensureApprovedAsset(ctx, 'battery', 10_000);
-    await ctx.member.caller.demandResponse.enroll({
-      autoOptIn: true,
-      minCompensation: 10,
-      maxReduction: 5_000,
-    });
-    const enrolment = await ctx.member.caller.demandResponse.getEnrollment();
-    const status = (enrolment as { enrollment?: { status?: string }; status?: string }).enrollment
-      ?.status ?? (enrolment as { status?: string }).status ?? null;
-    if (status === null) {
-      return failed('An enrolment was accepted but reads back with no status.');
+    // Journeys re-run, so an existing enrolment is updated rather than enrolled
+    // twice: two enrolments would be two sets of limits for one member.
+    const existing = await ctx.member.caller.demandResponse.getEnrollment();
+    if (existing) {
+      await ctx.member.caller.demandResponse.updateEnrollment({
+        autoOptIn: true,
+        minCompensation: 10,
+        maxReduction: 5_000,
+        status: 'active',
+      });
+    } else {
+      await ctx.member.caller.demandResponse.enroll({
+        autoOptIn: true,
+        minCompensation: 10,
+        maxReduction: 5_000,
+      });
     }
-    return passed('The member is enrolled in demand response and can see it.', { status });
+    const enrolment = await ctx.member.caller.demandResponse.getEnrollment();
+    if (!enrolment) {
+      return failed('An enrolment was accepted but the member is not enrolled.');
+    }
+    if (enrolment.status !== 'active' || enrolment.maxReduction !== 5_000) {
+      return failed('An enrolment does not read back with the limits it was given.', {
+        status: enrolment.status,
+        maxReduction: enrolment.maxReduction ?? null,
+      });
+    }
+    return passed('The member is enrolled in demand response and can see their limits.', {
+      status: enrolment.status,
+      maxReduction: enrolment.maxReduction ?? null,
+      autoOptIn: enrolment.autoOptIn === true,
+      alreadyEnrolled: existing !== null,
+    });
   },
 
   'operator-calls-event': async ctx => {
@@ -57,8 +100,7 @@ export const demandResponseSteps: Record<string, JourneyStep> = {
       endTime: new Date(startTime.getTime() + 60 * 60 * 1000),
       compensationRate: 25,
     });
-    const eventId = (created as { event?: { id?: number }; eventId?: number }).event?.id
-      ?? (created as { eventId?: number }).eventId;
+    const eventId = created.eventId;
     if (typeof eventId !== 'number') {
       return failed('demandResponse.createEvent returned no event id.');
     }
@@ -71,8 +113,7 @@ export const demandResponseSteps: Record<string, JourneyStep> = {
 
   'member-responds': async ctx => {
     const eventId = priorNumber(ctx, 'operator-calls-event', 'eventId');
-    const upcoming = await ctx.member.caller.demandResponse.getUpcomingEvents();
-    const events = (upcoming as { events?: Array<{ id: number }> }).events ?? [];
+    const events = await ctx.member.caller.demandResponse.getUpcomingEvents();
     if (!events.some(event => event.id === eventId)) {
       return failed('A called event does not appear among the member’s upcoming events.', {
         eventId,
@@ -84,8 +125,7 @@ export const demandResponseSteps: Record<string, JourneyStep> = {
       participate: true,
       targetReduction: 3_000,
     });
-    const responses = await ctx.member.caller.demandResponse.getMyResponses();
-    const rows = (responses as { responses?: Array<{ eventId?: number }> }).responses ?? [];
+    const rows = await ctx.member.caller.demandResponse.getMyResponses();
     if (!rows.some(response => response.eventId === eventId)) {
       return failed('The member accepted an event but has no response recorded.', { eventId });
     }
@@ -104,31 +144,45 @@ export const demandResponseSteps: Record<string, JourneyStep> = {
     });
     const forecasts = await ctx.admin.caller.drForecast.listForecasts({ limit: 14 });
     const distribution = await ctx.admin.caller.drSegmentation.getSegmentDistribution();
-    const participants = (recommended as { recommendations?: unknown[] }).recommendations
-      ?? (Array.isArray(recommended) ? recommended : []);
-    if (!Array.isArray(participants)) {
-      return failed('Participant targeting returned no recommendations collection.', { eventId });
-    }
+    const participants = recommended.recommendations;
     if (participants.length === 0) {
       return refused('No participant met the targeting criteria, rather than a padded list.', {
         eventId,
-        forecasts: count((forecasts as { forecasts?: unknown[] }).forecasts),
+        forecasts: forecasts.count,
       });
     }
-    return passed('Targeting names the participants it recommends and why.', {
+    // Coverage below the target must be reported as short, not as a met target
+    // padded with participants who cannot deliver.
+    if (recommended.targetMet && recommended.coverageKw < recommended.targetReductionKw) {
+      return failed('Targeting reports the target met on coverage below it.', {
+        eventId,
+        coverageKw: recommended.coverageKw,
+        targetReductionKw: recommended.targetReductionKw,
+      });
+    }
+    return passed('Targeting names the participants it recommends and the coverage they give.', {
       eventId,
       recommended: participants.length,
+      coverageKw: recommended.coverageKw,
+      targetMet: recommended.targetMet,
       hasSegmentDistribution: Boolean(distribution),
     });
   },
 
   compensation: async ctx => {
-    const compensation = await ctx.member.caller.demandResponse.getMyCompensation();
+    const rows = await ctx.member.caller.demandResponse.getMyCompensation();
     const analytics = await ctx.member.caller.demandResponse.getMyAnalytics();
-    const total = (compensation as { totalCompensation?: number }).totalCompensation ?? null;
-    const measured = (analytics as { measuredEvents?: number; totalEvents?: number }).measuredEvents
-      ?? (analytics as { totalEvents?: number }).totalEvents
-      ?? null;
+    const total = analytics?.totalCompensation ?? null;
+    const measured = analytics?.totalEvents ?? null;
+    const paidRows = rows.filter(row => row.status === 'paid');
+    const paidTotal = paidRows.reduce((sum, row) => sum + row.amount, 0);
+    if (total !== null && paidTotal !== total) {
+      return failed('Compensation analytics report a different total than the paid rows.', {
+        analyticsTotal: total,
+        paidRows: paidRows.length,
+        paidTotal,
+      });
+    }
     if (total === null) {
       return failed('Compensation reports no figure at all, not even zero.');
     }
@@ -164,17 +218,22 @@ export const gridDispatchSteps: Record<string, JourneyStep> = {
   'fleet-controls': async ctx => {
     const fleet = await ctx.admin.caller.controlWindows.fleet({ limit: 50 });
     const mine = await ctx.member.caller.controlWindows.mine({ limit: 25 });
-    const rows = (fleet as { windows?: Array<Record<string, unknown>> }).windows ?? [];
-    if (!Array.isArray(rows)) {
-      return failed('The fleet control list returned no windows collection.');
-    }
-    const unbounded = rows.filter(row => !row.validUntil && !row.expiresAt).length;
+    // Every control carries a validTo by construction; a row without one would
+    // be a setpoint nothing ever revokes.
+    const unbounded = fleet.assignments.filter(row => !row.assignment.validTo).length;
     if (unbounded > 0) {
-      return failed('A control is in force with no expiry.', { windows: rows.length, unbounded });
+      return failed('A control is in force with no expiry.', {
+        windows: fleet.count,
+        unbounded,
+      });
     }
+    const awaitingFallback = fleet.assignments.filter(
+      row => row.state === 'expired_awaiting_fallback'
+    ).length;
     return passed('Fleet controls all carry an expiry, and a member sees only their own.', {
-      fleetWindows: rows.length,
-      myWindows: count((mine as { windows?: unknown[] }).windows),
+      fleetWindows: fleet.count,
+      myWindows: mine.count,
+      awaitingFallback,
     });
   },
 
@@ -218,13 +277,23 @@ export const gridDispatchSteps: Record<string, JourneyStep> = {
 
   'expiry-sweep': async ctx => {
     const swept = await ctx.admin.caller.controlWindows.sweepNow();
-    const expired = (swept as { expired?: number; swept?: number }).expired
-      ?? (swept as { swept?: number }).swept
-      ?? null;
-    if (expired === null) {
-      return failed('The expiry sweep does not report what it swept.');
+    if (swept.examined !== swept.applied + swept.held + swept.unconfirmed + swept.failed + swept.skipped) {
+      return failed('The expiry sweep examined more controls than it accounts for.', {
+        examined: swept.examined,
+        applied: swept.applied,
+        held: swept.held,
+        unconfirmed: swept.unconfirmed,
+        failed: swept.failed,
+        skipped: swept.skipped,
+      });
     }
-    return passed('Expired controls are swept into their declared fallback.', { swept: expired });
+    return passed('Expired controls are swept into their declared fallback, or reported unsent.', {
+      examined: swept.examined,
+      applied: swept.applied,
+      unconfirmed: swept.unconfirmed,
+      failedFallbacks: swept.failed,
+      held: swept.held,
+    });
   },
 
   'device-health': async ctx => {
@@ -261,59 +330,127 @@ export const gridDispatchSteps: Record<string, JourneyStep> = {
 
 export const priceSignalSteps: Record<string, JourneyStep> = {
   coordinate: async ctx => {
-    await ensureApprovedAsset(ctx, 'battery', 10_000);
-    const signal = await ctx.admin.caller.priceSignal.coordinate({
-      userIds: [ctx.member.user.id],
-      intervalMinutes: 15,
-      startsAt: minutesFromNow(15),
-      targetNetW: [-2_000, -1_500, -1_000, -500],
-      sharedImportLimitW: [4_000, 4_000, 4_000, 4_000],
-      siteImportLimitW: 6_000,
-      siteExportLimitW: 4_000,
-      scopeType: 'fleet',
-    });
-    const signalId = (signal as { signalId?: string }).signalId;
-    const state = (signal as { state?: string; status?: string }).state
-      ?? (signal as { status?: string }).status
-      ?? 'unknown';
-    if (typeof signalId !== 'string') {
-      return failed('priceSignal.coordinate returned no signal id.');
+    const asset = await ensureApprovedAsset(ctx, 'battery', 10_000);
+    const credential = await registerDevice(ctx, asset.id, 'battery_controller');
+    // A site with fewer than MIN_SITE_HISTORY_SAMPLES measured samples is
+    // excluded from the fleet by design — its load is unknown — so the journey
+    // gives this one a real history through the device path rather than
+    // expecting the platform to plan without one.
+    await ingestHistory(credential, 24, Math.ceil((MIN_SITE_HISTORY_SAMPLES + 12) / 24));
+    try {
+      // A site's response to a price is a mixed-integer plan, so it moves in
+      // steps rather than smoothly: a profile the fleet cannot reach comes back
+      // `not_converged`, and the journey checks that first so a coordination that
+      // missed its target can never be mistaken for one that met it.
+      const unreachable = await ctx.admin.caller.priceSignal.coordinate({
+        userIds: [ctx.member.user.id],
+        intervalMinutes: 15,
+        startsAt: minutesFromNow(15),
+        targetNetW: [-2_000, -1_500, -1_000, -500],
+        sharedImportLimitW: [4_000, 4_000, 4_000, 4_000],
+        siteImportLimitW: 6_000,
+        siteExportLimitW: 4_000,
+        scopeType: 'fleet',
+      });
+      if (unreachable.converged !== (unreachable.signal.status === 'draft')) {
+        return failed('A coordination reports a convergence its stored status contradicts.', {
+          signalId: unreachable.signalId,
+          converged: unreachable.converged,
+          status: unreachable.signal.status,
+        });
+      }
+      // What the fleet does unprompted is the only profile it is certain to be
+      // able to follow, so it is what the grid asks for here; anything further
+      // is what the flexibility markets are for.
+      const baseline = await ctx.admin.caller.priceSignal.baseline({
+        userIds: [ctx.member.user.id],
+        intervalMinutes: 15,
+        horizon: 4,
+        siteImportLimitW: 6_000,
+        siteExportLimitW: 4_000,
+        scopeType: 'fleet',
+      });
+      const signal = await ctx.admin.caller.priceSignal.coordinate({
+        userIds: [ctx.member.user.id],
+        intervalMinutes: 15,
+        startsAt: minutesFromNow(15),
+        targetNetW: baseline.netW,
+        sharedImportLimitW: baseline.netW.map(() => 6_000),
+        siteImportLimitW: 6_000,
+        siteExportLimitW: 4_000,
+        scopeType: 'fleet',
+      });
+      if (signal.signal.sites.length === 0) {
+        return refused('No site had the measured history a fleet plan needs.', {
+          signalId: signal.signalId,
+          excludedSites: signal.excludedSites.length,
+        });
+      }
+      // A signal that missed its own target must say so rather than read as a
+      // plan the fleet can be billed against.
+      if (signal.converged && signal.signal.status === 'not_converged') {
+        return failed('A signal reports convergence and a not-converged status at once.', {
+          signalId: signal.signalId,
+        });
+      }
+      return passed('A price signal is coordinated and carries its convergence state.', {
+        signalId: signal.signalId,
+        status: signal.signal.status,
+        converged: signal.converged,
+        sites: signal.signal.sites.length,
+        excludedSites: signal.excludedSites.length,
+        unreachableSignalId: unreachable.signalId,
+        unreachableStatus: unreachable.signal.status,
+        unreachableDeviationW: unreachable.signal.maxDeviationW,
+      });
+    } catch (error) {
+      return classifyDependencyError(error, 'optimizer', { stage: 'coordinate' });
     }
-    return passed('A price signal is coordinated and carries its convergence state.', {
-      signalId,
-      state,
-    });
   },
 
   publish: async ctx => {
     const signalId = priorString(ctx, 'coordinate', 'signalId');
-    const state = priorString(ctx, 'coordinate', 'state');
-    if (state !== 'converged') {
-      // A signal that missed its target must not reach the fleet.
+    const status = priorString(ctx, 'coordinate', 'status');
+    if (status !== 'draft') {
+      // Only a converged draft may reach the fleet.
       try {
         await ctx.admin.caller.priceSignal.publish({ signalId });
-        return failed('A signal that did not converge was published to the fleet.', {
+        return failed('A signal that is not a converged draft was published to the fleet.', {
           signalId,
-          state,
+          status,
         });
       } catch {
-        return refused('A signal that did not converge cannot be published.', { signalId, state });
+        return refused('A signal that did not converge cannot be published.', {
+          signalId,
+          status,
+        });
       }
     }
     try {
       const published = await ctx.admin.caller.priceSignal.publish({ signalId });
-      const delivery = (published as { delivery?: string; status?: string }).delivery
-        ?? (published as { status?: string }).status
-        ?? 'unknown';
-      if (delivery === 'received' || delivery === 'applied') {
-        return failed('A broker publish is recorded as the site having applied the signal.', {
+      const applied = published.signal.sites.filter(
+        site => site.response === 'followed' || site.response === 'deviated'
+      ).length;
+      if (applied > 0) {
+        return failed('A broker publish is recorded as the site having answered the signal.', {
           signalId,
-          delivery,
+          applied,
+        });
+      }
+      if (published.queued === 0 && published.failed > 0) {
+        // The signal reached nobody. The platform is right to leave it a draft,
+        // but nothing about publication is proven without a broker.
+        return blocked('mqtt_broker', 'No site could be sent the price: every publish failed.', {
+          signalId,
+          failed: published.failed,
+          status: published.signal.status,
         });
       }
       return passed('The signal is sent, with delivery recorded as receipt-unknown.', {
         signalId,
-        delivery,
+        queued: published.queued,
+        failed: published.failed,
+        status: published.signal.status,
       });
     } catch (error) {
       return classifyDependencyError(error, 'mqtt_broker', { signalId });
@@ -323,42 +460,66 @@ export const priceSignalSteps: Record<string, JourneyStep> = {
   'member-view': async ctx => {
     const signalId = priorString(ctx, 'coordinate', 'signalId');
     const mine = await ctx.member.caller.priceSignal.mySignals({ limit: 20 });
-    const rows = (mine as { signals?: Array<{ signalId?: string }> }).signals ?? [];
-    if (!Array.isArray(rows)) {
-      return failed('A member’s price signals returned no collection.');
-    }
+    const rows = mine.signals;
     const seen = rows.some(row => row.signalId === signalId);
-    if (!seen && rows.length > 0) {
+    if (!seen) {
       return refused('The signal was not published to this site, so the site does not see it.', {
         signalId,
         signals: rows.length,
       });
     }
-    return passed('A site sees the signals it was actually sent.', {
+    const mineRow = rows.find(row => row.signalId === signalId);
+    const priced = mineRow?.intervals.every(
+      interval => typeof interval.signalAdjustmentCentsPerKwh === 'number'
+    );
+    if (!priced) {
+      return failed('A site was sent a signal with no price on one of its intervals.', {
+        signalId,
+        intervals: mineRow?.intervals.length ?? 0,
+      });
+    }
+    return passed('A site sees the price it was actually sent, interval by interval.', {
       signalId,
       signals: rows.length,
-      sawThisSignal: seen,
+      intervals: mineRow?.intervals.length ?? 0,
     });
   },
 
   score: async ctx => {
     const signalId = priorString(ctx, 'coordinate', 'signalId');
+    // Scoring compares a site's meter against a price it was sent, so it depends
+    // on publication having happened: reading the publish step's own fact means a
+    // run with no broker reports scoring as blocked on the broker, not refused.
+    priorNumber(ctx, 'publish', 'queued');
     const asset = await ensureApprovedAsset(ctx, 'battery', 10_000);
     const credential = await registerDevice(ctx, asset.id, 'battery_controller');
     await ingestReadings(ctx, asset.id, credential, 4);
     try {
       const scored = await ctx.admin.caller.priceSignal.score({ signalId });
-      const sites = (scored as { sites?: Array<{ verdict?: string }> }).sites ?? [];
       const listed = await ctx.admin.caller.priceSignal.list({ limit: 10 });
-      const unmeasured = sites.filter(site => site.verdict === 'unmeasured').length;
+      const unmeasured = scored.sites.filter(
+        site => site.response === 'unmeasured' || site.response === 'no_telemetry'
+      ).length;
+      // A verdict of followed or deviated has to rest on measured energy.
+      const unevidenced = scored.sites.filter(
+        site =>
+          (site.response === 'followed' || site.response === 'deviated') &&
+          (site.actualNetWh === null || site.telemetrySamples === 0)
+      ).length;
+      if (unevidenced > 0) {
+        return failed('A site is scored as having followed or deviated with no measured energy.', {
+          signalId,
+          unevidenced,
+        });
+      }
       return passed('Scoring measures each site across all its meters, or says it could not.', {
         signalId,
-        sitesScored: sites.length,
+        sitesScored: scored.sites.length,
         unmeasured,
-        signals: count((listed as { signals?: unknown[] }).signals),
+        signals: listed.signals.length,
       });
     } catch (error) {
-      return classifyDependencyError(error, 'mqtt_broker', { signalId, stage: 'score' });
+      return classifyDependencyError(error, 'optimizer', { signalId, stage: 'score' });
     }
   },
 };
@@ -368,8 +529,7 @@ export const flexibilitySteps: Record<string, JourneyStep> = {
     const asset = await ensureApprovedAsset(ctx, 'battery', 10_000);
     const code = `JRNY-FEEDER-${ctx.member.user.id}`;
     const existing = await ctx.admin.caller.locationalFlexibility.nodes({});
-    const nodes = (existing as { nodes?: Array<{ id: number; code?: string }> }).nodes ?? [];
-    let nodeId = nodes.find(node => node.code === code)?.id ?? null;
+    let nodeId = existing.find(node => node.code === code)?.nodeId ?? null;
     if (nodeId === null) {
       const created = await ctx.admin.caller.locationalFlexibility.createNode({
         code,
@@ -378,12 +538,7 @@ export const flexibilitySteps: Record<string, JourneyStep> = {
         region: 'TZ-DAR',
         firmCapacityW: 250_000,
       });
-      nodeId = (created as { node?: { id?: number }; nodeId?: number }).node?.id
-        ?? (created as { nodeId?: number }).nodeId
-        ?? null;
-    }
-    if (nodeId === null) {
-      return failed('A flexibility node could not be created or found.');
+      nodeId = created.nodeId;
     }
     await ctx.admin.caller.locationalFlexibility.linkAsset({
       nodeId,
@@ -391,36 +546,68 @@ export const flexibilitySteps: Record<string, JourneyStep> = {
       linkSource: 'operator_declared',
       evidence: `Journey run ${ctx.runKey}: operator-declared connection, not utility-verified.`,
     });
+    const headroom = await ctx.admin.caller.locationalFlexibility.nodes({});
+    const node = headroom.find(row => row.nodeId === nodeId);
+    if (!node) {
+      return failed('A node that was just created does not appear in the topology.', { nodeId });
+    }
+    if (node.awardableAssets > node.linkedAssets) {
+      return failed('A node reports more awardable assets than are linked to it.', {
+        nodeId,
+        linkedAssets: node.linkedAssets,
+        awardableAssets: node.awardableAssets,
+      });
+    }
     return passed('The node exists and the asset link carries how it was established.', {
       nodeId,
       assetId: asset.id,
       linkSource: 'operator_declared',
+      linkedAssets: node.linkedAssets,
+      awardableAssets: node.awardableAssets,
+      unverifiedAssets: node.unverifiedAssets,
     });
   },
 
   requirement: async ctx => {
     const nodeId = priorNumber(ctx, 'topology', 'nodeId');
-    const startsAt = minutesFromNow(20);
+    // A window the run can see through end to end: it opens far enough ahead
+    // that offers are still accepted, and closes soon enough that the run can
+    // report telemetry inside it and then measure an elapsed window.
+    const startsAt = new Date(Date.now() + DELIVERY_WINDOW_LEAD_MS);
+    const endsAt = new Date(startsAt.getTime() + DELIVERY_WINDOW_LENGTH_MS);
     const created = await ctx.admin.caller.locationalFlexibility.createRequirement({
       nodeId,
       direction: 'import_reduction',
       startsAt,
-      endsAt: new Date(startsAt.getTime() + 60 * 60 * 1000),
+      endsAt,
       requiredPowerW: 8_000,
       priceCapCentsPerKwh: 40,
       currency: 'TZS',
       notes: `Journey run ${ctx.runKey}`,
     });
-    const requirementId = (created as { requirement?: { id?: number }; requirementId?: number })
-      .requirement?.id ?? (created as { requirementId?: number }).requirementId ?? null;
-    if (requirementId === null) {
-      return failed('A located requirement could not be opened for bids.', { nodeId });
-    }
+    const requirementId = created.requirementId;
     const listed = await ctx.admin.caller.locationalFlexibility.requirements({ nodeId, limit: 50 });
+    const mine = listed.find(row => row.id === requirementId);
+    if (!mine) {
+      return failed('A requirement that was just opened is not listed at its node.', {
+        nodeId,
+        requirementId,
+      });
+    }
+    if (mine.requiredPowerW !== 8_000 || mine.priceCapCentsPerKwh !== 40) {
+      return failed('A requirement does not read back with the power and cap it was given.', {
+        requirementId,
+        requiredPowerW: mine.requiredPowerW,
+        priceCapCentsPerKwh: mine.priceCapCentsPerKwh,
+      });
+    }
     return passed('A located requirement is open, priced and time-bounded.', {
       nodeId,
       requirementId,
-      open: count((listed as { requirements?: unknown[] }).requirements),
+      open: listed.length,
+      status: mine.status,
+      windowStartsAtMs: startsAt.getTime(),
+      windowEndsAtMs: endsAt.getTime(),
     });
   },
 
@@ -428,53 +615,72 @@ export const flexibilitySteps: Record<string, JourneyStep> = {
     const requirementId = priorNumber(ctx, 'requirement', 'requirementId');
     const asset = await ensureApprovedAsset(ctx, 'battery', 10_000);
     const opportunities = await ctx.member.caller.locationalFlexibility.myOpportunities();
-    const rows = (opportunities as { opportunities?: Array<{ requirementId?: number; id?: number }> })
-      .opportunities ?? [];
-    const visible = rows.some(
-      row => row.requirementId === requirementId || row.id === requirementId
-    );
+    const visible = opportunities.some(row => row.requirementId === requirementId);
+    if (!visible) {
+      // An owner who cannot see the requirement cannot offer into it; that is a
+      // topology or eligibility defect, not a refusal.
+      return failed('An open requirement at the member’s own node is not offered to them.', {
+        requirementId,
+        opportunities: opportunities.length,
+      });
+    }
     const offered = await ctx.member.caller.locationalFlexibility.offer({
       requirementId,
       assetId: asset.id,
       offeredPowerW: 4_000,
       priceCentsPerKwh: 30,
     });
-    const offerId = (offered as { offer?: { id?: number }; offerId?: number }).offer?.id
-      ?? (offered as { offerId?: number }).offerId
-      ?? null;
-    if (offerId === null) {
-      return failed('An offer into an open requirement returned no offer id.', { requirementId });
-    }
     return passed('The member sees the located opportunity and offers into it.', {
       requirementId,
-      offerId,
-      sawOpportunity: visible,
+      offerId: offered.offerId,
+      opportunities: opportunities.length,
     });
   },
 
   'clear-and-measure': async ctx => {
     const requirementId = priorNumber(ctx, 'requirement', 'requirementId');
+    const windowStartsAtMs = priorNumber(ctx, 'requirement', 'windowStartsAtMs');
+    const windowEndsAtMs = priorNumber(ctx, 'requirement', 'windowEndsAtMs');
     const cleared = await ctx.admin.caller.locationalFlexibility.clear({ requirementId });
-    if (!cleared || cleared.awards.length === 0) {
+    if (cleared.awards.length === 0) {
       return refused('The requirement cleared short rather than awarding unverified capacity.', {
         requirementId,
-        status: cleared?.status ?? 'unknown',
-        ineligible: cleared?.ineligible.length ?? 0,
+        status: cleared.status,
+        ineligible: cleared.ineligible.length,
       });
     }
 
+    // Delivery is graded only on an elapsed window, against the asset's own
+    // history in the same clock window, so the run waits for the window to close
+    // and reports the samples through the device path before measuring.
+    const awardedAsset = await ensureApprovedAsset(ctx, 'battery', 10_000);
+    const credential = await registerDevice(ctx, awardedAsset.id, 'battery_controller');
+    await waitUntil(windowEndsAtMs + 1_000);
+    const samples = await ingestFlexibilityWindow(credential, windowStartsAtMs, windowEndsAtMs);
     const measured = await ctx.admin.caller.locationalFlexibility.measure({ requirementId });
-    const results = measured?.results ?? [];
+    const results = measured.results;
     if (results.length === 0) {
       return failed('A cleared requirement measured no awards.', { requirementId });
     }
     const first = results[0];
     if (first.deliveryStatus === 'unverified') {
+      // Real history is missing rather than the platform mis-grading it: report
+      // what the run gave it so the caveat is checkable.
       return refused('Too little telemetry to verify delivery: neither paid nor treated as breach.', {
         requirementId,
         awardId: first.awardId,
         deliveryStatus: first.deliveryStatus,
-        unverifiedReason: first.unverifiedReason,
+        unverifiedReason: first.unverifiedReason ?? null,
+        baselineSamples: samples.baselineSamples,
+        windowSamples: samples.windowSamples,
+      });
+    }
+    if (first.deliveryStatus === 'not_delivered') {
+      return refused('The window measured no reduction, so nothing is owed for it.', {
+        requirementId,
+        awardId: first.awardId,
+        baselinePowerW: first.baselinePowerW,
+        measuredPowerW: first.measuredPowerW,
       });
     }
     const settled = await ctx.admin.caller.locationalFlexibility.settle({
@@ -483,14 +689,17 @@ export const flexibilitySteps: Record<string, JourneyStep> = {
     return passed('Merit-order clearing, measured delivery, then settlement of measured energy.', {
       requirementId,
       awardId: first.awardId,
+      clearingPriceCentsPerKwh: cleared.clearingPriceCentsPerKwh ?? null,
       deliveryStatus: first.deliveryStatus,
+      baselineSamples: first.baselineSamples,
+      measuredSamples: first.measuredSamples,
       deliveredEnergyWh: first.deliveredEnergyWh,
-      settledAmount: settled?.amount ?? null,
+      settledAmountCents: settled.amount,
     });
   },
 
   'member-awards': async ctx => {
-    const rows = (await ctx.member.caller.locationalFlexibility.myAwards({ limit: 25 })) ?? [];
+    const rows = await ctx.member.caller.locationalFlexibility.myAwards({ limit: 25 });
     const paidWithoutVerification = rows.filter(
       row => row.settled && row.deliveryStatus === 'unverified'
     ).length;

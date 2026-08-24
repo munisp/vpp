@@ -15,6 +15,7 @@ import {
   type JourneyStep,
 } from '../step';
 import { ensureApprovedAsset, ensureMarketPriceHistory } from '../fixtures';
+import { seedStrategyTemplates } from '../../db-strategy-templates';
 
 const BUSINESS_REGISTRATION = 'JRNY-B2B-0001';
 
@@ -335,29 +336,32 @@ export const b2bTradeSteps: Record<string, JourneyStep> = {
 
 export const strategySteps: Record<string, JourneyStep> = {
   'clone-template': async ctx => {
+    // The library is static product content the app seeds at boot; the journey
+    // runs the same idempotent seed so a run against a fresh database exercises
+    // cloning rather than reporting an empty shelf.
+    await seedStrategyTemplates();
     const templates = await ctx.member.caller.strategyTemplates.list();
     const list = Array.isArray(templates)
       ? templates
       : (templates as { templates?: Array<{ id: number }> }).templates ?? [];
     if (list.length === 0) {
-      return refused('No strategy templates are seeded, so there is nothing to clone.');
+      return failed('The platform ships a strategy library, but no template is on offer.');
     }
     const templateId = (list[0] as { id: number }).id;
     const cloned = await ctx.member.caller.strategyTemplates.clone({ templateId });
-    const strategyId =
-      (cloned as { strategyId?: number; id?: number }).strategyId ??
-      (cloned as { id?: number }).id ??
-      null;
+    const strategyId = cloned.strategyId;
 
     const strategies = await ctx.member.caller.tradingStrategies.list();
     const owned = Array.isArray(strategies)
       ? strategies
       : (strategies as { strategies?: Array<{ id: number }> }).strategies ?? [];
-    const resolvedId =
-      strategyId ?? (owned.length > 0 ? (owned[owned.length - 1] as { id: number }).id : null);
-    if (resolvedId === null) {
-      return failed('A cloned template did not become a strategy the member owns.', { templateId });
+    if (typeof strategyId !== 'number' || !owned.some(s => (s as { id: number }).id === strategyId)) {
+      return failed('A cloned template did not become a strategy the member owns.', {
+        templateId,
+        strategyId: strategyId ?? null,
+      });
     }
+    const resolvedId = strategyId;
     return passed('A template is cloned into the member’s own strategies.', {
       templateId,
       strategyId: resolvedId,
@@ -371,20 +375,32 @@ export const strategySteps: Record<string, JourneyStep> = {
       id: strategyId,
       period: '30d',
     });
-    const trades = (result as { tradesEvaluated?: number; totalTrades?: number }).tradesEvaluated
-      ?? (result as { totalTrades?: number }).totalTrades
-      ?? null;
-    if (trades === 0) {
-      return refused('The backtest reports it had no history to measure rather than a return.', {
+    const results = result.results;
+    // A backtest either names the history it measured or says it measured none;
+    // a return with no stated basis is the failure this step exists to catch.
+    if (!results.measured) {
+      if (results.successRate !== null) {
+        return failed('An unmeasured backtest still reports a success rate.', {
+          strategyId,
+          tradesConsidered: results.tradesConsidered,
+          successRate: results.successRate,
+        });
+      }
+      return refused('The backtest states it had no matching history rather than a return.', {
         strategyId,
+        tradesConsidered: results.tradesConsidered,
+        simulatedTrades: results.simulatedTrades,
+        detail: result.message,
       });
     }
-    if (trades === null) {
-      return failed('A backtest reported a result without saying what it measured.', { strategyId });
+    if (results.successRate === null) {
+      return failed('A measured backtest cannot state the rate it measured.', { strategyId });
     }
     return passed('The backtest reports what it measured over recorded history.', {
       strategyId,
-      tradesEvaluated: trades,
+      tradesConsidered: results.tradesConsidered,
+      simulatedTrades: results.simulatedTrades,
+      successRate: results.successRate,
     });
   },
 
@@ -459,8 +475,7 @@ export const strategySteps: Record<string, JourneyStep> = {
       notifySMS: false,
       cooldownMinutes: 60,
     });
-    const alertId = (created as { id?: number; alert?: { id?: number } }).id
-      ?? (created as { alert?: { id?: number } }).alert?.id;
+    const alertId = created.alertId;
     if (typeof alertId !== 'number') {
       return failed('priceAlerts.create returned no alert id.');
     }

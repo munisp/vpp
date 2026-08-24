@@ -10,6 +10,8 @@ import {
   blocked,
   classifyDependencyError,
   count,
+  errorCode,
+  errorMessage,
   failed,
   passed,
   priorNumber,
@@ -97,14 +99,28 @@ export const prepaidPurchaseSteps: Record<string, JourneyStep> = {
   },
 
   'qr-payment-request': async ctx => {
-    const generated = await ctx.member.caller.qrcode.generate({
-      type: 'p2p',
-      amount: 2_500,
-      currency: 'TZS',
-      recipientId: String(ctx.member.user.id),
-      recipientName: ctx.member.user.name ?? 'Journey member',
-      description: `Journey QR request ${ctx.runKey}`,
-    });
+    // A deployment with no signing key cannot issue a payment code at all, and
+    // refusing is the correct behaviour there — an unsigned code would be
+    // attacker-editable — so that answer is recorded as a refusal rather than
+    // thrown as a defect.
+    let generated: Awaited<ReturnType<typeof ctx.member.caller.qrcode.generate>>;
+    try {
+      generated = await ctx.member.caller.qrcode.generate({
+        type: 'p2p',
+        amount: 2_500,
+        currency: 'TZS',
+        recipientId: String(ctx.member.user.id),
+        recipientName: ctx.member.user.name ?? 'Journey member',
+        description: `Journey QR request ${ctx.runKey}`,
+      });
+    } catch (error) {
+      if (errorCode(error) === 'PRECONDITION_FAILED') {
+        return refused('No signing key is configured, so no payment code is issued at all.', {
+          detail: errorMessage(error),
+        });
+      }
+      throw error;
+    }
     // The bytes a scanner would read, not a summary of them: the payload has to
     // verify against its own signature or the code is worthless to a payer.
     const parsed = await ctx.member.caller.qrcode.parse({ qrData: generated.payload });

@@ -351,7 +351,7 @@ class GridOperatorService {
       const endTime = new Date(startTime.getTime() + trigger.duration * 60 * 60 * 1000);
       
       // Create DR event using the DR database service
-      await createDREvent({
+      const eventId = await createDREvent({
         operatorId: parseInt(this.operatorId) || 1,
         eventName: `Grid ${trigger.severity.toUpperCase()}: ${trigger.reason}`,
         eventType: trigger.severity === 'critical' ? 'emergency' : 'economic',
@@ -371,6 +371,7 @@ class GridOperatorService {
 
       return {
         success: true,
+        eventId,
         message: `DR event triggered successfully. Starts at ${startTime.toISOString()}`,
       };
     } catch (error: any) {

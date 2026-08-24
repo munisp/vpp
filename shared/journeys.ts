@@ -34,6 +34,7 @@ export type ExternalDependency =
   | 'ocpp_station'
   | 'matter_controller'
   | 'mqtt_broker'
+  | 'optimizer'
   | 'kafka_broker'
   | 'object_store'
   | 'ollama'
@@ -49,6 +50,7 @@ export const EXTERNAL_DEPENDENCY_LABELS: Record<ExternalDependency, string> = {
   ocpp_station: 'OCPP charge point',
   matter_controller: 'Matter controller',
   mqtt_broker: 'MQTT broker',
+  optimizer: 'Deployed dispatch optimizer service',
   kafka_broker: 'Kafka broker',
   object_store: 'S3/MinIO object store',
   ollama: 'Ollama server with a pulled model',
@@ -680,6 +682,7 @@ export const JOURNEYS: JourneyMeta[] = [
         navPaths: ['/grid/price-signals'],
         acting: admin,
         mutates: true,
+        requires: ['optimizer'],
       },
       {
         id: 'publish',
@@ -688,6 +691,7 @@ export const JOURNEYS: JourneyMeta[] = [
         navPaths: ['/grid/price-signals'],
         acting: admin,
         mutates: true,
+        requires: ['mqtt_broker'],
       },
       {
         id: 'member-view',

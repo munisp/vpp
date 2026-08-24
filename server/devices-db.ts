@@ -36,6 +36,23 @@ export async function getDeviceById(id: number) {
 }
 
 /**
+ * Get device by its device identifier — the subject of the device credential,
+ * which is what an operator rotating a secret knows.
+ */
+export async function getDeviceByDeviceId(deviceId: string) {
+  const db = await getDb();
+  if (!db) return undefined;
+
+  const result = await db
+    .select()
+    .from(devices)
+    .where(eq(devices.deviceId, deviceId))
+    .limit(1);
+
+  return result[0];
+}
+
+/**
  * Get devices by asset ID
  */
 export async function getDevicesByAssetId(assetId: number) {

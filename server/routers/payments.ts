@@ -81,27 +81,43 @@ export const paymentsRouter = router({
 
         // Initiate payment with gateway for mobile money
         let gatewayResponse: paymentGateway.PaymentResponse | null = null;
-        
-        if (input.paymentMethod === 'mpesa' && input.phoneNumber) {
-          gatewayResponse = await paymentGateway.initiateMpesaPayment({
-            amount: input.amount,
-            phoneNumber: input.phoneNumber,
-            accountReference: `PAY${payment.id}`,
-            description: `VPP ${input.paymentType} payment`
-          });
-        } else if (input.paymentMethod === 'airtel_money' && input.phoneNumber) {
-          gatewayResponse = await paymentGateway.initiateAirtelPayment({
-            amount: input.amount,
-            phoneNumber: input.phoneNumber,
-            accountReference: `PAY${payment.id}`,
-            description: `VPP ${input.paymentType} payment`
-          });
-        } else if (input.paymentMethod === 'tigo_pesa' && input.phoneNumber) {
-          gatewayResponse = await paymentGateway.initiateTigoPesaPayment({
-            amount: input.amount,
-            phoneNumber: input.phoneNumber,
-            accountReference: `PAY${payment.id}`,
-            description: `VPP ${input.paymentType} payment`
+
+        try {
+          if (input.paymentMethod === 'mpesa' && input.phoneNumber) {
+            gatewayResponse = await paymentGateway.initiateMpesaPayment({
+              amount: input.amount,
+              phoneNumber: input.phoneNumber,
+              accountReference: `PAY${payment.id}`,
+              description: `VPP ${input.paymentType} payment`
+            });
+          } else if (input.paymentMethod === 'airtel_money' && input.phoneNumber) {
+            gatewayResponse = await paymentGateway.initiateAirtelPayment({
+              amount: input.amount,
+              phoneNumber: input.phoneNumber,
+              accountReference: `PAY${payment.id}`,
+              description: `VPP ${input.paymentType} payment`
+            });
+          } else if (input.paymentMethod === 'tigo_pesa' && input.phoneNumber) {
+            gatewayResponse = await paymentGateway.initiateTigoPesaPayment({
+              amount: input.amount,
+              phoneNumber: input.phoneNumber,
+              accountReference: `PAY${payment.id}`,
+              description: `VPP ${input.paymentType} payment`
+            });
+          }
+        } catch (gatewayError) {
+          // A gateway that was never configured, or could not be reached, never
+          // saw this charge. The row must not be left pending: a pending row is
+          // what a later status query would try to resolve, and there is no
+          // provider reference for it to resolve against.
+          const detail =
+            gatewayError instanceof Error ? gatewayError.message : String(gatewayError);
+          await db.updatePaymentStatus(payment.id, 'failed', undefined, 'pending');
+          throw new TRPCError({
+            code: 'SERVICE_UNAVAILABLE',
+            message: /_NOT_CONFIGURED$/.test(detail)
+              ? `${detail}: no gateway credentials are stored, so no charge can be raised.`
+              : `The payment gateway could not be reached: ${detail}`,
           });
         }
 

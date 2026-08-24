@@ -348,15 +348,22 @@ export const tradingStrategiesRouter = router({
         }
       }
 
-      const successRate = simulatedTrades > 0 ? (successfulSimulations / simulatedTrades) * 100 : 0;
+      // A backtest over no history is not a strategy that made no profit, and a
+      // strategy that matched nothing is not one with a 0% success rate: both
+      // read as a measured verdict when they are the absence of one. The result
+      // therefore carries what it looked at, and states a rate only when there
+      // was something to rate.
+      const successRate = simulatedTrades > 0 ? (successfulSimulations / simulatedTrades) * 100 : null;
 
       // Store backtest results
       const backtestResults = {
         period: input.period,
+        tradesConsidered: historicalTrades.length,
         simulatedTrades,
         projectedProfit: projectedProfit / 100, // Convert from cents to TZS
         projectedEnergyTraded: projectedEnergyTraded / 1000, // Convert to kWh
         successRate,
+        measured: historicalTrades.length > 0 && simulatedTrades > 0,
         testedAt: new Date().toISOString(),
       };
 
@@ -368,7 +375,12 @@ export const tradingStrategiesRouter = router({
       return {
         success: true,
         results: backtestResults,
-        message: 'Backtest completed successfully',
+        message:
+          historicalTrades.length === 0
+            ? `No trade was recorded in the last ${input.period}, so this strategy has not been backtested against anything.`
+            : simulatedTrades === 0
+              ? `None of the ${historicalTrades.length} trades in the last ${input.period} met this strategy's conditions, so it has no measured return.`
+              : `Backtested against ${simulatedTrades} of ${historicalTrades.length} recorded trades.`,
       };
     }),
 });

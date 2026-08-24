@@ -237,6 +237,20 @@ export async function buildFleetSites(
       });
       continue;
     }
+    // A point whose median is not a finite number is an unknown load, not a
+    // zero one: sending it on would either ask the optimizer to plan against
+    // NaN or quietly plan a site as if it consumed nothing.
+    const unknownIntervals = loadPoints.filter(
+      point => !Number.isFinite(point.values.p50)
+    ).length;
+    if (unknownIntervals > 0) {
+      excluded.push({
+        siteRef,
+        userId,
+        reason: `load forecast has no median for ${unknownIntervals} of ${input.horizon} intervals`,
+      });
+      continue;
+    }
     const loadW = loadPoints.map(point => Math.max(0, point.values.p50));
     if (loadW.every(value => value === 0)) {
       excluded.push({
@@ -272,8 +286,12 @@ export async function buildFleetSites(
   }
 
   if (sites.length === 0) {
+    // Sites are excluded for several different reasons, and an operator who is
+    // told only that nothing could be coordinated cannot tell a site with no
+    // history from one whose forecast is unusable, so the reasons travel with it.
     throw new PriceSignalError(
-      `No participating site has enough measured history to be coordinated (${excluded.length} excluded)`
+      `No participating site could be coordinated (${excluded.length} excluded): ` +
+        excluded.map(site => `${site.siteRef}: ${site.reason}`).join('; ')
     );
   }
 
@@ -286,6 +304,42 @@ function netImportW(plan: MilpDispatchResponse, index: number): number {
     throw new PriceSignalError(`Site plan is missing interval ${index}`);
   }
   return interval.grid_import_w - interval.grid_export_w;
+}
+
+/**
+ * What the fleet intends with no coordination signal at all.
+ *
+ * An operator asking the fleet for a profile has no way to tell an ambitious
+ * target from an impossible one without this: a target the fleet cannot reach
+ * only ever comes back as `not_converged`, which says the coordination failed
+ * but not that the request was never physically available. The baseline is
+ * solved with the shared cap set to the sum of the sites' own connection
+ * limits, so nothing but each site's own constraints shapes the answer.
+ */
+export async function baselineFleetNet(input: {
+  sites: FleetSite[];
+  horizon: number;
+}): Promise<{ netW: number[]; solver: string }> {
+  if (input.sites.length === 0) {
+    throw new PriceSignalError('A fleet baseline needs at least one participating site');
+  }
+  const headroomW = input.sites.reduce((sum, site) => sum + site.request.site.max_import_w, 0);
+  const result = await solveCoordination({
+    sites: input.sites.map(site => ({ request: site.request })),
+    shared_import_limit_w: Array.from({ length: input.horizon }, () => headroomW),
+  });
+  if (result.status !== 'optimal') {
+    throw new MilpOptimizerError(
+      `baseline returned status ${result.status}; the fleet's uncoordinated plan is unknown`,
+      { solveStatus: result.status }
+    );
+  }
+  if (result.aggregate_net_w.length !== input.horizon) {
+    throw new PriceSignalError(
+      `baseline covers ${result.aggregate_net_w.length} of ${input.horizon} intervals`
+    );
+  }
+  return { netW: result.aggregate_net_w.map(watts => Math.round(watts)), solver: result.solver };
 }
 
 export interface CoordinateFleetSignalInput extends FleetSignalScope {

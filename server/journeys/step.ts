@@ -37,6 +37,11 @@ export type StepContext = {
   prior: Record<string, Facts>;
   /** Stable per-run suffix, so re-running a journey does not collide. */
   runKey: string;
+  /**
+   * The step being run. Fixtures name the resources they create after it, so two
+   * steps of one run do not collide on a resource whose identifier is unique.
+   */
+  stepId: string;
 };
 
 export type JourneyStep = (ctx: StepContext) => Promise<StepReport>;
@@ -76,7 +81,10 @@ export function failed(detail: string, facts: Facts = {}): StepReport {
  * than reporting a pass it did not earn.
  */
 export class MissingPriorFact extends Error {
-  constructor(stepId: string, fact: string) {
+  constructor(
+    readonly stepId: string,
+    readonly fact: string
+  ) {
     super(`Step "${stepId}" did not record "${fact}", which this step needs.`);
   }
 }

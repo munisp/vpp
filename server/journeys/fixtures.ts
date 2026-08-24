@@ -8,6 +8,8 @@
  * journey proves.
  */
 
+import { createHash } from 'crypto';
+import { TRPCError } from '@trpc/server';
 import { handleModbusReadings } from '../services/grid-protocol-ingest';
 import type { StepContext } from './step';
 
@@ -94,30 +96,39 @@ export type DeviceCredential = {
  * Register a device against an asset and keep its credential.
  *
  * The secret is returned once at registration and only ever stored hashed, so a
- * journey that needs to ingest telemetry has to register its own device; it
- * cannot recover the credential of one registered by an earlier run. The device
- * id therefore carries the run key.
+ * journey that needs to ingest telemetry cannot recover the credential of a
+ * device an earlier run registered — it rotates that device's secret instead,
+ * which is what the platform tells an operator to do. The device id is derived
+ * from the step and the asset (device ids are unique, so two steps of one run
+ * against the same asset would otherwise collide) and stays inside the column's
+ * width, so a long journey name cannot truncate two steps into one id.
  */
 export async function registerDevice(
   ctx: StepContext,
   assetId: number,
   deviceType: 'smart_meter' | 'inverter' | 'battery_controller' | 'sensor' = 'smart_meter'
 ): Promise<DeviceCredential> {
-  const deviceId = `journey-${assetId}-${ctx.runKey}`.slice(0, 60);
-  const registration = await ctx.admin.caller.devices.register({
-    assetId,
-    deviceId,
-    deviceType,
-    manufacturer: 'Journey',
-    model: 'fixture',
-    telemetryInterval: 5,
-  });
+  const discriminator = createHash('sha256').update(`${assetId}:${ctx.stepId}`).digest('hex').slice(0, 12);
+  const deviceId = `journey-${assetId}-${ctx.stepId}`.slice(0, 46) + `-${discriminator}`;
+  let issued: unknown;
+  try {
+    issued = await ctx.admin.caller.devices.register({
+      assetId,
+      deviceId,
+      deviceType,
+      manufacturer: 'Journey',
+      model: 'fixture',
+      telemetryInterval: 5,
+    });
+  } catch (error) {
+    if (!(error instanceof TRPCError) || error.code !== 'CONFLICT') throw error;
+    issued = await ctx.admin.caller.devices.rotateCredential({ deviceId });
+  }
 
-  const password = (registration as { mqttCredentials?: { password?: string } }).mqttCredentials
-    ?.password;
-  const deviceRowId = (registration as { deviceId?: number }).deviceId;
+  const password = (issued as { mqttCredentials?: { password?: string } }).mqttCredentials?.password;
+  const deviceRowId = (issued as { deviceId?: number }).deviceId;
   if (typeof password !== 'string' || typeof deviceRowId !== 'number') {
-    throw new Error('devices.register did not return the credential it says it issues once.');
+    throw new Error('The devices router did not return the credential it says it issues once.');
   }
 
   return { deviceId, deviceRowId, password };
@@ -185,6 +196,75 @@ export async function ingestHistory(
   }
   const result = await handleModbusReadings(readings);
   return result.samples;
+}
+
+/**
+ * Readings for one flexibility delivery window and for the same clock window on
+ * the previous days, through the Modbus ingest path.
+ *
+ * Delivery is measured against the asset's own history in the same clock window,
+ * so an award can only be verified when that history exists. Member telemetry is
+ * stamped with the server clock and cannot carry it; the device path can, which
+ * is the same path a poller replaying a spool uses.
+ *
+ * `baselinePowerW` is the asset's ordinary net power and `windowPowerW` what it
+ * reported while delivering; the service derives the reduction itself, so the
+ * fixture states measurements rather than an outcome.
+ */
+export async function ingestFlexibilityWindow(
+  credential: DeviceCredential,
+  startsAtMs: number,
+  endsAtMs: number,
+  options: {
+    baselineDays?: number;
+    samplesPerWindow?: number;
+    baselinePowerW?: number;
+    windowPowerW?: number;
+  } = {}
+): Promise<{ baselineSamples: number; windowSamples: number }> {
+  const baselineDays = options.baselineDays ?? 4;
+  const samplesPerWindow = options.samplesPerWindow ?? 3;
+  const baselinePowerW = options.baselinePowerW ?? 400;
+  const windowPowerW = options.windowPowerW ?? 2_600;
+  const spanMs = endsAtMs - startsAtMs;
+  const stepMs = Math.max(1, Math.floor(spanMs / samplesPerWindow));
+
+  const readingsAt = (timestampMs: number, powerW: number) => [
+    {
+      device_id: credential.deviceId,
+      name: 'active_power',
+      unit: 'W',
+      address: 1,
+      value: powerW,
+      timestamp_ms: timestampMs,
+    },
+    {
+      device_id: credential.deviceId,
+      name: 'total_energy',
+      unit: 'Wh',
+      address: 2,
+      value: Math.max(1, Math.round((powerW * stepMs) / 3_600_000)),
+      timestamp_ms: timestampMs,
+    },
+  ];
+
+  const baseline = [];
+  for (let day = baselineDays; day >= 1; day -= 1) {
+    for (let index = 0; index < samplesPerWindow; index += 1) {
+      baseline.push(
+        ...readingsAt(startsAtMs - day * 86_400_000 + index * stepMs, baselinePowerW)
+      );
+    }
+  }
+  const baselineResult = await handleModbusReadings(baseline);
+
+  const inWindow = [];
+  for (let index = 0; index < samplesPerWindow; index += 1) {
+    inWindow.push(...readingsAt(startsAtMs + index * stepMs, windowPowerW));
+  }
+  const windowResult = await handleModbusReadings(inWindow);
+
+  return { baselineSamples: baselineResult.samples, windowSamples: windowResult.samples };
 }
 
 /**

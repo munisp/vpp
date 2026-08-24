@@ -250,9 +250,11 @@ export const allocationRuns = pgTable("allocation_runs", {
   surplusWh: int("surplus_wh").notNull(),
   deficitWh: int("deficit_wh").notNull(),
 
-  // Real prices used (cents/kWh) — from community-energy getPeriodPrices
-  exportPriceCents: int("export_price_cents").notNull(),
-  importPriceCents: int("import_price_cents").notNull(),
+  // Real prices used, cents per kWh x100 — from community-energy
+  // getPeriodPrices, which resolves fractional market prices a whole cent
+  // cannot hold without moving the money it allocates.
+  exportPriceCentsX100: int("export_price_cents_x100").notNull(),
+  importPriceCentsX100: int("import_price_cents_x100").notNull(),
   netValueCents: int("net_value_cents").notNull(),
 
   status: allocationRunsStatusEnum("status").default("computed").notNull(),

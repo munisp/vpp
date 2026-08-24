@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from typing import Optional
+from urllib.parse import urlparse
 
 
 class ConfigError(RuntimeError):
@@ -21,6 +22,22 @@ def _require(name: str) -> str:
     value = os.getenv(name, "").strip()
     if not value:
         raise ConfigError(f"{name} is required")
+    return value
+
+
+def _postgres_dsn(value: str, name: str) -> str:
+    """The platform stores its data only in PostgreSQL.
+
+    psycopg accepts a URL of any scheme and only fails when a statement runs,
+    so a DSN for another database would start an ingestion run that fails with
+    an opaque connection error instead of naming the setting at fault.
+    """
+    scheme = urlparse(value).scheme.lower()
+    if scheme not in ("postgres", "postgresql"):
+        raise ConfigError(
+            f"{name} addresses {scheme or 'nothing'}, and this platform stores its data "
+            "only in PostgreSQL"
+        )
     return value
 
 
@@ -80,7 +97,12 @@ class Config:
 
 
 def load_config() -> Config:
-    dsn = os.getenv("LAKEHOUSE_DATABASE_URL", "").strip() or _require("DATABASE_URL")
+    lake_dsn = os.getenv("LAKEHOUSE_DATABASE_URL", "").strip()
+    dsn = (
+        _postgres_dsn(lake_dsn, "LAKEHOUSE_DATABASE_URL")
+        if lake_dsn
+        else _postgres_dsn(_require("DATABASE_URL"), "DATABASE_URL")
+    )
     prefix = os.getenv("LAKEHOUSE_PREFIX", "vpp").strip().strip("/")
 
     kind = os.getenv("LAKEHOUSE_STORE", "s3").strip().lower()

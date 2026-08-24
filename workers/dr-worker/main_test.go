@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -280,5 +281,23 @@ func TestCalculateCompensationActivity_SkipsZeroReduction(t *testing.T) {
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Errorf("unfulfilled expectations: %v", err)
+	}
+}
+
+func TestWithUTCSession_RefusesADSNForAnotherDatabase(t *testing.T) {
+	// lib/pq takes any scheme and fails per query, so this worker would stay up
+	// reporting query errors instead of naming the setting at fault.
+	if _, err := withUTCSession("mysql://vpp:vpp@127.0.0.1:3306/vpp"); err == nil {
+		t.Fatal("expected a MySQL DSN to be refused")
+	} else if !strings.Contains(err.Error(), "only in PostgreSQL") {
+		t.Errorf("unexpected error: %v", err)
+	}
+
+	dsn, err := withUTCSession("postgresql://vpp:vpp@127.0.0.1:5432/vpp")
+	if err != nil {
+		t.Fatalf("unexpected error for a PostgreSQL DSN: %v", err)
+	}
+	if !strings.Contains(dsn, "timezone%3DUTC") && !strings.Contains(dsn, "timezone=UTC") {
+		t.Errorf("expected the UTC session option, got %q", dsn)
 	}
 }

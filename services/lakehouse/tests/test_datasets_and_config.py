@@ -106,3 +106,17 @@ def test_a_nonsense_batch_size_stops_the_job(monkeypatch) -> None:
     monkeypatch.setenv("LAKEHOUSE_BATCH_ROWS", "0")
     with pytest.raises(ConfigError, match="must be greater than zero"):
         load_config()
+
+def test_a_dsn_for_another_database_is_refused_not_connected_to(monkeypatch) -> None:
+    # psycopg would take this URL and fail per statement, which reads as an
+    # outage rather than as the misconfiguration it is.
+    _clear(monkeypatch)
+    monkeypatch.setenv("DATABASE_URL", "mysql://vpp:vpp@localhost:3306/vpp")
+    monkeypatch.setenv("LAKEHOUSE_STORE", "file")
+    monkeypatch.setenv("LAKEHOUSE_LOCAL_PATH", "/tmp/lake")
+
+    with pytest.raises(ConfigError, match="only in PostgreSQL"):
+        load_config()
+
+    monkeypatch.setenv("LAKEHOUSE_DATABASE_URL", "postgres://localhost/vpp_lake")
+    assert load_config().dsn == "postgres://localhost/vpp_lake"

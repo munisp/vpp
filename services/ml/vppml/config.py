@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from typing import Optional
+from urllib.parse import urlparse
 
 
 class ConfigError(RuntimeError):
@@ -27,6 +28,22 @@ def _require(name: str) -> str:
 def _optional(name: str) -> Optional[str]:
     value = os.getenv(name, "").strip()
     return value or None
+
+
+def _postgres_dsn(value: str, name: str) -> str:
+    """The platform stores its data only in PostgreSQL.
+
+    psycopg accepts a URL of any scheme and only fails when a statement runs,
+    so a DSN for another database would let a training run start and then fail
+    with an opaque connection error instead of naming the setting at fault.
+    """
+    scheme = urlparse(value).scheme.lower()
+    if scheme not in ("postgres", "postgresql"):
+        raise ConfigError(
+            f"{name} addresses {scheme or 'nothing'}, and this platform stores its data "
+            "only in PostgreSQL"
+        )
+    return value
 
 
 def _positive_int(name: str, default: int) -> int:
@@ -113,7 +130,12 @@ def load_lake_access() -> Optional[LakeAccess]:
 
 
 def load_config() -> Config:
-    dsn = os.getenv("ML_DATABASE_URL", "").strip() or _require("DATABASE_URL")
+    ml_dsn = os.getenv("ML_DATABASE_URL", "").strip()
+    dsn = (
+        _postgres_dsn(ml_dsn, "ML_DATABASE_URL")
+        if ml_dsn
+        else _postgres_dsn(_require("DATABASE_URL"), "DATABASE_URL")
+    )
     return Config(
         dsn=dsn,
         artifact_dir=_require("ML_ARTIFACT_DIR"),

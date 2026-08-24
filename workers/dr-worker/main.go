@@ -9,6 +9,7 @@ import (
 	"math"
 	"net/url"
 	"os"
+	"strings"
 	"time"
 
 	_ "github.com/lib/pq"
@@ -73,6 +74,12 @@ func withUTCSession(databaseURL string) (string, error) {
 	parsed, err := url.Parse(databaseURL)
 	if err != nil {
 		return "", fmt.Errorf("DATABASE_URL is not a valid URL: %w", err)
+	}
+	// lib/pq accepts a URL of any scheme and fails per query afterwards, so a
+	// DSN for another database would leave this worker up and unable to read.
+	if scheme := strings.ToLower(parsed.Scheme); scheme != "postgres" && scheme != "postgresql" {
+		return "", fmt.Errorf(
+			"DATABASE_URL addresses %s, and this platform stores its data only in PostgreSQL", scheme)
 	}
 	query := parsed.Query()
 	if query.Get("options") == "" {

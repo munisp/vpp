@@ -35,6 +35,7 @@ import {
   TradingPreference,
 } from "../drizzle/schema";
 import { ENV } from './_core/env';
+import { assertPostgresUrl, DatabaseUrlError } from './_core/database-url';
 
 let _db: ReturnType<typeof drizzle> | null = null;
 
@@ -62,6 +63,9 @@ export function idleTransactionTimeoutMs(): number {
 
 export async function getDb() {
   if (!_db && process.env.DATABASE_URL) {
+    // A non-PostgreSQL DSN is a deployment mistake, not a transient outage:
+    // it must not be swallowed into a database-unavailable warning.
+    assertPostgresUrl(process.env.DATABASE_URL);
     try {
       // `timezone=UTC` is not optional: every timestamp column is
       // `timestamp without time zone` holding UTC, and `NOW()` is converted
@@ -87,6 +91,7 @@ export async function getDb() {
         },
       });
     } catch (error) {
+      if (error instanceof DatabaseUrlError) throw error;
       console.warn("[Database] Failed to connect:", error);
       _db = null;
     }

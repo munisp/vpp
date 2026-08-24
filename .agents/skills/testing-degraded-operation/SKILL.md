@@ -7,7 +7,8 @@ description: How to bring up and end-to-end test the VPP degraded/offline execut
 
 ## Bring-up
 
-Repo `.env` may carry a stale MySQL `DATABASE_URL` and `NODE_ENV`; always override both explicitly.
+Repo `.env` may carry a stale `DATABASE_URL` and `NODE_ENV`; always override both explicitly. Only a
+`postgres://`/`postgresql://` DSN is accepted — anything else is refused at connect time by design.
 
 ```bash
 export NODE_ENV=development PORT=3000

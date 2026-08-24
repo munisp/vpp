@@ -112,6 +112,21 @@ describe('Modbus reading mapping', () => {
   });
 });
 
+describe('OCPP SoC samples', () => {
+  it('stores state of charge as the plain percentage the sessions table expects', async () => {
+    const { __testables } = await import('./services/grid-protocol-ingest');
+    expect(__testables.toSocPercent(63.5)).toBe(64);
+    expect(__testables.toSocPercent(0)).toBe(0);
+    expect(__testables.toSocPercent(100)).toBe(100);
+  });
+
+  it('rejects a sample that is not a percentage', async () => {
+    const { __testables } = await import('./services/grid-protocol-ingest');
+    expect(() => __testables.toSocPercent(6350)).toThrow(/not a percentage/);
+    expect(() => __testables.toSocPercent(-1)).toThrow(/not a percentage/);
+  });
+});
+
 describe('grid command client', () => {
   beforeEach(() => {
     process.env.GRID_PROTOCOL_SHARED_SECRET = SECRET;

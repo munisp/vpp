@@ -35,14 +35,31 @@ function minutesFromNow(minutes: number): Date {
  * the window opens, so it starts far enough ahead for the offer and clearing
  * steps, and it is short enough that the run can wait for it to elapse before
  * delivery is measured.
+ *
+ * The whole wait happens inside one step, so lead + length has to leave room
+ * under STEP_ACTIVITY_TIMEOUT_MS. A step that outlives its activity timeout is
+ * retried while the timed-out attempt keeps running, and the late attempt then
+ * overwrites the retry's result — which is how a run once recorded `failed`
+ * with five passed steps. `flexibility-window.test.ts` holds this to that.
  */
-const DELIVERY_WINDOW_LEAD_MS = 90_000;
-const DELIVERY_WINDOW_LENGTH_MS = 60_000;
+export const DELIVERY_WINDOW_LEAD_MS = 30_000;
+export const DELIVERY_WINDOW_LENGTH_MS = 60_000;
 
 async function waitUntil(epochMs: number): Promise<void> {
   const remaining = epochMs - Date.now();
   if (remaining <= 0) return;
   await new Promise(resolve => setTimeout(resolve, remaining));
+}
+
+/**
+ * Whether a service refused because the thing was already done.
+ *
+ * Journey steps are retried, so a step that clears a requirement or settles an
+ * award has to be able to run twice: the second attempt must carry on from the
+ * state the first left rather than record the refusal as a defect.
+ */
+function alreadyDone(error: unknown): boolean {
+  return error instanceof Error && /already/i.test(error.message);
 }
 
 export const demandResponseSteps: Record<string, JourneyStep> = {
@@ -641,8 +658,18 @@ export const flexibilitySteps: Record<string, JourneyStep> = {
     const requirementId = priorNumber(ctx, 'requirement', 'requirementId');
     const windowStartsAtMs = priorNumber(ctx, 'requirement', 'windowStartsAtMs');
     const windowEndsAtMs = priorNumber(ctx, 'requirement', 'windowEndsAtMs');
-    const cleared = await ctx.admin.caller.locationalFlexibility.clear({ requirementId });
-    if (cleared.awards.length === 0) {
+    // A retry of this step meets a requirement it cleared itself, so a repeat
+    // clearing is the earlier attempt's result rather than a failure; the awards
+    // it wrote are read back from the measurement below.
+    let cleared: Awaited<
+      ReturnType<typeof ctx.admin.caller.locationalFlexibility.clear>
+    > | null = null;
+    try {
+      cleared = await ctx.admin.caller.locationalFlexibility.clear({ requirementId });
+    } catch (error) {
+      if (!alreadyDone(error)) throw error;
+    }
+    if (cleared && cleared.awards.length === 0) {
       return refused('The requirement cleared short rather than awarding unverified capacity.', {
         requirementId,
         status: cleared.status,
@@ -660,6 +687,12 @@ export const flexibilitySteps: Record<string, JourneyStep> = {
     const measured = await ctx.admin.caller.locationalFlexibility.measure({ requirementId });
     const results = measured.results;
     if (results.length === 0) {
+      if (!cleared) {
+        return refused('The requirement cleared short rather than awarding unverified capacity.', {
+          requirementId,
+          reclearRefused: true,
+        });
+      }
       return failed('A cleared requirement measured no awards.', { requirementId });
     }
     const first = results[0];
@@ -683,18 +716,28 @@ export const flexibilitySteps: Record<string, JourneyStep> = {
         measuredPowerW: first.measuredPowerW,
       });
     }
-    const settled = await ctx.admin.caller.locationalFlexibility.settle({
-      awardId: first.awardId,
-    });
+    // Same reasoning as the clearing above: an award this step already settled
+    // must not be settled twice, and the refusal that prevents that is the
+    // evidence the first attempt paid it.
+    let settledAmountCents: number | null = null;
+    try {
+      const settled = await ctx.admin.caller.locationalFlexibility.settle({
+        awardId: first.awardId,
+      });
+      settledAmountCents = settled.amount;
+    } catch (error) {
+      if (!alreadyDone(error)) throw error;
+      settledAmountCents = first.earnedAmount ?? null;
+    }
     return passed('Merit-order clearing, measured delivery, then settlement of measured energy.', {
       requirementId,
       awardId: first.awardId,
-      clearingPriceCentsPerKwh: cleared.clearingPriceCentsPerKwh ?? null,
+      clearingPriceCentsPerKwh: cleared?.clearingPriceCentsPerKwh ?? null,
       deliveryStatus: first.deliveryStatus,
       baselineSamples: first.baselineSamples,
       measuredSamples: first.measuredSamples,
       deliveredEnergyWh: first.deliveredEnergyWh,
-      settledAmountCents: settled.amount,
+      settledAmountCents,
     });
   },
 

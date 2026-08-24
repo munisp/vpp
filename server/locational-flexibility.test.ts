@@ -468,6 +468,34 @@ describe('measureAward', () => {
     expect(result.deliveryStatus).toBe('delivered');
   });
 
+  it('credits a sub-hour window for the time it actually ran', async () => {
+    mockDb();
+    state.executeQueue = [
+      [
+        {
+          ...awardRow,
+          starts_at: '2026-05-01T18:00:00.000Z',
+          ends_at: '2026-05-01T18:01:30.000Z',
+        },
+      ],
+      [
+        {
+          measured_samples: 12,
+          measured_power: -1500,
+          baseline_samples: 40,
+          baseline_days: 9,
+          baseline_power: -4500,
+        },
+      ],
+    ];
+    const { measureAward } = await import('./services/locational-flexibility');
+    const result = await measureAward(8, after);
+    // 3 kW credited for 90 seconds is 75 Wh. Rounding the window to minutes
+    // would have paid two minutes (100 Wh) or, for a shorter window, nothing.
+    expect(result.creditedPowerW).toBe(3000);
+    expect(result.deliveredEnergyWh).toBe(75);
+  });
+
   it('pays a short delivery on what was measured', async () => {
     mockDb();
     state.executeQueue = [

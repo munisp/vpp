@@ -33,13 +33,19 @@ interface JourneyActivities {
 
 /**
  * A step calls real services, some of which talk to a provider that may be
- * slow; two minutes is the ceiling, and the step itself decides whether an
- * unreachable dependency is a block. Retries are for transport faults: a step
- * that reports `failed` has already returned, and is not retried, because
- * retrying a defect just records it three times.
+ * slow, and one waits for a flexibility delivery window to elapse; the step
+ * itself decides whether an unreachable dependency is a block. Retries are for
+ * transport faults: a step that reports `failed` has already returned, and is
+ * not retried, because retrying a defect just records it three times.
+ *
+ * The ceiling has to clear the longest legitimate step. A timed-out attempt is
+ * not cancelled — it runs on and overwrites the retry's recorded result, which
+ * is how a run once recorded `failed` with five passed steps.
  */
+export const STEP_ACTIVITY_TIMEOUT_MS = 300_000;
+
 const activities = proxyActivities<JourneyActivities>({
-  startToCloseTimeout: '2 minutes',
+  startToCloseTimeout: STEP_ACTIVITY_TIMEOUT_MS,
   retry: {
     initialInterval: '2s',
     backoffCoefficient: 2,

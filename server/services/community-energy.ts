@@ -14,6 +14,12 @@ import { marketPrices } from '../../drizzle/schema';
 import { pricePredictionService } from '../ml/price-prediction';
 import type { SqlRow } from '../sql-row';
 import { jsonSetText } from '../sql-json';
+import {
+  RESILIENCE_TELEMETRY_STALENESS_MINUTES,
+  assessResilience,
+  type ResilienceAssessment,
+} from './microgrid-resilience';
+import { loadCommunityStorage, loadCriticalLoadStates } from './critical-loads';
 
 // Types for community energy
 export interface EnergyCommunity {
@@ -80,13 +86,23 @@ export interface MicrogridStatus {
   communityId: number;
   mode: 'grid_tied' | 'islanded' | 'transitioning';
   gridConnectionStatus: 'connected' | 'disconnected' | 'fault';
-  totalGenerationKw: number;
-  totalLoadKw: number;
+  /** Measured local generation, kW. Null when nothing reported. */
+  totalGenerationKw: number | null;
+  /** Demand derived from the site's energy balance, kW. Null when unmeasured. */
+  totalLoadKw: number | null;
   batterySOC: number | null;
   frequencyHz: number | null;
   voltageV: number | null;
-  criticalLoadsServed: boolean;
+  /**
+   * Whether the declared critical loads are covered. Null when the register is
+   * empty or an input needed to total supply is unregistered — see
+   * `resilience.criticalService.reason`.
+   */
+  criticalLoadsServed: boolean | null;
+  /** Ride-through from measured storage energy, hours. Null with a reason. */
   estimatedAutonomyHours: number | null;
+  /** The full assessment: inputs used, inputs missing, and what that withheld. */
+  resilience: ResilienceAssessment;
   lastTransition: Date | null;
   telemetryAvailable: boolean; // false when no recent telemetry exists for community assets
   alerts: string[];
@@ -534,57 +550,68 @@ export class CommunityEnergyService {
     if (!community) throw new Error('Community not found');
     if (!community.canIsland) throw new Error('Community is not microgrid-capable');
 
-    const members = await this.getCommunityMembers(communityId);
     const alerts: string[] = [];
 
-    // Get aggregated telemetry
-    let totalGenerationKw = 0;
-    let totalLoadKw = 0;
+    // One reading per asset: the latest inside the staleness bound. Summing
+    // every row in the window instead multiplied each asset's power by however
+    // many times it happened to sample, so a fleet reporting every ten seconds
+    // read as thirty times its actual output.
+    const telemetryResult = await db.execute<SqlRow>(sql`
+      SELECT DISTINCT ON (a.id)
+        a.id AS asset_id,
+        a."assetType" AS asset_type,
+        t.power,
+        t."stateOfCharge" AS state_of_charge,
+        t.frequency,
+        t.voltage,
+        t.timestamp
+      FROM assets a
+      JOIN community_members cm ON cm.user_id = a."userId"
+      JOIN telemetry t ON t."assetId" = a.id
+      WHERE cm.community_id = ${communityId}
+        AND cm.status = 'active'
+        AND a.status = 'active'
+        AND t.timestamp > NOW() - (${RESILIENCE_TELEMETRY_STALENESS_MINUTES}::text || ' minutes')::interval
+      ORDER BY a.id, t.timestamp DESC
+    `);
+    const readings = telemetryResult.rows ?? [];
+
+    // The site's energy balance, in the platform's own conventions: a meter is
+    // the grid boundary (positive is import, negative is export), a battery is
+    // positive discharging, and generation is what the plant produced. Demand is
+    // derived from those rather than being read off the meter, which measures
+    // the boundary and not the load behind it.
+    let nonStorageGenerationKw = 0;
+    let batteryNetKw = 0;
+    let gridNetImportKw = 0;
     let batterySOC: number | null = null;
     let batteryCount = 0;
     let totalBatterySOC = 0;
-
-    // Grid quality is reported from real readings only; these stay null when no
-    // asset reported them in the window.
     let latestFrequencyHz: number | null = null;
     let latestVoltageV: number | null = null;
-    let telemetryRowsSeen = 0;
+    let latestReadingAt: Date | null = null;
 
-    for (const member of members.filter(m => m.status === 'active')) {
-      const telemetryResult = await db.execute<SqlRow>(sql`
-        SELECT a."assetType", t.power, t."stateOfCharge", t.frequency, t.voltage
-        FROM telemetry t
-        JOIN assets a ON a.id = t."assetId"
-        WHERE a."userId" = ${member.userId}
-          AND t.timestamp > (NOW() - INTERVAL '5 minute')
-        ORDER BY t.timestamp DESC
-      `);
+    for (const row of readings) {
+      const observedAt = row.timestamp ? new Date(String(row.timestamp)) : null;
+      if (observedAt && (latestReadingAt === null || observedAt > latestReadingAt)) {
+        latestReadingAt = observedAt;
+        if (row.frequency != null) latestFrequencyHz = Number(row.frequency) / 1000;
+        if (row.voltage != null) latestVoltageV = Number(row.voltage) / 1000;
+      }
 
-      for (const t of telemetryResult.rows || []) {
-        telemetryRowsSeen++;
-        // Rows arrive newest-first, so the first non-null reading is the latest.
-        if (latestFrequencyHz === null && t.frequency != null) {
-          latestFrequencyHz = Number(t.frequency) / 1000; // millihertz -> Hz
-        }
-        if (latestVoltageV === null && t.voltage != null) {
-          latestVoltageV = Number(t.voltage) / 1000; // millivolts -> V
-        }
+      const powerKw = row.power == null ? null : Number(row.power) / 1000;
+      const assetType = String(row.asset_type);
 
-        const power = (t.power || 0) / 1000; // Convert to kW
-        
-        if (t.assetType === 'solar' || t.assetType === 'wind' || t.assetType === 'generator') {
-          totalGenerationKw += Math.max(0, power);
-        } else if (t.assetType === 'battery') {
-          if (power > 0) totalGenerationKw += power;
-          else totalLoadKw += Math.abs(power);
-          
-          if (t.stateOfCharge) {
-            totalBatterySOC += t.stateOfCharge / 100;
-            batteryCount++;
-          }
-        } else {
-          totalLoadKw += Math.abs(power);
+      if (assetType === 'battery') {
+        if (row.state_of_charge != null) {
+          totalBatterySOC += Number(row.state_of_charge) / 100; // percentage x100 -> percent
+          batteryCount++;
         }
+        if (powerKw !== null) batteryNetKw += powerKw;
+      } else if (assetType === 'meter') {
+        if (powerKw !== null) gridNetImportKw += powerKw;
+      } else if (powerKw !== null) {
+        nonStorageGenerationKw += Math.max(0, powerKw);
       }
     }
 
@@ -592,14 +619,39 @@ export class CommunityEnergyService {
       batterySOC = totalBatterySOC / batteryCount;
     }
 
+    const telemetryAvailable = readings.length > 0;
+    const totalGenerationKw = telemetryAvailable
+      ? Math.round(nonStorageGenerationKw * 100) / 100
+      : null;
+    // Demand behind the boundary: local generation plus what storage and the
+    // grid are contributing. Never below zero, which would mean the readings
+    // disagree rather than that the site consumes negative power.
+    const totalLoadKw = telemetryAvailable
+      ? Math.round(Math.max(0, nonStorageGenerationKw + batteryNetKw + gridNetImportKw) * 100) / 100
+      : null;
+
+    const resilience = assessResilience({
+      totalGenerationKw,
+      totalLoadKw,
+      storage: await loadCommunityStorage(communityId),
+      criticalLoads: await loadCriticalLoadStates(communityId),
+    });
+
     // Determine grid connection status
     let gridConnectionStatus: 'connected' | 'disconnected' | 'fault' = 'connected';
     if (community.islandingMode === 'islanded') {
       gridConnectionStatus = 'disconnected';
     }
 
-    // Check for alerts
-    if (totalLoadKw > totalGenerationKw * 1.1 && community.islandingMode === 'islanded') {
+    // Alerts describe what was measured. An unmeasured community raises no
+    // "no generation" alert, because silence is not zero output.
+    if (!telemetryAvailable) {
+      alerts.push('No asset in this community has reported inside the telemetry staleness bound');
+    }
+    if (
+      totalLoadKw !== null && totalGenerationKw !== null &&
+      totalLoadKw > totalGenerationKw * 1.1 && community.islandingMode === 'islanded'
+    ) {
       alerts.push('Load exceeds generation - battery discharge required');
     }
     if (batterySOC !== null && batterySOC < 20) {
@@ -608,33 +660,34 @@ export class CommunityEnergyService {
     if (totalGenerationKw === 0 && community.islandingMode === 'islanded') {
       alerts.push('No generation available in island mode');
     }
-
-    // Estimate autonomy
-    let estimatedAutonomyHours: number | null = null;
-    if (batterySOC !== null && totalLoadKw > totalGenerationKw) {
-      const netDrain = totalLoadKw - totalGenerationKw;
-      const batteryCapacityKwh = (community.sharedCapacityKw || 0) * 2; // Assume 2-hour battery
-      const availableEnergy = batteryCapacityKwh * (batterySOC / 100);
-      estimatedAutonomyHours = netDrain > 0 ? availableEnergy / netDrain : 24;
+    if (resilience.criticalService.served === false) {
+      alerts.push(
+        `Critical loads are not covered: ${resilience.criticalService.unservedKw} kW short of ` +
+          `${resilience.criticalService.demandKw} kW declared critical demand`
+      );
     }
-
-    // Critical loads check (simplified - assume served if generation + battery > 50% of load)
-    const criticalLoadsServed = totalGenerationKw + (batterySOC ? batterySOC / 100 * 10 : 0) > totalLoadKw * 0.5;
+    if (resilience.criticalService.meetsAutonomyTarget === false) {
+      alerts.push(
+        `Ride-through of ${resilience.autonomy.hours} h is below the ` +
+          `${resilience.criticalService.autonomyTargetHours} h target declared for a critical load`
+      );
+    }
 
     return {
       communityId,
       mode: community.islandingMode,
       gridConnectionStatus,
-      totalGenerationKw: Math.round(totalGenerationKw * 100) / 100,
-      totalLoadKw: Math.round(totalLoadKw * 100) / 100,
+      totalGenerationKw,
+      totalLoadKw,
       batterySOC,
       // Real telemetry readings; null (never hardcoded) when none are available
       frequencyHz: latestFrequencyHz,
       voltageV: latestVoltageV,
-      criticalLoadsServed,
-      estimatedAutonomyHours,
+      criticalLoadsServed: resilience.criticalService.served,
+      estimatedAutonomyHours: resilience.autonomy.hours,
+      resilience,
       lastTransition: null, // Would track from state changes
-      telemetryAvailable: telemetryRowsSeen > 0,
+      telemetryAvailable,
       alerts,
     };
   }
@@ -697,14 +750,26 @@ export class CommunityEnergyService {
     if (!community) return { success: false, message: 'Community not found', newMode: 'unknown', transitionInitiated: false };
     if (!community.canIsland) return { success: false, message: 'Community cannot island', newMode: community.islandingMode, transitionInitiated: false };
 
-    // Check if safe to island
+    // Safe to island only if the loads that were declared critical can actually
+    // be covered. The previous gate compared total generation with half the
+    // measured load, which let a site island with its clinic unsupplied whenever
+    // its houses happened to be drawing little, and refused a site whose battery
+    // could carry the whole village. An unassessable community is refused too:
+    // islanding on an unknown is the failure mode this gate exists to prevent.
     const status = await this.getMicrogridStatus(communityId);
-    if (status.totalGenerationKw < status.totalLoadKw * 0.5) {
+    if (status.resilience.criticalService.served !== true) {
       return {
         success: false,
-        message: 'Insufficient generation to support island mode',
-        newMode: community.islandingMode,
         transitionInitiated: false,
+        reason: status.resilience.criticalService.served === false
+          ? 'critical_loads_not_covered'
+          : `critical_load_coverage_unknown:${status.resilience.criticalService.reason ?? 'unknown'}`,
+        message: status.resilience.criticalService.served === false
+          ? `Declared critical loads need ${status.resilience.criticalService.demandKw} kW and only ` +
+            `${status.resilience.criticalService.availableSupplyKw} kW is available`
+          : `Critical load coverage cannot be assessed: ${status.resilience.limitations.join('; ') ||
+              'no assessment available'}`,
+        newMode: community.islandingMode,
       };
     }
 

@@ -102,6 +102,11 @@ export const NAV_GROUPS: NavGroup[] = [
     label: 'Community',
     items: [
       { label: 'Community Pools', path: '/community-pools' },
+      {
+        label: 'Microgrid Resilience',
+        path: '/community/resilience',
+        keywords: ['island', 'autonomy', 'critical', 'backup', 'outage', 'clinic'],
+      },
       { label: 'Leaderboard', path: '/leaderboard', keywords: ['ranking'] },
       { label: 'Referral Leaderboard', path: '/referral-leaderboard' },
       { label: 'SMS Center', path: '/sms-center', keywords: ['message'] },

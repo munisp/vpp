@@ -17,6 +17,33 @@ const InitiatePaymentInputSchema = z.object({
   energyKwh: z.number().int().positive().optional(), // for token purchase
 });
 
+/**
+ * The only payment methods behind which this platform has a provider are the
+ * three mobile-money gateways. `bank_transfer` and `card` are collected by the
+ * schema but reach no provider, so a payment made with them is never asked for:
+ * it can only sit pending until someone reads it as money on its way.
+ */
+const GATEWAY_INITIATORS = {
+  mpesa: 'initiateMpesaPayment',
+  airtel_money: 'initiateAirtelPayment',
+  tigo_pesa: 'initiateTigoPesaPayment',
+} as const;
+
+type GatewayMethod = keyof typeof GATEWAY_INITIATORS;
+
+function isGatewayMethod(method: string): method is GatewayMethod {
+  return method in GATEWAY_INITIATORS;
+}
+
+/**
+ * A gateway that is not configured, or that could not be reached, is not a
+ * fault in the request: the caller is told the method is unavailable rather
+ * than being shown a failure it can do nothing about.
+ */
+function gatewayFailureCode(message: string): TRPCError['code'] {
+  return /_NOT_CONFIGURED$/.test(message) ? 'SERVICE_UNAVAILABLE' : 'BAD_GATEWAY';
+}
+
 const VerifyPaymentInputSchema = z.object({
   paymentId: z.number().int().positive(),
 });
@@ -66,6 +93,22 @@ export const paymentsRouter = router({
           });
         }
 
+        // Refuse before a payment row exists: a pending payment nobody will ever
+        // ask a provider about is indistinguishable from one in flight.
+        if (!isGatewayMethod(input.paymentMethod)) {
+          throw new TRPCError({
+            code: 'SERVICE_UNAVAILABLE',
+            message: `PAYMENT_METHOD_NO_PROVIDER: ${input.paymentMethod} has no payment provider on this deployment.`,
+          });
+        }
+
+        if (!input.phoneNumber) {
+          throw new TRPCError({
+            code: 'BAD_REQUEST',
+            message: `phoneNumber is required to charge ${input.paymentMethod}.`,
+          });
+        }
+
         const payment = await db.createPayment({
           userId: ctx.user.id,
           billingId: input.billingId,
@@ -79,35 +122,28 @@ export const paymentsRouter = router({
           metadata: input.energyKwh ? JSON.stringify({ energyKwh: input.energyKwh }) : undefined,
         });
 
-        // Initiate payment with gateway for mobile money
-        let gatewayResponse: paymentGateway.PaymentResponse | null = null;
-        
-        if (input.paymentMethod === 'mpesa' && input.phoneNumber) {
-          gatewayResponse = await paymentGateway.initiateMpesaPayment({
-            amount: input.amount,
-            phoneNumber: input.phoneNumber,
-            accountReference: `PAY${payment.id}`,
-            description: `VPP ${input.paymentType} payment`
-          });
-        } else if (input.paymentMethod === 'airtel_money' && input.phoneNumber) {
-          gatewayResponse = await paymentGateway.initiateAirtelPayment({
-            amount: input.amount,
-            phoneNumber: input.phoneNumber,
-            accountReference: `PAY${payment.id}`,
-            description: `VPP ${input.paymentType} payment`
-          });
-        } else if (input.paymentMethod === 'tigo_pesa' && input.phoneNumber) {
-          gatewayResponse = await paymentGateway.initiateTigoPesaPayment({
-            amount: input.amount,
-            phoneNumber: input.phoneNumber,
-            accountReference: `PAY${payment.id}`,
-            description: `VPP ${input.paymentType} payment`
-          });
+        const request = {
+          amount: input.amount,
+          phoneNumber: input.phoneNumber,
+          accountReference: `PAY${payment.id}`,
+          description: `VPP ${input.paymentType} payment`,
+        };
+
+        let gatewayResponse: paymentGateway.PaymentResponse;
+        try {
+          gatewayResponse = await paymentGateway[GATEWAY_INITIATORS[input.paymentMethod]](request);
+        } catch (error) {
+          // The provider was never reached, so nothing is in flight: retire the
+          // reservation rather than leaving a payment a status query could later
+          // resolve as completed.
+          const message = error instanceof Error ? error.message : String(error);
+          await db.updatePaymentStatus(payment.id, 'failed', undefined, 'pending');
+          throw new TRPCError({ code: gatewayFailureCode(message), message });
         }
 
         // A gateway that rejected the request must not leave a pending payment
         // behind that a later status query could resolve as completed.
-        if (gatewayResponse && !gatewayResponse.success) {
+        if (!gatewayResponse.success) {
           await db.updatePaymentStatus(payment.id, 'failed', undefined, 'pending');
           throw new TRPCError({
             code: 'BAD_REQUEST',
@@ -118,7 +154,7 @@ export const paymentsRouter = router({
         // Persist the gateway reference used to query status later. M-Pesa
         // status queries key off CheckoutRequestID, not MerchantRequestID, so
         // both are stored and the query reference is recorded in metadata.
-        if (gatewayResponse?.transactionId || gatewayResponse?.checkoutRequestId) {
+        if (gatewayResponse.transactionId || gatewayResponse.checkoutRequestId) {
           const gatewayReference =
             gatewayResponse.checkoutRequestId || gatewayResponse.transactionId!;
 
@@ -140,7 +176,7 @@ export const paymentsRouter = router({
           success: true,
           payment,
           gatewayResponse,
-          message: gatewayResponse?.message || 'Payment initiated successfully.',
+          message: gatewayResponse.message || 'Payment initiated successfully.',
         };
       } catch (error) {
         if (error instanceof TRPCError) throw error;

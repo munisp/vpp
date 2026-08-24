@@ -598,7 +598,7 @@ export default function DesignStudy() {
                           {(candidate.unmet_fraction * 100).toFixed(2)}%
                         </TableCell>
                         <TableCell className="text-right">
-                          {(candidate.renewable_fraction * 100).toFixed(0)}%
+                          {(candidate.renewable_fraction_of_served * 100).toFixed(0)}%
                         </TableCell>
                         <TableCell className="text-right">
                           {candidate.lcoe_cents_per_kwh === null

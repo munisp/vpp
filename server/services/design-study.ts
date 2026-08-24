@@ -173,7 +173,7 @@ interface OptimizerCandidate {
   renewable_kwh_per_year: number;
   curtailed_kwh_per_year: number;
   backup_kwh_per_year: number;
-  renewable_fraction: number;
+  renewable_fraction_of_served: number;
   fuel_litres_per_year: number | null;
   emissions_kg_per_year: number | null;
   capex_cents: number;

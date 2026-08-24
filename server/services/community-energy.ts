@@ -590,13 +590,25 @@ export class CommunityEnergyService {
     let latestFrequencyHz: number | null = null;
     let latestVoltageV: number | null = null;
     let latestReadingAt: Date | null = null;
+    // Frequency and voltage are tracked against their own observation times:
+    // only meters report them, so gating on the newest row of any kind would
+    // discard a fresh meter reading whenever a battery or inverter reported
+    // more recently.
+    let latestFrequencyAt: Date | null = null;
+    let latestVoltageAt: Date | null = null;
 
     for (const row of readings) {
       const observedAt = row.timestamp ? new Date(String(row.timestamp)) : null;
       if (observedAt && (latestReadingAt === null || observedAt > latestReadingAt)) {
         latestReadingAt = observedAt;
-        if (row.frequency != null) latestFrequencyHz = Number(row.frequency) / 1000;
-        if (row.voltage != null) latestVoltageV = Number(row.voltage) / 1000;
+      }
+      if (observedAt && row.frequency != null && (latestFrequencyAt === null || observedAt > latestFrequencyAt)) {
+        latestFrequencyAt = observedAt;
+        latestFrequencyHz = Number(row.frequency) / 1000;
+      }
+      if (observedAt && row.voltage != null && (latestVoltageAt === null || observedAt > latestVoltageAt)) {
+        latestVoltageAt = observedAt;
+        latestVoltageV = Number(row.voltage) / 1000;
       }
 
       const powerKw = row.power == null ? null : Number(row.power) / 1000;

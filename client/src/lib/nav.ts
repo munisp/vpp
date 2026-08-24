@@ -92,6 +92,12 @@ export const NAV_GROUPS: NavGroup[] = [
         adminOnly: true,
         keywords: ['power flow', 'hosting capacity', 'transformer', 'impedance', 'connection', 'pandapower'],
       },
+      {
+        label: 'Design Studies',
+        path: '/grid/design-studies',
+        adminOnly: true,
+        keywords: ['sizing', 'lcoe', 'payback', 'techno-economic', 'feasibility study', 'minigrid', 'planning', 'capex'],
+      },
       { label: 'Forecast Accuracy', path: '/grid/forecast-accuracy', keywords: ['mape', 'variance'] },
       { label: 'Anomalies', path: '/grid/anomalies' },
       { label: 'DR Forecast', path: '/grid/dr-forecast' },

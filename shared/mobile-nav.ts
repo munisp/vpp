@@ -128,6 +128,13 @@ export const MOBILE_NAV_GROUPS: MobileNavGroup[] = [
         keywords: ['power flow', 'hosting capacity', 'transformer', 'impedance', 'connection'],
       },
       {
+        screen: 'DesignStudy',
+        label: 'Design Studies',
+        icon: '📐',
+        adminOnly: true,
+        keywords: ['sizing', 'lcoe', 'payback', 'capex', 'minigrid', 'planning', 'techno-economic'],
+      },
+      {
         screen: 'Diagnostics',
         label: 'Diagnostics',
         icon: '🩺',

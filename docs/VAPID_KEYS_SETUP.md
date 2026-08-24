@@ -1,33 +1,33 @@
 # VAPID Keys Setup for Push Notifications
 
-## Generated VAPID Keys
+## Generate your own VAPID keys
 
-**IMPORTANT:** These keys are for development/testing only. Generate new keys for production deployment.
+This file used to publish a working keypair. It no longer does, and it never should have:
+a VAPID private key lets anyone send push notifications that browsers will accept as this
+deployment. Earlier commits in this repository's history still contain that keypair, so it
+must be treated as compromised and never used — see SECURITY.md.
 
-### Public Key
-```
-BHp1W3pCt-6VO3GVBIn-6rbu1_DfiQFzFQLtYWoySUXsQ0OHGz5uuhpEayTCDVJIyxLO6OaIxRW904_W_OmgcRE
-```
+Generate a keypair per deployment:
 
-### Private Key
-```
-HAwmx4AzefsRJ_oyaDlO6p0SkQqCLbvbhiOq1C0C7ZI
+```bash
+npx web-push generate-vapid-keys
 ```
 
 ## Environment Variables Configuration
 
-Add these environment variables to your deployment:
+Add these environment variables to your deployment, taking the values from your own
+generated keypair:
 
 ### Backend (Server-side)
 ```bash
-VAPID_PUBLIC_KEY=BHp1W3pCt-6VO3GVBIn-6rbu1_DfiQFzFQLtYWoySUXsQ0OHGz5uuhpEayTCDVJIyxLO6OaIxRW904_W_OmgcRE
-VAPID_PRIVATE_KEY=HAwmx4AzefsRJ_oyaDlO6p0SkQqCLbvbhiOq1C0C7ZI
-VAPID_SUBJECT=mailto:admin@vpp-platform.com
+VAPID_PUBLIC_KEY=<your generated public key>
+VAPID_PRIVATE_KEY=<your generated private key>
+VAPID_SUBJECT=mailto:admin@your-domain.example
 ```
 
 ### Frontend (Client-side)
 ```bash
-VITE_VAPID_PUBLIC_KEY=BHp1W3pCt-6VO3GVBIn-6rbu1_DfiQFzFQLtYWoySUXsQ0OHGz5uuhpEayTCDVJIyxLO6OaIxRW904_W_OmgcRE
+VITE_VAPID_PUBLIC_KEY=<the same public key>
 ```
 
 ## Setup Instructions
@@ -37,8 +37,8 @@ VITE_VAPID_PUBLIC_KEY=BHp1W3pCt-6VO3GVBIn-6rbu1_DfiQFzFQLtYWoySUXsQ0OHGz5uuhpEay
 1. Open the Manus Management Dashboard
 2. Navigate to **Settings** → **Secrets**
 3. Add the following secrets:
-   - `VAPID_PUBLIC_KEY`: (public key above)
-   - `VAPID_PRIVATE_KEY`: (private key above)
+   - `VAPID_PUBLIC_KEY`: your generated public key
+   - `VAPID_PRIVATE_KEY`: your generated private key
    - `VAPID_SUBJECT`: `mailto:your-email@domain.com`
    - `VITE_VAPID_PUBLIC_KEY`: (same as public key)
 
@@ -50,8 +50,8 @@ After adding the environment variables, restart the application and verify:
 # Check if VAPID keys are loaded
 curl http://localhost:3000/api/trpc/notifications.getVapidPublicKey
 
-# Should return:
-# {"result":{"data":"BHp1W3pCt-6VO3GVBIn-6rbu1_DfiQFzFQLtYWoySUXsQ0OHGz5uuhpEayTCDVJIyxLO6OaIxRW904_W_OmgcRE"}}
+# Should return your public key:
+# {"result":{"data":"<your generated public key>"}}
 ```
 
 ### 3. Test Push Notifications
@@ -64,13 +64,7 @@ curl http://localhost:3000/api/trpc/notifications.getVapidPublicKey
 
 ## Production Deployment
 
-### Generate New Keys for Production
-
-**NEVER use development keys in production.** Generate new keys:
-
-```bash
-npx web-push generate-vapid-keys
-```
+**NEVER share a keypair between deployments, and never commit one.**
 
 ### Security Best Practices
 

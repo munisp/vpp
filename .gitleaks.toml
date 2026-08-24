@@ -1,0 +1,36 @@
+# Secret-scanning configuration for the full-history scan in CI.
+#
+# Only add an entry here after confirming the matched value is not a credential.
+# A real secret that is allowlisted to make CI green is worse than a red build:
+# see SECURITY.md for the one keypair this repository did leak.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Test fixtures and documentation placeholders, each verified not to be a credential"
+
+# Deliberately obvious 32-hex fixture used by the Go, Rust and TypeScript tests
+# that assert a *strong* shared secret is required. Its whole purpose is to be
+# long enough to pass the length check while being unmistakably fake.
+regexes = [
+  '''0123456789abcdef0123456789abcdef''',
+  # Structurally-valid but unsigned JWT used to prove the Keycloak cache never
+  # keys on the bearer token itself.
+  '''eyJhbGciOiJSUzI1NiJ9\.header\.signature''',
+  # Documentation placeholders: an elided PEM body and X-padded identifiers.
+  '''-----BEGIN PRIVATE KEY-----\\n\.\.\.\\n-----END PRIVATE KEY-----''',
+]
+
+paths = [
+  '''\.env\.example$''',
+  '''(^|/)pnpm-lock\.yaml$''',
+]
+
+# The one real leak. Commit 1fdff68 (the initial import) published a working Web
+# Push VAPID keypair in docs/VAPID_KEYS_SETUP.md. History is not rewritten, so
+# the scan would fail forever on a value that is already public; the keypair is
+# instead permanently retired and documented in SECURITY.md. Never configure it.
+commits = [
+  "1fdff68f3c483746f93379d69c7b0e4736ea47f7",
+]

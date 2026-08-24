@@ -25,7 +25,8 @@ async function logGatewayEvent(
   eventType: string,
   transactionId: string,
   payload: any,
-  environment: string
+  environment: string,
+  outcome?: { status: 'failed'; errorMessage: string }
 ): Promise<void> {
   try {
     const db = await getDb();
@@ -33,7 +34,8 @@ async function logGatewayEvent(
 
     await db.insert(paymentGatewayLogs).values({
       gateway,
-      status: 'pending',
+      status: outcome?.status ?? 'pending',
+      errorMessage: outcome?.errorMessage,
       requestType: eventType,
       requestPayload: JSON.stringify({ transactionId, ...payload }),
       responsePayload: JSON.stringify({ environment }),
@@ -42,6 +44,34 @@ async function logGatewayEvent(
   } catch (error) {
     console.error('[PaymentCallback] Failed to log gateway event:', error);
   }
+}
+
+/**
+ * No local payment matches the callback's transaction id. The callback is not
+ * ours to settle, so the provider is told the delivery failed rather than
+ * being acknowledged with a success it can never reconcile against.
+ */
+export class UnmatchedCallbackError extends Error {
+  readonly transactionId: string;
+
+  constructor(transactionId: string) {
+    super(`no payment matches gateway transaction ${transactionId}`);
+    this.name = 'UnmatchedCallbackError';
+    this.transactionId = transactionId;
+  }
+}
+
+async function logUnmatchedCallback(
+  gateway: 'mpesa' | 'airtel_money' | 'tigo_pesa',
+  transactionId: string,
+  payload: any,
+  error: UnmatchedCallbackError
+): Promise<void> {
+  console.error(`[PaymentCallback] Unmatched callback for ${gateway}: ${error.message}`);
+  await logGatewayEvent(gateway, 'callback_unmatched', transactionId, payload, PAYMENTS_ENV, {
+    status: 'failed',
+    errorMessage: `unmatched_transaction: ${error.transactionId}`,
+  });
 }
 
 /**
@@ -73,6 +103,14 @@ export async function handleMpesaCallback(req: Request, res: Response) {
       ResultDesc: 'Success',
     });
   } catch (error: any) {
+    if (error instanceof UnmatchedCallbackError) {
+      await logUnmatchedCallback('mpesa', transactionId, callbackData, error);
+      res.status(404).json({
+        ResultCode: 1,
+        ResultDesc: 'Unknown transaction',
+      });
+      return;
+    }
     console.error('M-Pesa callback error:', error);
     res.status(200).json({
       ResultCode: 1,
@@ -111,6 +149,17 @@ export async function handleAirtelCallback(req: Request, res: Response) {
       },
     });
   } catch (error: any) {
+    if (error instanceof UnmatchedCallbackError) {
+      await logUnmatchedCallback('airtel_money', transactionId, callbackData, error);
+      res.status(404).json({
+        status: {
+          code: '404',
+          success: false,
+          message: 'Unknown transaction',
+        },
+      });
+      return;
+    }
     console.error('Airtel callback error:', error);
     res.status(200).json({
       status: {
@@ -149,6 +198,14 @@ export async function handleTigoCallback(req: Request, res: Response) {
       ResponseDescription: 'Success',
     });
   } catch (error: any) {
+    if (error instanceof UnmatchedCallbackError) {
+      await logUnmatchedCallback('tigo_pesa', transactionId, callbackData, error);
+      res.status(404).json({
+        ResponseCode: '1',
+        ResponseDescription: 'Unknown transaction',
+      });
+      return;
+    }
     console.error('Tigo callback error:', error);
     res.status(200).json({
       ResponseCode: '1',
@@ -178,8 +235,7 @@ async function updatePaymentFromCallback(
     .limit(1);
 
   if (payment.length === 0) {
-    console.warn(`Payment not found for transaction: ${callbackData.transactionId}`);
-    return false;
+    throw new UnmatchedCallbackError(callbackData.transactionId);
   }
 
   const pmt = payment[0];

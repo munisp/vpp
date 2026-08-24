@@ -277,14 +277,28 @@ export interface ProtocolProof {
   } | null;
 }
 
+/** Just the columns proof state is derived from. */
+interface ProofRun {
+  id: number;
+  adapter: string;
+  outcome: string;
+  target: string;
+  deviceModel: string;
+  protocolVersion: string;
+  completedAt: Date;
+  passedCases: number;
+  totalCases: number;
+  artifactChecksum: string;
+}
+
 function proofFromRuns(
   adapter: ConformanceAdapter,
-  latestPassed: ConformanceRun | undefined,
-  latestAny: ConformanceRun | undefined,
+  latestPassed: ProofRun | undefined,
+  latestAny: ProofRun | undefined,
   now: Date,
   validityDays: number
 ): ProtocolProof {
-  const summarise = (run: ConformanceRun) => ({
+  const summarise = (run: ProofRun) => ({
     id: run.id,
     outcome: run.outcome as ConformanceRunOutcome,
     target: run.target as ConformanceTarget,
@@ -296,6 +310,12 @@ function proofFromRuns(
     artifactChecksum: run.artifactChecksum,
   });
 
+  // The most recent attempt decides, so a regression cannot hide behind an older
+  // pass: an adapter that passed in March and failed last night is not proven.
+  if (latestAny && latestAny.outcome === 'failed') {
+    return { adapter, state: 'suite_failed', run: summarise(latestAny) };
+  }
+
   if (latestPassed) {
     const ageDays = (now.getTime() - latestPassed.completedAt.getTime()) / 86_400_000;
     if (ageDays <= validityDays) {
@@ -304,11 +324,6 @@ function proofFromRuns(
     return { adapter, state: 'proof_stale', run: summarise(latestPassed) };
   }
 
-  // No passing run at all. A failed attempt is worse news than silence, so it is
-  // reported as such rather than collapsed into "unproven".
-  if (latestAny && latestAny.outcome === 'failed') {
-    return { adapter, state: 'suite_failed', run: summarise(latestAny) };
-  }
   return {
     adapter,
     state: 'claimed_unproven',
@@ -317,32 +332,54 @@ function proofFromRuns(
 }
 
 /**
- * Proof state for every adapter the platform has a vector set for. Two queries
- * regardless of how many adapters exist, so this is cheap enough to call on a
- * dispatch path.
+ * The newest run per adapter, one row each. `DISTINCT ON` does the reduction in
+ * PostgreSQL so history length does not cost the caller anything.
+ */
+async function latestRunPerAdapter(
+  db: NonNullable<Awaited<ReturnType<typeof getDb>>>,
+  passedOnly: boolean
+): Promise<Map<string, ProofRun>> {
+  const rows = await db.execute<SqlRow>(sql`
+    SELECT DISTINCT ON (adapter)
+           id, adapter, outcome, target,
+           device_model AS "deviceModel", protocol_version AS "protocolVersion",
+           completed_at AS "completedAt", passed_cases AS "passedCases",
+           total_cases AS "totalCases", artifact_checksum AS "artifactChecksum"
+    FROM conformance_runs
+    WHERE completed_at IS NOT NULL
+      ${passedOnly ? sql`AND outcome = 'passed'` : sql``}
+    ORDER BY adapter, completed_at DESC, id DESC
+  `);
+
+  const latest = new Map<string, ProofRun>();
+  for (const row of rows.rows ?? []) {
+    latest.set(String(row.adapter), {
+      id: Number(row.id),
+      adapter: String(row.adapter),
+      outcome: String(row.outcome),
+      target: String(row.target),
+      deviceModel: String(row.deviceModel),
+      protocolVersion: String(row.protocolVersion),
+      completedAt: new Date(String(row.completedAt)),
+      passedCases: Number(row.passedCases),
+      totalCases: Number(row.totalCases),
+      artifactChecksum: String(row.artifactChecksum),
+    });
+  }
+  return latest;
+}
+
+/**
+ * Proof state for every adapter the platform has a vector set for. Two queries,
+ * each returning at most one row per adapter, so the cost does not grow with run
+ * history and this stays cheap enough to call on a dispatch path.
  */
 export async function adapterProofs(now: Date = new Date()): Promise<ProtocolProof[]> {
   const db = await requireDb();
   const validityDays = proofValidityDays();
 
-  const latestPassed = await db
-    .select()
-    .from(conformanceRuns)
-    .where(eq(conformanceRuns.outcome, 'passed'))
-    .orderBy(desc(conformanceRuns.completedAt));
-  const latestAny = await db
-    .select()
-    .from(conformanceRuns)
-    .orderBy(desc(conformanceRuns.completedAt));
-
-  const firstPassed = new Map<string, ConformanceRun>();
-  for (const run of latestPassed) {
-    if (!firstPassed.has(run.adapter)) firstPassed.set(run.adapter, run);
-  }
-  const firstAny = new Map<string, ConformanceRun>();
-  for (const run of latestAny) {
-    if (!firstAny.has(run.adapter)) firstAny.set(run.adapter, run);
-  }
+  const firstPassed = await latestRunPerAdapter(db, true);
+  const firstAny = await latestRunPerAdapter(db, false);
 
   return CONFORMANCE_ADAPTERS.map(adapter =>
     proofFromRuns(adapter, firstPassed.get(adapter), firstAny.get(adapter), now, validityDays)

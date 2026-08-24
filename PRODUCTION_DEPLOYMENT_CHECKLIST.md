@@ -229,6 +229,18 @@ sudo ./scripts/security-hardening.sh
       `succeeded` row means the object was read back and its SHA-256 matched
 - [ ] `/admin/lakehouse` reports no dataset as `never ingested`
 
+#### Network feasibility engine (`services/gridmodel`)
+- [ ] Migration `0021_network_electrical_model` applied
+- [ ] Dependencies installed: `pip install -r services/gridmodel/requirements.txt`
+- [ ] Service started with `GRIDMODEL_AUTH_TOKEN` set (it refuses to answer without one)
+- [ ] API process has `GRIDMODEL_SERVICE_URL` and the same `GRIDMODEL_AUTH_TOKEN`
+- [ ] `/health` reports the engine and its version
+- [ ] Each node that dispatch or clearing touches has a nominal voltage, a source
+      upstream, and its lines/transformers registered — an unmodelled node is not
+      an error, but every decision behind it is stamped network-unchecked rather
+      than approved
+- [ ] `/grid/network-feasibility` shows the model as usable and a study that solved
+
 **Status:** ⏳ PENDING
 
 ---

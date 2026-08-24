@@ -42,7 +42,8 @@ export type DependencyName =
   | 'matter_controller'
   | 'payment_gateway'
   | 'market_broker'
-  | 'meter_telemetry';
+  | 'meter_telemetry'
+  | 'network_model';
 
 export type Observation = 'reachable' | 'unreachable' | 'faulted';
 
@@ -101,6 +102,9 @@ export const STALENESS_SECONDS: Record<DependencyName, number> = {
   payment_gateway: 3600,
   market_broker: 3600,
   meter_telemetry: 1800,
+  // Touched only when a dispatch or a clearing asks for a feasibility study,
+  // which on a small deployment can be hours apart.
+  network_model: 3600,
 };
 
 /** Consecutive failures before an outage is opened. One timeout is not an outage. */
@@ -114,6 +118,7 @@ export const DEPENDENCIES: DependencyName[] = [
   'payment_gateway',
   'market_broker',
   'meter_telemetry',
+  'network_model',
 ];
 
 /**

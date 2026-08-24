@@ -90,6 +90,7 @@ import {
   diagnosticsRouter,
   modelHealthRouter,
   prepaidRouter,
+  networkModelRouter,
 } from './routers/nextgen';
 
 // Start performance alerting
@@ -192,6 +193,7 @@ export const appRouter = router({
   diagnostics: diagnosticsRouter,
   modelHealth: modelHealthRouter,
   prepaid: prepaidRouter,
+  networkModel: networkModelRouter,
   settlement: settlementRouter,
   edge: edgeRouter,
   carbon: carbonRouter,

@@ -86,6 +86,12 @@ export const NAV_GROUPS: NavGroup[] = [
       { label: 'V2G Optimizer', path: '/v2g', keywords: ['vehicle', 'ev', 'charging'] },
       { label: 'Price Signals', path: '/grid/price-signals', keywords: ['coordination'] },
       { label: 'Locational Flexibility', path: '/grid/locational-flexibility', keywords: ['feeder', 'node'] },
+      {
+        label: 'Network Feasibility',
+        path: '/grid/network-feasibility',
+        adminOnly: true,
+        keywords: ['power flow', 'hosting capacity', 'transformer', 'impedance', 'connection', 'pandapower'],
+      },
       { label: 'Forecast Accuracy', path: '/grid/forecast-accuracy', keywords: ['mape', 'variance'] },
       { label: 'Anomalies', path: '/grid/anomalies' },
       { label: 'DR Forecast', path: '/grid/dr-forecast' },

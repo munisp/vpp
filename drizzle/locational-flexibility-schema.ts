@@ -18,6 +18,7 @@
  */
 
 import {
+  boolean,
   index,
   integer as int,
   jsonb,
@@ -132,6 +133,24 @@ export const gridNodes = pgTable(
      * make headroom figures fiction.
      */
     firmCapacityW: int("firm_capacity_w"),
+    /**
+     * Electrical model of the node, used by the feasibility service
+     * (`services/gridmodel`). All nullable: a node the operator has not
+     * surveyed stays in the market as an unmodelled node, and any study over it
+     * answers `model_unavailable` rather than assuming a voltage or a band.
+     */
+    /** Nominal voltage, volts (line to line). */
+    nominalVolts: int("nominal_volts"),
+    /**
+     * True where the network is fed from: the substation infeed, or a
+     * grid-forming inverter when the microgrid is islanded. A model with no
+     * source bus cannot be solved at all.
+     */
+    isSource: boolean("is_source").default(false).notNull(),
+    /** Statutory lower voltage limit at this node, per-unit x1000. */
+    voltageMinPuX1000: int("voltage_min_pu_x1000"),
+    /** Statutory upper voltage limit at this node, per-unit x1000. */
+    voltageMaxPuX1000: int("voltage_max_pu_x1000"),
     createdAt: timestamp("created_at").defaultNow().notNull(),
     updatedAt: timestamp("updated_at")
       .defaultNow()
@@ -274,6 +293,17 @@ export const flexibilityAwards = pgTable(
     /** Value of the measured delivery, minor currency units. */
     earnedAmount: int("earned_amount"),
     measuredAt: timestamp("measured_at"),
+    /**
+     * What the network model said about this award at clearing. `feasible` means
+     * a power flow was solved with the award in it; `model_unavailable` and
+     * `service_unavailable` mean the award was cleared *without* a network check
+     * and must be read as network-unchecked, never as network-approved. An award
+     * whose own capacity caused a violation is never written: the offer is
+     * marked ineligible with the element named.
+     */
+    networkCheckStatus: varchar("network_check_status", { length: 40 }),
+    /** Study id behind `network_check_status`, for audit. */
+    networkStudyId: int("network_study_id"),
     /** Settlement event id, set only when verified delivery was settled. */
     settlementEventId: int("settlement_event_id"),
     settledAt: timestamp("settled_at"),

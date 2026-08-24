@@ -121,6 +121,13 @@ export const MOBILE_NAV_GROUPS: MobileNavGroup[] = [
         keywords: ['ml', 'pytorch', 'gnn', 'training', 'drift', 'provenance', 'checkpoint'],
       },
       {
+        screen: 'NetworkFeasibility',
+        label: 'Feasibility',
+        icon: '🕸️',
+        adminOnly: true,
+        keywords: ['power flow', 'hosting capacity', 'transformer', 'impedance', 'connection'],
+      },
+      {
         screen: 'Diagnostics',
         label: 'Diagnostics',
         icon: '🩺',

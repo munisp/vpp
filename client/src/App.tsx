@@ -73,6 +73,7 @@ import Lakehouse from "@/pages/Lakehouse";
 import ModelHealth from "@/pages/ModelHealth";
 import Diagnostics from "@/pages/Diagnostics";
 import LocationalFlexibility from "@/pages/LocationalFlexibility";
+import NetworkFeasibility from "@/pages/NetworkFeasibility";
 import V2G from "@/pages/V2G";
 import Wallet from "@/pages/Wallet";
 import CommunityPools from "@/pages/CommunityPools";
@@ -306,6 +307,7 @@ function Router() {
       <Route path="/grid/matter-loads" component={MatterLoads} />
       <Route path="/grid/degraded-operation" component={DegradedOperation} />
       <Route path="/grid/locational-flexibility" component={LocationalFlexibility} />
+      <Route path="/grid/network-feasibility" component={NetworkFeasibility} />
       <Route path="/grid/dr-forecast" component={DRForecast} />
       <Route path="/grid/ntl" component={NtlDashboard} />
       <Route path="/grid/compliance-reports" component={ComplianceReports} />

@@ -141,6 +141,13 @@
       "when": 1787830000000,
       "tag": "0020_prepaid_payg_energy",
       "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1787860000000,
+      "tag": "0021_network_electrical_model",
+      "breakpoints": true
     }
   ]
 }

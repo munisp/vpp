@@ -77,6 +77,7 @@ import V2G from "@/pages/V2G";
 import Wallet from "@/pages/Wallet";
 import CommunityPools from "@/pages/CommunityPools";
 import MicrogridResilience from "@/pages/MicrogridResilience";
+import ServiceReliability from "@/pages/ServiceReliability";
 import DRForecast from "@/pages/DRForecast";
 import SmsCenter from "@/pages/SmsCenter";
 import SolarYield from "@/pages/SolarYield";
@@ -308,6 +309,11 @@ function Router() {
       <Route path="/grid/dr-forecast" component={DRForecast} />
       <Route path="/grid/ntl" component={NtlDashboard} />
       <Route path="/grid/compliance-reports" component={ComplianceReports} />
+      <Route path="/grid/service-reliability">
+        <RouteShell adminOnly chrome={false}>
+          <ServiceReliability />
+        </RouteShell>
+      </Route>
       <Route path="/community-pools" component={CommunityPools} />
       <Route path="/community/resilience" component={MicrogridResilience} />
       <Route path="/sms-center" component={SmsCenter} />

@@ -9,6 +9,7 @@ import { getDb } from '../db';
 import { sql } from 'drizzle-orm';
 import { kafkaPublisher } from '../integration/kafka-publisher';
 import type { SqlRow } from '../sql-row';
+import { reliabilityReport } from './service-reliability';
 
 // Types for compliance
 export interface ComplianceRule {
@@ -115,7 +116,14 @@ const JURISDICTION_RULES: Record<string, Array<Omit<ComplianceRule, 'id'>>> = {
       ruleName: 'Monthly Generation Reporting',
       description: 'Report monthly generation and export data to NERC',
       requirements: {
-        report_fields: ['total_generation_kwh', 'total_export_kwh', 'peak_power_kw', 'availability_percent'],
+        report_fields: [
+          'total_generation_kwh',
+          'total_export_kwh',
+          'peak_power_kw',
+          // Named for what it is: customer supply availability (ASAI), not the
+          // platform's own uptime.
+          'customer_supply_availability_percent',
+        ],
         submission_deadline_days: 15,
       },
       checkFrequency: 'monthly',
@@ -629,33 +637,55 @@ export class ComplianceAutomationService {
       evidenceReferences.push(`overdue_complaints:${overdueCount}`);
     }
 
-    // Check service availability
+    // Check supply availability. A consumer-protection availability requirement
+    // is about the customer's power, so it is measured as ASAI over recorded
+    // interruptions at registered connections. This check previously read the
+    // `health_checks` table — API uptime reported where a regulator reads supply
+    // availability, which passes the rule on a fleet that is entirely dark.
     if (requirements.service_availability) {
-      // Calculate platform uptime (simplified)
-      const uptimeResult = await db.execute<SqlRow>(sql`
-        SELECT 
-          COUNT(*) as total_checks,
-          SUM(CASE WHEN status = 'healthy' THEN 1 ELSE 0 END) as healthy_checks
-        FROM health_checks
-        WHERE checked_at > (NOW() - INTERVAL '30 day')
-      `);
-      const uptimeStats = uptimeResult.rows[0] || {};
+      const periodEnd = new Date();
+      const periodStart = new Date(periodEnd.getTime() - 30 * 24 * 60 * 60 * 1000);
+      const reliability = await reliabilityReport({ start: periodStart, end: periodEnd });
 
-      if (uptimeStats.total_checks > 0) {
-        const availability = uptimeStats.healthy_checks / uptimeStats.total_checks;
-        if (availability < requirements.service_availability) {
+      if (reliability.indices.asai === null) {
+        findings.push({
+          findingCode: 'SUPPLY_AVAILABILITY_UNEVIDENCED',
+          severity: 'major',
+          description:
+            'Customer supply availability cannot be evidenced, so compliance with the availability requirement is unknown',
+          requirement: `Maintain ${requirements.service_availability * 100}% customer supply availability`,
+          actualValue: `unavailable (${reliability.reason ?? 'no evidence'})`,
+          expectedValue: `>= ${requirements.service_availability * 100}%`,
+          remediation:
+            'Register customer connections and their monitoring so interruptions are recorded; platform uptime is not supply availability',
+        });
+        evidenceReferences.push(`supply_availability:unavailable:${reliability.reason ?? 'no_evidence'}`);
+      } else {
+        if (reliability.indices.asai < requirements.service_availability) {
           findings.push({
-            findingCode: 'SERVICE_AVAILABILITY_LOW',
+            findingCode: 'SUPPLY_AVAILABILITY_LOW',
             severity: 'major',
-            description: `Service availability below required threshold`,
-            requirement: `Maintain ${requirements.service_availability * 100}% service availability`,
-            actualValue: `${(availability * 100).toFixed(2)}%`,
+            description: 'Customer supply availability below required threshold',
+            requirement: `Maintain ${requirements.service_availability * 100}% customer supply availability`,
+            actualValue: `${(reliability.indices.asai * 100).toFixed(3)}% ASAI over ${reliability.coverage.observedServicePoints} observed connections`,
             expectedValue: `>= ${requirements.service_availability * 100}%`,
-            remediation: 'Investigate and address service reliability issues',
+            remediation: 'Investigate the interruption causes reported against these connections',
           });
         }
-
-        evidenceReferences.push(`availability:${(availability * 100).toFixed(2)}%`);
+        if (reliability.coverage.unobservedServicePoints > 0) {
+          findings.push({
+            findingCode: 'SUPPLY_AVAILABILITY_PARTIAL_COVERAGE',
+            severity: 'warning',
+            description: `${reliability.coverage.unobservedServicePoints} registered connections are unmonitored and are not represented in the availability figure`,
+            requirement: 'Availability is reported over the customers it is measured for',
+            actualValue: `${reliability.coverage.observedServicePoints} of ${reliability.coverage.registeredServicePoints} connections observed`,
+            expectedValue: 'All registered connections monitored',
+            remediation: 'Meter the unmonitored connections or record their interruptions by report',
+          });
+        }
+        evidenceReferences.push(
+          `supply_availability:${(reliability.indices.asai * 100).toFixed(3)}%:basis=${reliability.basis}:observed=${reliability.coverage.observedServicePoints}/${reliability.coverage.registeredServicePoints}`
+        );
       }
     }
   }

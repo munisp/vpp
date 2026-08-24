@@ -89,6 +89,12 @@ export const NAV_GROUPS: NavGroup[] = [
       { label: 'Degraded Operation', path: '/grid/degraded-operation', adminOnly: true, keywords: ['outage', 'offline'] },
       { label: 'NTL Detection', path: '/grid/ntl', adminOnly: true, keywords: ['theft', 'loss'] },
       { label: 'Compliance Reports', path: '/grid/compliance-reports', adminOnly: true },
+      {
+        label: 'Supply Reliability',
+        path: '/grid/service-reliability',
+        adminOnly: true,
+        keywords: ['saidi', 'saifi', 'caidi', 'asai', 'maifi', 'outage', 'interruption', 'availability'],
+      },
     ],
   },
   {

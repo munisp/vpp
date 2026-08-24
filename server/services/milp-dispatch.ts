@@ -161,7 +161,7 @@ export function assertMilpOptimizerConfigured(): void {
  * as `faulted` (it is up, but not usable); a transport failure or timeout counts
  * as `unreachable`.
  */
-async function post<TRequest, TResponse>(
+export async function postToOptimizer<TRequest, TResponse>(
   path: string,
   body: TRequest,
   timeoutMs: number
@@ -236,7 +236,7 @@ export async function solveMilpDispatch(
   request: MilpDispatchRequest,
   options?: { timeoutMs?: number }
 ): Promise<MilpDispatchResponse> {
-  const result = await post<MilpDispatchRequest, MilpDispatchResponse>(
+  const result = await postToOptimizer<MilpDispatchRequest, MilpDispatchResponse>(
     '/optimize/dispatch',
     request,
     options?.timeoutMs ?? DEFAULT_TIMEOUT_MS
@@ -438,7 +438,7 @@ export async function solveCoordination(
   request: CoordinationRequest,
   options?: { timeoutMs?: number }
 ): Promise<CoordinationResponse> {
-  return post<CoordinationRequest, CoordinationResponse>(
+  return postToOptimizer<CoordinationRequest, CoordinationResponse>(
     '/optimize/coordinate',
     request,
     options?.timeoutMs ?? DEFAULT_TIMEOUT_MS

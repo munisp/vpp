@@ -15,6 +15,8 @@ from typing import Annotated
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import JSONResponse
 
+from .design import run_design_study
+from .design_schemas import DesignRequest, DesignResponse
 from .distributed import coordinate
 from .dispatch import solve_dispatch
 from .mpc import run_mpc
@@ -145,6 +147,25 @@ def optimize_mpc(
     result = run_mpc(request)
     _check(result, result.status)
     return result
+
+
+@app.post("/design/study", response_model=DesignResponse)
+def design_study(
+    request: DesignRequest,
+    x_optimizer_token: Annotated[str | None, Header()] = None,
+) -> DesignResponse:
+    """Size a site that does not exist yet.
+
+    Unlike the dispatch endpoints this answers 200 when no candidate sizing
+    meets the study's unserved-energy limit: `status` is
+    `no_feasible_candidate`, `recommended` is null, and every candidate's
+    numbers are returned so the caller can see how far off they were. A
+    missing load profile, resource series or cost assumption is a 400 from
+    schema validation, not a study with an assumption substituted in.
+    """
+
+    _authorise(x_optimizer_token)
+    return run_design_study(request)
 
 
 @app.post("/optimize/coordinate", response_model=CoordinationResponse)

@@ -822,6 +822,15 @@ export async function settleAward(
   // Cents-per-kWh x100 in the market tables; the ledger stores plain rate units.
   const ratePerUnit = Math.round(priceCentsPerKwh / PRICE_SCALE);
   const grossAmount = Math.round(((energyWh / 1000) * priceCentsPerKwh) / PRICE_SCALE);
+  if (grossAmount <= 0) {
+    // Measured energy at this price is worth less than the smallest unit the
+    // ledger can hold. Recording it would leave an award reading "settled" with
+    // nothing credited, which is indistinguishable from a paid delivery.
+    throw new LocationalFlexibilityError(
+      `Award ${awardId} measured ${energyWh} Wh at ${priceCentsPerKwh} (cents/kWh x${PRICE_SCALE}), ` +
+        'which credits no whole cent: nothing is settled'
+    );
+  }
 
   // Claim the award before any money is written. Whoever wins this conditional
   // update owns the settlement; a loser sees no row and stops, instead of

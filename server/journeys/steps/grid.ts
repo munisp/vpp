@@ -598,7 +598,9 @@ export const flexibilitySteps: Record<string, JourneyStep> = {
       startsAt,
       endsAt,
       requiredPowerW: 8_000,
-      priceCapCentsPerKwh: 40,
+      // Prices are cents/kWh x100 in the market tables, so this cap is 40
+      // cents/kWh — a cap of 40 units is 0.4 of a cent and credits nothing.
+      priceCapCentsPerKwh: 4_000,
       currency: 'TZS',
       notes: `Journey run ${ctx.runKey}`,
     });
@@ -611,7 +613,7 @@ export const flexibilitySteps: Record<string, JourneyStep> = {
         requirementId,
       });
     }
-    if (mine.requiredPowerW !== 8_000 || mine.priceCapCentsPerKwh !== 40) {
+    if (mine.requiredPowerW !== 8_000 || mine.priceCapCentsPerKwh !== 4_000) {
       return failed('A requirement does not read back with the power and cap it was given.', {
         requirementId,
         requiredPowerW: mine.requiredPowerW,
@@ -645,7 +647,7 @@ export const flexibilitySteps: Record<string, JourneyStep> = {
       requirementId,
       assetId: asset.id,
       offeredPowerW: 4_000,
-      priceCentsPerKwh: 30,
+      priceCentsPerKwh: 3_000,
     });
     return passed('The member sees the located opportunity and offers into it.', {
       requirementId,
@@ -728,6 +730,15 @@ export const flexibilitySteps: Record<string, JourneyStep> = {
     } catch (error) {
       if (!alreadyDone(error)) throw error;
       settledAmountCents = first.earnedAmount ?? null;
+    }
+    if (settledAmountCents === null || settledAmountCents <= 0) {
+      // A settlement that credits nothing must not read as delivery paid for.
+      return failed('A settled award credited no money for measured delivery.', {
+        requirementId,
+        awardId: first.awardId,
+        deliveredEnergyWh: first.deliveredEnergyWh,
+        settledAmountCents,
+      });
     }
     return passed('Merit-order clearing, measured delivery, then settlement of measured energy.', {
       requirementId,

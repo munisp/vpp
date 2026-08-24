@@ -635,6 +635,19 @@ describe('settleAward', () => {
     expect(state.updated).toEqual([]);
   });
 
+  it('refuses to record a settlement that credits no money', async () => {
+    mockDb();
+    // 37 Wh at 30 (0.3 of a cent per kWh) rounds to nothing: a settled award
+    // crediting zero is indistinguishable from a paid delivery.
+    state.executeQueue = [
+      [settleRow({ delivered_energy_wh: 37, delivered_power_w: 2200, price_cents_per_kwh: 30 })],
+    ];
+    const { settleAward } = await import('./services/locational-flexibility');
+    await expect(settleAward(8)).rejects.toThrow(/credits no whole cent/);
+    expect(ledgerEvents).toEqual([]);
+    expect(state.updated).toEqual([]);
+  });
+
   it('refuses to settle the same award twice', async () => {
     mockDb();
     state.executeQueue = [[settleRow({ settlement_event_id: 4242 })]];

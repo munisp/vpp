@@ -66,6 +66,11 @@ export const NAV_GROUPS: NavGroup[] = [
     label: 'Money',
     items: [
       { label: 'Payments', path: '/payments', keywords: ['mpesa', 'gateway'] },
+      {
+        label: 'Prepaid Energy',
+        path: '/money/prepaid',
+        keywords: ['payg', 'token', 'openpaygo', 'meter', 'credit', 'vend'],
+      },
       { label: 'Wallet', path: '/wallet', keywords: ['balance', 'topup'] },
       { label: 'QR Payment', path: '/qr-payment', keywords: ['scan', 'pay'] },
       { label: 'Referrals', path: '/referrals', keywords: ['invite'] },

@@ -87,6 +87,7 @@ export const NAV_ICONS: Record<string, LucideIcon> = {
   '/grid/ntl': ShieldAlert,
   '/grid/compliance-reports': FileCheck,
   '/grid/operations-wall': Radio,
+  '/money/prepaid': Zap,
   '/community-pools': Users,
   '/community/resilience': BatteryCharging,
   '/leaderboard': Trophy,

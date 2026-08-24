@@ -311,6 +311,35 @@ export async function postMemberPayoutSettled(input: {
 }
 
 /**
+ * A prepaid customer's payment for energy they have not taken yet.
+ *
+ * The money is held at the gateway and owed back to the customer — as energy, but
+ * the ledger holds currency, so it is carried as a liability to them until their
+ * meter takes it. This is what makes prepaid credit auditable: what the platform
+ * holds and what it owes its prepaid customers are one entry, so unvended credit
+ * cannot quietly become revenue.
+ */
+export async function postPrepaidCreditPurchased(input: {
+  paymentId: number;
+  customerUserId: number;
+  gatewayKey: string;
+  currency: LedgerCurrency;
+  amountMinor: number;
+  providerReference: string;
+}): Promise<PostingResult> {
+  return postEntry({
+    postingKind: 'prepaid_credit_purchased',
+    sourceType: 'payment',
+    sourceId: input.paymentId,
+    currency: input.currency,
+    amountMinor: input.amountMinor,
+    providerReference: input.providerReference,
+    debit: gatewayClearing(input.gatewayKey, input.currency),
+    credit: memberLiability(input.customerUserId, input.currency),
+  });
+}
+
+/**
  * A confirmed payment the provider later reversed. The entry runs the other way
  * rather than deleting the capture: the ledger keeps both movements, so a reversal
  * is visible as a reversal instead of as a payment that never happened.

@@ -562,11 +562,22 @@ export async function getTokenByPaymentId(paymentId: number): Promise<Token | un
   return result.length > 0 ? result[0] : undefined;
 }
 
-export async function getTokenByCode(tokenCode: string): Promise<Token | undefined> {
+/**
+ * Find one customer's token by its code.
+ *
+ * The customer is part of the lookup because a meter token is only unique to the
+ * device that accepts it: searching by code alone can return a different
+ * customer's row for the same digits.
+ */
+export async function getTokenByCode(tokenCode: string, userId: number): Promise<Token | undefined> {
   const db = await getDb();
   if (!db) return undefined;
 
-  const result = await db.select().from(tokens).where(eq(tokens.tokenCode, tokenCode)).limit(1);
+  const result = await db
+    .select()
+    .from(tokens)
+    .where(and(eq(tokens.tokenCode, tokenCode), eq(tokens.userId, userId)))
+    .limit(1);
   return result.length > 0 ? result[0] : undefined;
 }
 

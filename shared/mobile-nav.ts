@@ -32,6 +32,12 @@ export const MOBILE_NAV_GROUPS: MobileNavGroup[] = [
       { screen: 'Trading', label: 'Trade', icon: '💱', keywords: ['market'] },
       { screen: 'Payments', label: 'Payments', icon: '💳', keywords: ['mpesa'] },
       { screen: 'Wallet', label: 'Wallet', icon: '👛', keywords: ['balance'] },
+      {
+        screen: 'PrepaidEnergy',
+        label: 'Prepaid',
+        icon: '🔢',
+        keywords: ['payg', 'token', 'openpaygo', 'meter', 'credit', 'units'],
+      },
       { screen: 'Settings', label: 'Settings', icon: '⚙️' },
     ],
   },

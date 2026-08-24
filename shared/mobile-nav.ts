@@ -70,6 +70,12 @@ export const MOBILE_NAV_GROUPS: MobileNavGroup[] = [
     label: 'Community & rewards',
     items: [
       { screen: 'CommunityTelemetry', label: 'Community', icon: '👥' },
+      {
+        screen: 'Resilience',
+        label: 'Resilience',
+        icon: '🛡️',
+        keywords: ['island', 'autonomy', 'critical', 'backup', 'outage', 'clinic'],
+      },
       { screen: 'Gamification', label: 'Rewards', icon: '🏆' },
       { screen: 'QRPayment', label: 'QR Payment', icon: '📷' },
       { screen: 'QRDeviceRegistration', label: 'Register Device', icon: '📲' },

@@ -1,6 +1,16 @@
 import { z } from 'zod';
 import { adminProcedure, protectedProcedure, router } from '../../_core/trpc';
 import { communityEnergy } from '../../services/community-energy';
+import {
+  CRITICAL_LOAD_CATEGORIES,
+  CRITICAL_LOAD_RATING_SOURCES,
+  declareCriticalLoad,
+  listCriticalLoads,
+  updateCriticalLoad,
+} from '../../services/critical-loads';
+
+const criticalLoadCategory = z.enum(CRITICAL_LOAD_CATEGORIES);
+const criticalLoadRatingSource = z.enum(CRITICAL_LOAD_RATING_SOURCES);
 
 export const communityRouter = router({
   createCommunity: protectedProcedure
@@ -83,6 +93,50 @@ export const communityRouter = router({
     }))
     .mutation(async ({ input, ctx }) => {
       return communityEnergy.confirmModeTransition(input.communityId, ctx.user.id, input.approve);
+    }),
+
+  /**
+   * The critical-load register. Reading it is open to members of the platform
+   * (a resident may reasonably ask which loads their microgrid protects);
+   * declaring or changing one is an operator action, because the register is
+   * what the islanding gate and every resilience figure are computed from.
+   */
+  listCriticalLoads: protectedProcedure
+    .input(z.object({ communityId: z.number(), includeInactive: z.boolean().default(false) }))
+    .query(async ({ input }) => {
+      return listCriticalLoads(input.communityId, { includeInactive: input.includeInactive });
+    }),
+
+  declareCriticalLoad: adminProcedure
+    .input(z.object({
+      communityId: z.number(),
+      label: z.string().min(1).max(160),
+      category: criticalLoadCategory,
+      ratedPowerW: z.number().int().positive(),
+      ratingSource: criticalLoadRatingSource,
+      priority: z.number().int().min(1).max(99).default(1),
+      assetId: z.number().int().positive().nullish(),
+      autonomyTargetHours: z.number().int().positive().nullish(),
+      notes: z.string().max(500).nullish(),
+    }))
+    .mutation(async ({ input, ctx }) => {
+      return declareCriticalLoad(input, ctx.user.id);
+    }),
+
+  updateCriticalLoad: adminProcedure
+    .input(z.object({
+      id: z.number(),
+      priority: z.number().int().min(1).max(99).optional(),
+      ratedPowerW: z.number().int().positive().optional(),
+      ratingSource: criticalLoadRatingSource.optional(),
+      autonomyTargetHours: z.number().int().positive().nullable().optional(),
+      assetId: z.number().int().positive().nullable().optional(),
+      active: z.boolean().optional(),
+      notes: z.string().max(500).nullable().optional(),
+    }))
+    .mutation(async ({ input }) => {
+      const { id, ...patch } = input;
+      return updateCriticalLoad(id, patch);
     }),
 
   getUserCommunities: protectedProcedure

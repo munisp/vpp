@@ -549,6 +549,11 @@ export async function getTokenById(id: number): Promise<Token | undefined> {
 /**
  * Token already issued for a payment, if any. Used to keep token issuance
  * idempotent across retried verifications and duplicate gateway callbacks.
+ *
+ * A payment can carry a `PENDING_ISSUANCE_<id>` placeholder alongside the code a
+ * meter would actually accept, so the ordering is part of the contract: a real
+ * code always wins. Returning the placeholder would show a customer the literal
+ * string `PENDING_ISSUANCE_12` where their digits belong.
  */
 export async function getTokenByPaymentId(paymentId: number): Promise<Token | undefined> {
   const db = await getDb();
@@ -558,6 +563,7 @@ export async function getTokenByPaymentId(paymentId: number): Promise<Token | un
     .select()
     .from(tokens)
     .where(eq(tokens.paymentId, paymentId))
+    .orderBy(sql`case when ${tokens.tokenCode} like 'PENDING_ISSUANCE_%' then 1 else 0 end`, desc(tokens.id))
     .limit(1);
   return result.length > 0 ? result[0] : undefined;
 }

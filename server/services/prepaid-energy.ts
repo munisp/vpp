@@ -25,7 +25,7 @@
  * genuinely does not know it.
  */
 
-import { and, asc, desc, eq, gt, inArray, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, inArray, like, sql } from 'drizzle-orm';
 import { getDb } from '../db';
 import {
   prepaidAccounts,
@@ -403,27 +403,47 @@ export async function issueTokenForPayment(input: {
     // The legacy `tokens` table is what the SMS commands, the payments page and
     // the notification emails read. Writing the vend there too keeps one token
     // visible in every surface instead of splitting the customer's history in
-    // two, and it replaces the `PENDING_ISSUANCE_<id>` placeholder those
-    // surfaces used to show.
-    await tx
-      .insert(tokens)
-      .values({
-        userId: account.userId,
-        paymentId: payment.id,
-        tokenCode: vended.tokenCode,
-        energyKwh: Math.floor(energyWh / 1000),
-        amount: payment.amount,
-        validUntil: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000),
-        status: 'active',
-        metadata: JSON.stringify({
-          scheme: 'openpaygo',
-          prepaidAccountId: account.id,
-          prepaidTokenId: inserted.id,
-          energyWh,
-          tokenCount: vended.tokenCount,
-        }),
-      })
-      .onConflictDoNothing({ target: [tokens.userId, tokens.tokenCode] });
+    // two.
+    //
+    // A payment that could not be vended when it confirmed already holds a
+    // `PENDING_ISSUANCE_<id>` row there, so this *replaces* that row rather than
+    // adding a second one: two rows for one payment would leave those surfaces
+    // free to read the placeholder and hand the customer that literal string
+    // where their digits belong, and to keep showing a token that is pending
+    // forever.
+    const legacyValues = {
+      tokenCode: vended.tokenCode,
+      energyKwh: Math.floor(energyWh / 1000),
+      amount: payment.amount,
+      validUntil: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000),
+      status: 'active' as const,
+      metadata: JSON.stringify({
+        scheme: 'openpaygo',
+        prepaidAccountId: account.id,
+        prepaidTokenId: inserted.id,
+        energyWh,
+        tokenCount: vended.tokenCount,
+      }),
+    };
+
+    const replaced = await tx
+      .update(tokens)
+      .set(legacyValues)
+      .where(
+        and(
+          eq(tokens.userId, account.userId),
+          eq(tokens.paymentId, payment.id),
+          like(tokens.tokenCode, 'PENDING_ISSUANCE_%')
+        )
+      )
+      .returning({ id: tokens.id });
+
+    if (replaced.length === 0) {
+      await tx
+        .insert(tokens)
+        .values({ userId: account.userId, paymentId: payment.id, ...legacyValues })
+        .onConflictDoNothing({ target: [tokens.userId, tokens.tokenCode] });
+    }
 
     return inserted;
   });

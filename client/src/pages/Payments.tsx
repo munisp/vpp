@@ -40,7 +40,7 @@ export default function Payments() {
   const [isTokenDialogOpen, setIsTokenDialogOpen] = useState(false);
   const [paymentData, setPaymentData] = useState({
     amount: "",
-    method: "mpesa" as "mpesa" | "airtel_money" | "tigo_pesa" | "bank_transfer" | "card",
+    method: "mpesa" as "mpesa" | "airtel_money" | "tigo_pesa",
     phoneNumber: "",
   });
   const [tokenData, setTokenData] = useState({
@@ -222,8 +222,14 @@ export default function Payments() {
                           <SelectItem value="mpesa">M-Pesa</SelectItem>
                           <SelectItem value="airtel_money">Airtel Money</SelectItem>
                           <SelectItem value="tigo_pesa">Tigo Pesa</SelectItem>
-                          <SelectItem value="bank_transfer">Bank Transfer</SelectItem>
-                          <SelectItem value="card">Card</SelectItem>
+                          {/* Bank transfer and card reach no provider, so they
+                              are not offered as ways to pay. */}
+                          <SelectItem value="bank_transfer" disabled>
+                            Bank Transfer — no provider
+                          </SelectItem>
+                          <SelectItem value="card" disabled>
+                            Card — no provider
+                          </SelectItem>
                         </SelectContent>
                       </Select>
                     </div>

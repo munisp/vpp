@@ -25,10 +25,17 @@ const ApproveAssetSchema = z.object({
   approved: z.boolean(),
 });
 
+/**
+ * The tariff bands the market price table is keyed by. An earlier version took
+ * export/import here and stored export as `peak` and import as `off_peak`,
+ * which put a direction into a column every price reader treats as a time band.
+ */
 const SetMarketPriceSchema = z.object({
-  priceType: z.enum(['export', 'import']),
+  priceType: z.enum(['off_peak', 'shoulder', 'peak', 'super_peak']),
+  country: z.enum(['nigeria', 'tanzania']).default('tanzania'),
   price: z.number().int().positive(),
   effectiveFrom: z.date(),
+  validUntil: z.date().optional(),
 });
 
 export const adminRouter = router({
@@ -288,8 +295,13 @@ export const adminRouter = router({
       if (!db_instance) throw new Error('Database not available');
 
       const { marketPrices } = await import('../../drizzle/schema');
-      const prices = await db_instance.select().from(marketPrices).limit(50);
-      
+      const { desc } = await import('drizzle-orm');
+      const prices = await db_instance
+        .select()
+        .from(marketPrices)
+        .orderBy(desc(marketPrices.timestamp))
+        .limit(50);
+
       // Cache the result
       await redisCache.cacheMarketPrice(prices);
       
@@ -309,12 +321,18 @@ export const adminRouter = router({
     .mutation(async ({ input, ctx }) => {
       try {
         await db.insertMarketPrice({
-          country: 'tanzania',
-          priceType: input.priceType === 'export' ? 'peak' : 'off_peak',
+          country: input.country,
+          priceType: input.priceType,
           price: input.price,
           timestamp: input.effectiveFrom,
-          validUntil: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000), // 1 year
+          validUntil:
+            input.validUntil ?? new Date(input.effectiveFrom.getTime() + 365 * 24 * 60 * 60 * 1000),
         });
+
+        // The read path serves this list from Redis, so a price left cached
+        // after a write is shown to the operator as the current price.
+        const { redisCache } = await import('../services/redis-cache');
+        await redisCache.invalidateMarketPrice();
 
         // Create audit log
         await createAuditLog({

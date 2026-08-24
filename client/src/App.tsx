@@ -71,6 +71,7 @@ import LedgerReconciliation from "@/pages/LedgerReconciliation";
 import EventStream from "@/pages/EventStream";
 import Lakehouse from "@/pages/Lakehouse";
 import ModelHealth from "@/pages/ModelHealth";
+import JourneyAssurance from "@/pages/admin/JourneyAssurance";
 import Diagnostics from "@/pages/Diagnostics";
 import LocationalFlexibility from "@/pages/LocationalFlexibility";
 import V2G from "@/pages/V2G";
@@ -230,6 +231,11 @@ function Router() {
       <Route path="/admin/lakehouse">
         <RouteShell adminOnly chrome={false}>
           <Lakehouse />
+        </RouteShell>
+      </Route>
+      <Route path="/admin/journeys">
+        <RouteShell adminOnly chrome={false}>
+          <JourneyAssurance />
         </RouteShell>
       </Route>
       <Route path="/admin/model-health">

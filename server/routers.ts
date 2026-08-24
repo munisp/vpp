@@ -6,6 +6,7 @@ import { assetsRouter } from "./routers/assets";
 import { telemetryRouter } from "./routers/telemetry";
 import { tradingRouter } from "./routers/trading";
 import { billingRouter } from "./routers/billing";
+import { contractsRouter } from "./routers/contracts";
 import { paymentsRouter } from "./routers/payments";
 import { alertsRouter } from "./routers/alerts";
 import { adminRouter } from './routers/admin';
@@ -51,6 +52,8 @@ import { energyAdvisorRouter } from './routers/energyAdvisor';
 import { dynamicTariffsRouter } from './routers/dynamicTariffs';
 import { batteryHealthRouter } from './routers/batteryHealth';
 import { p2pMatchingRouter } from './routers/p2pMatching';
+import { journeysRouter } from './routers/journeys';
+import { marketParticipantsRouter } from './routers/marketParticipants';
 import { carbonCreditsRouter } from './routers/carbonCredits';
 import { gridAnomalyRouter } from './routers/gridAnomaly';
 import { v2gOptimizerRouter } from './routers/v2gOptimizer';
@@ -136,6 +139,7 @@ export const appRouter = router({
   trading: tradingRouter,
   p2pTrading: p2pTradingRouter,
   billing: billingRouter,
+  contracts: contractsRouter,
   payments: paymentsRouter,
   alerts: alertsRouter,
   admin: adminRouter,
@@ -161,6 +165,8 @@ export const appRouter = router({
   dynamicTariffs: dynamicTariffsRouter,
   batteryHealth: batteryHealthRouter,
   p2pMatching: p2pMatchingRouter,
+  journeys: journeysRouter,
+  marketParticipants: marketParticipantsRouter,
   carbonCredits: carbonCreditsRouter,
   gridAnomaly: gridAnomalyRouter,
   v2gOptimizer: v2gOptimizerRouter,

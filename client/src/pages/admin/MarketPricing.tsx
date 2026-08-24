@@ -34,10 +34,29 @@ import {
 } from "@/components/ui/dialog";
 import { useState } from "react";
 
+type PriceBand = "off_peak" | "shoulder" | "peak" | "super_peak";
+
+const PRICE_BANDS: Array<{ value: PriceBand; label: string }> = [
+  { value: "off_peak", label: "Off-Peak Hours" },
+  { value: "shoulder", label: "Shoulder Hours" },
+  { value: "peak", label: "Peak Hours" },
+  { value: "super_peak", label: "Super Peak Hours" },
+];
+
+type MarketPriceRow = {
+  id: number;
+  country: string;
+  priceType: string;
+  price: number;
+  timestamp: string | Date;
+  validUntil: string | Date;
+};
+
 export default function MarketPricing() {
   const { user, loading } = useAuth();
   const [showAddDialog, setShowAddDialog] = useState(false);
-  const [priceType, setPriceType] = useState<"export" | "import">("export");
+  const [priceType, setPriceType] = useState<PriceBand>("peak");
+  const [country, setCountry] = useState<"tanzania" | "nigeria">("tanzania");
   const [price, setPrice] = useState("");
   const [effectiveDate, setEffectiveDate] = useState(new Date().toISOString().split('T')[0]);
 
@@ -68,19 +87,33 @@ export default function MarketPricing() {
 
     setPriceMutation.mutate({
       priceType,
+      country,
       price: priceInCents,
       effectiveFrom: new Date(effectiveDate),
     });
   };
 
-  const getPriceTypeLabel = (type: string) => {
-    const labels: Record<string, string> = {
-      peak: "Peak Hours",
-      off_peak: "Off-Peak Hours",
-      shoulder: "Shoulder Hours",
-      super_peak: "Super Peak Hours",
-    };
-    return labels[type] || type;
+  const getPriceTypeLabel = (type: string) =>
+    PRICE_BANDS.find(band => band.value === type)?.label ?? type;
+
+  const rows: MarketPriceRow[] = prices ?? [];
+
+  /**
+   * The band price in force right now, from the rows the server returned. There
+   * is deliberately no default: a band nobody has priced is shown as unpriced
+   * rather than as a plausible number.
+   */
+  const currentPrice = (band: PriceBand): MarketPriceRow | null => {
+    const now = Date.now();
+    const inForce = rows
+      .filter(
+        row =>
+          row.priceType === band &&
+          new Date(row.timestamp).getTime() <= now &&
+          new Date(row.validUntil).getTime() >= now
+      )
+      .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+    return inForce[0] ?? null;
   };
 
   return (
@@ -99,53 +132,56 @@ export default function MarketPricing() {
           </Button>
         </div>
 
-        {/* Current Prices */}
-        <div className="grid gap-4 md:grid-cols-2">
-          <Card>
-            <CardHeader>
-              <div className="flex items-center gap-3">
-                <div className="p-3 rounded-lg bg-green-50">
-                  <TrendingUp className="h-6 w-6 text-green-600" />
-                </div>
-                <div>
-                  <CardTitle>Export Price</CardTitle>
-                  <CardDescription>Price for selling energy to grid</CardDescription>
-                </div>
-              </div>
-            </CardHeader>
-            <CardContent>
-              <div className="text-3xl font-bold text-green-600">
-                TZS 150
-                <span className="text-base font-normal text-muted-foreground ml-2">/ kWh</span>
-              </div>
-              <p className="text-sm text-muted-foreground mt-2">
-                Effective from: {new Date().toLocaleDateString()}
-              </p>
-            </CardContent>
-          </Card>
-
-          <Card>
-            <CardHeader>
-              <div className="flex items-center gap-3">
-                <div className="p-3 rounded-lg bg-red-50">
-                  <TrendingDown className="h-6 w-6 text-red-600" />
-                </div>
-                <div>
-                  <CardTitle>Import Price</CardTitle>
-                  <CardDescription>Price for buying energy from grid</CardDescription>
-                </div>
-              </div>
-            </CardHeader>
-            <CardContent>
-              <div className="text-3xl font-bold text-red-600">
-                TZS 250
-                <span className="text-base font-normal text-muted-foreground ml-2">/ kWh</span>
-              </div>
-              <p className="text-sm text-muted-foreground mt-2">
-                Effective from: {new Date().toLocaleDateString()}
-              </p>
-            </CardContent>
-          </Card>
+        {/* Prices in force now, from the price table itself */}
+        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+          {PRICE_BANDS.map(band => {
+            const inForce = currentPrice(band.value);
+            return (
+              <Card key={band.value}>
+                <CardHeader>
+                  <div className="flex items-center gap-3">
+                    <div className={`p-3 rounded-lg ${inForce ? "bg-green-50" : "bg-muted"}`}>
+                      {inForce ? (
+                        <TrendingUp className="h-6 w-6 text-green-600" />
+                      ) : (
+                        <TrendingDown className="h-6 w-6 text-muted-foreground" />
+                      )}
+                    </div>
+                    <div>
+                      <CardTitle className="text-base">{band.label}</CardTitle>
+                      <CardDescription>
+                        {inForce ? `${inForce.country} — in force` : "No price set"}
+                      </CardDescription>
+                    </div>
+                  </div>
+                </CardHeader>
+                <CardContent>
+                  {inForce ? (
+                    <>
+                      <div className="text-2xl font-bold text-green-600">
+                        {(inForce.price / 100).toFixed(2)}
+                        <span className="text-base font-normal text-muted-foreground ml-2">
+                          / kWh
+                        </span>
+                      </div>
+                      <p className="text-sm text-muted-foreground mt-2">
+                        Effective from: {new Date(inForce.timestamp).toLocaleDateString()}
+                      </p>
+                    </>
+                  ) : (
+                    <>
+                      <div className="text-2xl font-bold text-muted-foreground">—</div>
+                      <p className="text-sm text-muted-foreground mt-2">
+                        {isLoading
+                          ? "Loading prices…"
+                          : "No operator has priced this band, so the platform quotes none."}
+                      </p>
+                    </>
+                  )}
+                </CardContent>
+              </Card>
+            );
+          })}
         </div>
 
         {/* Price History */}
@@ -176,14 +212,14 @@ export default function MarketPricing() {
                         Loading prices...
                       </TableCell>
                     </TableRow>
-                  ) : !prices || prices.length === 0 ? (
+                  ) : rows.length === 0 ? (
                     <TableRow>
                       <TableCell colSpan={6} className="text-center py-8">
                         No price history available
                       </TableCell>
                     </TableRow>
                   ) : (
-                    prices.map((p: any) => {
+                    rows.map(p => {
                       const now = new Date();
                       const effectiveFrom = new Date(p.timestamp);
                       const validUntil = new Date(p.validUntil);
@@ -197,7 +233,8 @@ export default function MarketPricing() {
                             </Badge>
                           </TableCell>
                           <TableCell className="font-medium">
-                            TZS {(p.price / 100).toFixed(2)} / kWh
+                            {p.country === "nigeria" ? "NGN" : "TZS"}{" "}
+                            {(p.price / 100).toFixed(2)} / kWh
                           </TableCell>
                           <TableCell className="text-muted-foreground">
                             {p.country === 'tanzania' ? 'Tanzania' : p.country}
@@ -235,24 +272,36 @@ export default function MarketPricing() {
           </DialogHeader>
           <div className="space-y-4 py-4">
             <div className="space-y-2">
-              <Label htmlFor="priceType">Price Type</Label>
-              <Select value={priceType} onValueChange={(value: "export" | "import") => setPriceType(value)}>
+              <Label htmlFor="priceType">Tariff Band</Label>
+              <Select value={priceType} onValueChange={(value: PriceBand) => setPriceType(value)}>
                 <SelectTrigger id="priceType">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="export">
-                    <div className="flex items-center gap-2">
-                      <TrendingUp className="h-4 w-4 text-green-600" />
-                      <span>Export (Selling to Grid)</span>
-                    </div>
-                  </SelectItem>
-                  <SelectItem value="import">
-                    <div className="flex items-center gap-2">
-                      <TrendingDown className="h-4 w-4 text-red-600" />
-                      <span>Import (Buying from Grid)</span>
-                    </div>
-                  </SelectItem>
+                  {PRICE_BANDS.map(band => (
+                    <SelectItem key={band.value} value={band.value}>
+                      {band.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">
+                Prices are stored per tariff band, which is what the tariff and settlement
+                readers look up.
+              </p>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="country">Market</Label>
+              <Select
+                value={country}
+                onValueChange={(value: "tanzania" | "nigeria") => setCountry(value)}
+              >
+                <SelectTrigger id="country">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="tanzania">Tanzania</SelectItem>
+                  <SelectItem value="nigeria">Nigeria</SelectItem>
                 </SelectContent>
               </Select>
             </div>

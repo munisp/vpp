@@ -107,36 +107,61 @@ export class CommunityEnergyService {
       governanceModel?: EnergyCommunity['governanceModel'];
       allocationMethod?: EnergyCommunity['allocationMethod'];
       canIsland?: boolean;
-    }
+    },
+    founderUserId: number
   ): Promise<EnergyCommunity> {
     const db = await getDb();
     if (!db) throw new Error('Database not available');
 
     const communityCode = `EC_${Date.now().toString(36)}_${Math.random().toString(36).substring(2, 6)}`;
+    const founderCapacityKw = await this.contributedCapacityKw(founderUserId);
 
-    const result = await db.execute<SqlRow>(sql`
-      INSERT INTO energy_communities (
-        community_code, name, description, community_type,
-        region, grid_connection_point, governance_model,
-        has_shared_battery, has_shared_solar, shared_capacity_kw,
-        can_island, islanding_mode, allocation_method, status,
-        created_at, updated_at
-      ) VALUES (
-        ${communityCode}, ${community.name}, ${community.description || null},
-        ${community.communityType}, ${community.region || null},
-        ${community.gridConnectionPoint || null},
-        ${community.governanceModel || 'cooperative'},
-        false, false, null,
-        ${community.canIsland || false}, 'grid_tied',
-        ${community.allocationMethod || 'proportional_capacity'},
-        'forming', NOW(), NOW()
-      )
-      RETURNING id
-    `);
+    // A community with no active admin can never admit a member or set an
+    // allocation rule, so the founder joins it as one in the same transaction:
+    // a half-created community would be governed by nobody.
+    const communityId = await db.transaction(async tx => {
+      const inserted = await tx.execute<SqlRow>(sql`
+        INSERT INTO energy_communities (
+          community_code, name, description, community_type,
+          region, grid_connection_point, governance_model,
+          has_shared_battery, has_shared_solar, shared_capacity_kw,
+          can_island, islanding_mode, allocation_method, status,
+          created_at, updated_at
+        ) VALUES (
+          ${communityCode}, ${community.name}, ${community.description || null},
+          ${community.communityType}, ${community.region || null},
+          ${community.gridConnectionPoint || null},
+          ${community.governanceModel || 'cooperative'},
+          false, false, null,
+          ${community.canIsland || false}, 'grid_tied',
+          ${community.allocationMethod || 'proportional_capacity'},
+          'forming', NOW(), NOW()
+        )
+        RETURNING id
+      `);
+      const newId = Number(inserted.rows[0].id);
+      await tx.execute<SqlRow>(sql`
+        INSERT INTO community_members (
+          community_id, user_id, role, joined_at,
+          contributed_capacity_kw, share_percentage,
+          auto_participate, priority_level, status,
+          created_at, updated_at
+        ) VALUES (
+          ${newId}, ${founderUserId}, 'admin', NOW(),
+          ${founderCapacityKw}, null,
+          true, 5, 'active',
+          NOW(), NOW()
+        )
+      `);
+      return newId;
+    });
+
+    // Shares follow contributed capacity, which is read outside the write above.
+    await this.recalculateShares(communityId);
 
     console.log(`[CommunityEnergy] Created community ${communityCode}: ${community.name}`);
 
-    return this.getCommunity(Number(result.rows[0].id)) as Promise<EnergyCommunity>;
+    return this.getCommunity(communityId) as Promise<EnergyCommunity>;
   }
 
   /**
@@ -184,15 +209,8 @@ export class CommunityEnergyService {
       throw new Error('User is already a member of this community');
     }
 
-    // Calculate contributed capacity from user's assets if not provided
-    let contributedCapacity = options.contributedCapacityKw || 0;
-    if (!options.contributedCapacityKw) {
-      const assetsResult = await db.execute<SqlRow>(sql`
-        SELECT SUM(capacity) as total FROM assets
-        WHERE "userId" = ${userId} AND status = 'active'
-      `);
-      contributedCapacity = (assetsResult.rows[0]?.total || 0) / 1000; // Convert W to kW
-    }
+    const contributedCapacity =
+      options.contributedCapacityKw ?? (await this.contributedCapacityKw(userId));
 
     const result = await db.execute<SqlRow>(sql`
       INSERT INTO community_members (
@@ -248,24 +266,72 @@ export class CommunityEnergyService {
     return (result.rows || []).map(this.mapRowToMember);
   }
 
+  /** A user's own active capacity, in kW, as the community counts it. */
+  private async contributedCapacityKw(userId: number): Promise<number> {
+    const db = await getDb();
+    if (!db) throw new Error('Database not available');
+    const result = await db.execute<SqlRow>(sql`
+      SELECT SUM(capacity) as total FROM assets
+      WHERE "userId" = ${userId} AND status = 'active'
+    `);
+    const total = Number(result.rows[0]?.total ?? 0);
+    return Number.isFinite(total) ? total / 1000 : 0;
+  }
+
   /**
-   * Approve a pending member
+   * Membership decides who shares in an allocation, so admitting a member is a
+   * governance act: it belongs to the community's admins, not to whoever asked
+   * to join.
    */
-  async approveMember(memberId: number): Promise<CommunityMember> {
+  async assertCommunityAdmin(
+    communityId: number,
+    userId: number,
+    actorIsPlatformAdmin: boolean
+  ): Promise<void> {
+    if (actorIsPlatformAdmin) return;
+    const db = await getDb();
+    if (!db) throw new Error('Database not available');
+    const result = await db.execute<SqlRow>(sql`
+      SELECT id FROM community_members
+      WHERE community_id = ${communityId} AND user_id = ${userId}
+        AND role IN ('admin', 'operator') AND status = 'active'
+      LIMIT 1
+    `);
+    if (!(result.rows?.length > 0)) {
+      throw new Error('Only an active community admin/operator can admit or change a member');
+    }
+  }
+
+  /**
+   * Admit a member who asked to join, on the authority of the community's own
+   * admins. Only a pending request can be admitted: a suspended or removed
+   * member is a decision to reverse deliberately, not to approve.
+   */
+  async approveMember(
+    memberId: number,
+    approverUserId: number,
+    approverIsPlatformAdmin: boolean
+  ): Promise<CommunityMember> {
     const db = await getDb();
     if (!db) throw new Error('Database not available');
 
-    await db.execute<SqlRow>(sql`
-      UPDATE community_members SET status = 'active', updated_at = NOW()
-      WHERE id = ${memberId}
-    `);
-
     const member = await this.getMember(memberId);
-    if (member) {
-      await this.recalculateShares(member.communityId);
+    if (!member) throw new Error(`No community membership ${memberId} exists`);
+    await this.assertCommunityAdmin(member.communityId, approverUserId, approverIsPlatformAdmin);
+    if (member.status !== 'pending') {
+      throw new Error(
+        `Membership ${memberId} is ${member.status}, not pending, so there is nothing to approve`
+      );
     }
 
-    return member as CommunityMember;
+    await db.execute<SqlRow>(sql`
+      UPDATE community_members SET status = 'active', updated_at = NOW()
+      WHERE id = ${memberId} AND status = 'pending'
+    `);
+
+    await this.recalculateShares(member.communityId);
+
+    return (await this.getMember(memberId)) as CommunityMember;
   }
 
   /**

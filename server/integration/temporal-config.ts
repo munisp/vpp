@@ -63,5 +63,6 @@ export const TASK_QUEUES = {
   TRADING_EXECUTION: 'trading-execution',
   RECONCILIATION: 'reconciliation',
   NOTIFICATIONS: 'notifications',
-  ANALYTICS: 'analytics'
+  ANALYTICS: 'analytics',
+  JOURNEYS: 'stakeholder-journeys'
 } as const;

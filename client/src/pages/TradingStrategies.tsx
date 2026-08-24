@@ -125,7 +125,13 @@ export default function TradingStrategies() {
   const handleBacktest = async (id: number, period: "7d" | "30d" | "90d") => {
     try {
       const result = await backtestMutation.mutateAsync({ id, period });
-      toast.success(`Backtest completed: ${result.results.simulatedTrades} trades simulated`);
+      // The server says whether it measured anything; a strategy that matched no
+      // recorded trade has no return to celebrate.
+      if (result.results.measured) {
+        toast.success(result.message);
+      } else {
+        toast.warning(result.message);
+      }
       refetch();
     } catch (error: any) {
       toast.error(error.message || "Failed to run backtest");
@@ -593,7 +599,14 @@ export default function TradingStrategies() {
                     <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                       <div>
                         <p className="text-sm text-muted-foreground">Simulated Trades</p>
-                        <p className="font-medium">{(strategy.backtestResults as any).simulatedTrades}</p>
+                        <p className="font-medium">
+                          {(strategy.backtestResults as any).simulatedTrades}
+                          {typeof (strategy.backtestResults as any).tradesConsidered === "number" && (
+                            <span className="text-muted-foreground">
+                              {" "}of {(strategy.backtestResults as any).tradesConsidered} recorded
+                            </span>
+                          )}
+                        </p>
                       </div>
                       <div>
                         <p className="text-sm text-muted-foreground">Projected Profit</p>
@@ -610,10 +623,18 @@ export default function TradingStrategies() {
                       <div>
                         <p className="text-sm text-muted-foreground">Success Rate</p>
                         <p className="font-medium">
-                          {((strategy.backtestResults as any).successRate || 0).toFixed(1)}%
+                          {typeof (strategy.backtestResults as any).successRate === "number"
+                            ? `${(strategy.backtestResults as any).successRate.toFixed(1)}%`
+                            : "not measured"}
                         </p>
                       </div>
                     </div>
+                    {(strategy.backtestResults as any).measured === false && (
+                      <p className="text-sm text-muted-foreground mt-3">
+                        No recorded trade met this strategy's conditions over the period, so these
+                        figures are the absence of a result rather than a measured return.
+                      </p>
+                    )}
                   </div>
                 )}
 

@@ -44,6 +44,7 @@ import LedgerReconciliationScreen from '../screens/LedgerReconciliationScreen';
 import LakehouseScreen from '../screens/LakehouseScreen';
 import ModelHealthScreen from '../screens/ModelHealthScreen';
 import DiagnosticsScreen from '../screens/DiagnosticsScreen';
+import JourneyAssuranceScreen from '../screens/JourneyAssuranceScreen';
 
 const Stack = createNativeStackNavigator();
 const Tab = createBottomTabNavigator();
@@ -184,6 +185,7 @@ export default function AppNavigator() {
       <Stack.Screen name="Lakehouse" component={LakehouseScreen} />
       <Stack.Screen name="ModelHealth" component={ModelHealthScreen} />
       <Stack.Screen name="Diagnostics" component={DiagnosticsScreen} />
+      <Stack.Screen name="JourneyAssurance" component={JourneyAssuranceScreen} />
           </>
         )}
       </Stack.Navigator>

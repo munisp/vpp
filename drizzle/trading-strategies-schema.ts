@@ -60,10 +60,15 @@ export const tradingStrategies = pgTable("trading_strategies", {
   // Backtesting results (stored after simulation)
   backtestResults: json("backtestResults").$type<{
     period?: string;
+    /** How many recorded trades the run looked at, matched or not. */
+    tradesConsidered?: number;
     simulatedTrades?: number;
     projectedProfit?: number;
     projectedEnergyTraded?: number;
-    successRate?: number;
+    /** Null when nothing matched: a rate over no trades is not zero percent. */
+    successRate?: number | null;
+    /** Whether any recorded trade met the strategy's conditions. */
+    measured?: boolean;
     testedAt?: string;
   }>(),
   

@@ -563,7 +563,9 @@ export async function measureAward(awardId: number, now?: Date): Promise<Measure
 
   const assetId = Number(award.asset_id);
   const direction = String(award.direction) as FlexibilityDirection;
-  const durationMinutes = Math.round((endsAt.getTime() - startsAt.getTime()) / 60_000);
+  // The window's own length, not a rounded number of minutes: rounding pays a
+  // 90-second window for two minutes and a 25-second window for nothing.
+  const durationHours = (endsAt.getTime() - startsAt.getTime()) / 3_600_000;
   const lookbackFrom = new Date(startsAt.getTime() - BASELINE_LOOKBACK_DAYS * 86_400_000);
   // Clock window as text, so the comparison is a plain time comparison rather
   // than a cast of a timestamp parameter, and a window crossing midnight is a
@@ -651,7 +653,7 @@ export async function measureAward(awardId: number, now?: Date): Promise<Measure
     );
     const awardedPowerW = Number(award.awarded_power_w);
     const creditedPowerW = Math.min(deliveredPowerW, awardedPowerW);
-    const deliveredEnergyWh = Math.round((creditedPowerW * durationMinutes) / 60);
+    const deliveredEnergyWh = Math.round(creditedPowerW * durationHours);
     const earnedAmount = Math.round(
       ((deliveredEnergyWh / 1000) * Number(award.price_cents_per_kwh)) / PRICE_SCALE
     );
@@ -678,7 +680,7 @@ export async function measureAward(awardId: number, now?: Date): Promise<Measure
       measurement: {
         windowStartsAt: startsAt.toISOString(),
         windowEndsAt: endsAt.toISOString(),
-        durationMinutes,
+        durationMinutes: durationHours * 60,
         direction,
         baselineMethod: BASELINE_METHOD,
         baselineDays: result.baselineDays,
@@ -811,11 +813,24 @@ export async function settleAward(
   const currency = String(award.currency) as 'NGN' | 'TZS' | 'USD';
   const startsAt = new Date(String(award.starts_at));
   const endsAt = new Date(String(award.ends_at));
-  const durationMinutes = Math.round((endsAt.getTime() - startsAt.getTime()) / 60_000);
+  // The ledger records whole minutes; a window shorter than one is recorded as
+  // the minute it fell inside rather than as no duration at all. The money comes
+  // from the measured energy, not from this figure.
+  const windowMs = endsAt.getTime() - startsAt.getTime();
+  const durationMinutes = windowMs > 0 ? Math.max(1, Math.round(windowMs / 60_000)) : 0;
   const priceCentsPerKwh = Number(award.price_cents_per_kwh);
   // Cents-per-kWh x100 in the market tables; the ledger stores plain rate units.
   const ratePerUnit = Math.round(priceCentsPerKwh / PRICE_SCALE);
   const grossAmount = Math.round(((energyWh / 1000) * priceCentsPerKwh) / PRICE_SCALE);
+  if (grossAmount <= 0) {
+    // Measured energy at this price is worth less than the smallest unit the
+    // ledger can hold. Recording it would leave an award reading "settled" with
+    // nothing credited, which is indistinguishable from a paid delivery.
+    throw new LocationalFlexibilityError(
+      `Award ${awardId} measured ${energyWh} Wh at ${priceCentsPerKwh} (cents/kWh x${PRICE_SCALE}), ` +
+        'which credits no whole cent: nothing is settled'
+    );
+  }
 
   // Claim the award before any money is written. Whoever wins this conditional
   // update owns the settlement; a loser sees no row and stops, instead of

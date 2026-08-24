@@ -27,8 +27,9 @@ export const demandResponseRouter = router({
       const existing = await drDb.getDRParticipant(ctx.user.id);
       if (existing) {
         throw new TRPCError({
-          code: 'BAD_REQUEST',
-          message: 'Already enrolled in demand response program',
+          code: 'CONFLICT',
+          message:
+            'Already enrolled in the demand response programme; update the enrolment instead.',
         });
       }
       
@@ -158,9 +159,11 @@ export const demandResponseRouter = router({
       const participants = await drDb.getAllDRParticipants('active');
       for (const participant of participants) {
         if (participant.autoOptIn) {
-          // Auto-enroll
+          // Auto-enrol against the event that was actually created: a response
+          // filed against no event is a participant who was never enrolled and
+          // would never be measured or compensated.
           await drDb.createDRResponse({
-            eventId: 0, // Will be set after event creation
+            eventId,
             userId: participant.userId,
             participationStatus: 'auto_enrolled',
           });
@@ -173,8 +176,10 @@ export const demandResponseRouter = router({
           body: `${input.eventName}: Reduce ${input.targetReduction}kW from ${input.startTime.toLocaleString()} to ${input.endTime.toLocaleString()}. Earn ${input.compensationRate}¢/kWh.`,
         });
       }
-      
-      return { success: true };
+
+      // The caller has to be able to name the event it just called: targeting,
+      // responses and compensation are all keyed by this id.
+      return { success: true, eventId };
     }),
   
   getAllEvents: adminProcedure

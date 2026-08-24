@@ -152,7 +152,18 @@ def optimize_coordinate(
     request: CoordinationRequest,
     x_optimizer_token: Annotated[str | None, Header()] = None,
 ) -> CoordinationResponse:
+    """Coordinate several sites over one grid connection.
+
+    A coordination that did not converge is returned with its residual instead of
+    raised: the caller has to know how far off the shared profile the allocation
+    still is, since an unconverged *cap* allocation breaches a physical limit
+    while an unconverged *target* one merely misses a profile. The response
+    carries ``status="not_converged"`` so it can never read as a met request, and
+    a caller that cannot use one refuses on that status. Every other non-optimal
+    status still returns no schedule at all.
+    """
     _authorise(x_optimizer_token)
     result = coordinate(request)
-    _check(result, result.status)
+    if result.status is not SolveStatus.NOT_CONVERGED:
+        _check(result, result.status)
     return result

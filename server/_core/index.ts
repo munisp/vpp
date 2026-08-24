@@ -19,6 +19,7 @@ import { smsInboundRouter } from "../webhooks/sms-inbound";
 import { gridProtocolRouter } from "../webhooks/grid-protocols";
 import { webSocketService } from "../integration/websocket-service";
 import { startControlFallbackSweeper } from "../services/control-delivery";
+import { seedStrategyTemplates } from "../db-strategy-templates";
 import { startFleetTelemetryRollup } from "../services/fleet-telemetry";
 import { brokerConfigured, startOutboxRelay } from "../services/events/outbox";
 import { consumerConfigured, startEventConsumer } from "../services/events/consumer";
@@ -211,6 +212,15 @@ async function startServer() {
   
   // Initialize scheduled report jobs
   initScheduledReportJobs();
+
+  // The strategy template library is static product content, not deployment
+  // state, so it ships with the app: without this a fresh deployment shows an
+  // empty Strategy Templates page and nothing to clone, and the library only
+  // appeared if somebody remembered to run a script by hand. The seed skips
+  // itself once any template exists, so it never overwrites edited content.
+  seedStrategyTemplates().catch(error => {
+    console.error("[StrategyTemplates] seeding the template library failed:", error);
+  });
 
   // Expire control windows and deliver their fallbacks. Opt-in via
   // GRID_CONTROL_SWEEP_MS so a deployment running the sweep from a worker does

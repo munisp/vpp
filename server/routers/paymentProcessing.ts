@@ -262,4 +262,34 @@ export const paymentProcessingRouter = router({
   getSupportedGateways: protectedProcedure.query(() => {
     return PaymentGatewayManager.getSupportedGateways();
   }),
+
+  /**
+   * Which gateways can actually be asked for money, and why not when they
+   * cannot. A gateway the platform knows how to speak to is not the same as
+   * one it has credentials for, so callers get both rather than inferring
+   * availability from the supported list.
+   */
+  getGatewayAvailability: protectedProcedure
+    .input(
+      z
+        .object({ environment: z.enum(["sandbox", "production"]).default("sandbox") })
+        .default({ environment: "sandbox" })
+    )
+    .query(async ({ input }) => {
+      const gateways = await Promise.all(
+        (["mpesa", "airtel_money", "tigo_pesa"] as const).map(async gateway => {
+          const state = await PaymentGatewayManager.isConfigured(gateway, input.environment);
+          return {
+            gateway,
+            configured: state.configured,
+            reason: state.reason ?? null,
+          };
+        })
+      );
+      return {
+        environment: input.environment,
+        gateways,
+        configuredCount: gateways.filter(gateway => gateway.configured).length,
+      };
+    }),
 });

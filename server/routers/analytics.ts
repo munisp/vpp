@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { router, protectedProcedure } from '../_core/trpc';
+import { router, protectedProcedure, adminProcedure } from '../_core/trpc';
 import * as analytics from '../analytics';
 
 const DateRangeSchema = z.object({
@@ -55,12 +55,8 @@ export const analyticsRouter = router({
   /**
    * Get user engagement metrics (admin only)
    */
-  getUserEngagement: protectedProcedure
-    .query(async ({ ctx }) => {
-      // Check if user is admin
-      if (ctx.user.role !== 'admin') {
-        throw new Error('Unauthorized: Admin access required');
-      }
+  getUserEngagement: adminProcedure
+    .query(async () => {
       const metrics = await analytics.getUserEngagementMetrics();
       return metrics;
     }),
@@ -68,12 +64,8 @@ export const analyticsRouter = router({
   /**
    * Get system statistics (admin only)
    */
-  getSystemStats: protectedProcedure
-    .query(async ({ ctx }) => {
-      // Check if user is admin
-      if (ctx.user.role !== 'admin') {
-        throw new Error('Unauthorized: Admin access required');
-      }
+  getSystemStats: adminProcedure
+    .query(async () => {
       const stats = await analytics.getSystemStatistics();
       return stats;
     }),

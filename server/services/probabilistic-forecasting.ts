@@ -52,6 +52,27 @@ export interface HistoricalDataPoint {
   features?: Record<string, number>;
 }
 
+/**
+ * Turn history rows into numeric points, dropping any row whose value or instant
+ * is not a number.
+ *
+ * Postgres returns a `SUM()` over an integer column as a bigint, which arrives
+ * as a string: added straight into a mean it concatenates instead of summing, so
+ * a site's history reads as an enormous or NaN load while still looking like a
+ * forecast. Rows the database could not measure are dropped rather than read as
+ * zero, which would report a quiet site the meter never saw.
+ */
+function toHistoricalPoints(rows: SqlRow[]): HistoricalDataPoint[] {
+  const points: HistoricalDataPoint[] = [];
+  for (const row of rows) {
+    const value = Number(row.value);
+    const timestamp = new Date(row.timestamp as string | number | Date);
+    if (!Number.isFinite(value) || Number.isNaN(timestamp.getTime())) continue;
+    points.push({ timestamp, value });
+  }
+  return points;
+}
+
 // Simple linear regression for baseline forecasting
 class SimpleRegression {
   private slope: number = 0;
@@ -67,7 +88,12 @@ class SimpleRegression {
     const sumXY = x.reduce((acc, xi, i) => acc + xi * y[i], 0);
     const sumX2 = x.reduce((acc, xi) => acc + xi * xi, 0);
 
-    this.slope = (n * sumXY - sumX * sumY) / (n * sumX2 - sumX * sumX);
+    // With one point, or with every x identical, the slope is not determined:
+    // dividing by the zero denominator would make slope, intercept and every
+    // later prediction NaN, which reads downstream as a forecast rather than as
+    // no forecast. The level is still known, so hold it flat.
+    const denominator = n * sumX2 - sumX * sumX;
+    this.slope = denominator === 0 ? 0 : (n * sumXY - sumX * sumY) / denominator;
     this.intercept = (sumY - this.slope * sumX) / n;
 
     // Calculate residuals for uncertainty estimation
@@ -140,7 +166,9 @@ class SeasonalModel {
     const overallMean = data.reduce((acc, p) => acc + p.value, 0) / data.length;
     for (const [dow, values] of Array.from(dowData.entries())) {
       const dowMean = values.reduce((a: number, b: number) => a + b, 0) / values.length;
-      this.dayOfWeekFactors.set(dow, dowMean / overallMean);
+      // History that averages zero gives no day-of-week shape to scale by, and
+      // dividing by it would carry NaN into every prediction.
+      this.dayOfWeekFactors.set(dow, overallMean === 0 ? 1 : dowMean / overallMean);
     }
 
     // Fit trend
@@ -525,10 +553,7 @@ export class ProbabilisticForecastingService {
     }
 
     const result = await db.execute<SqlRow>(query);
-    return (result.rows || []).map((row: any) => ({
-      timestamp: new Date(row.timestamp),
-      value: row.value || 0,
-    }));
+    return toHistoricalPoints(result.rows || []);
   }
 
   /**
@@ -564,9 +589,10 @@ export class ProbabilisticForecastingService {
     }
 
     const result = await db.execute<SqlRow>(query);
-    return (result.rows || []).map((row: any) => ({
-      timestamp: new Date(row.timestamp),
-      value: Math.max(0, row.value || 0), // Generation is always positive
+    // Generation is always positive.
+    return toHistoricalPoints(result.rows || []).map(point => ({
+      ...point,
+      value: Math.max(0, point.value),
     }));
   }
 
@@ -586,10 +612,7 @@ export class ProbabilisticForecastingService {
       ORDER BY timestamp ASC
     `);
 
-    return (result.rows || []).map((row: any) => ({
-      timestamp: new Date(row.timestamp),
-      value: row.value || 0,
-    }));
+    return toHistoricalPoints(result.rows || []);
   }
 
   /**
@@ -607,10 +630,7 @@ export class ProbabilisticForecastingService {
       ORDER BY timestamp ASC
     `);
 
-    return (result.rows || []).map((row: any) => ({
-      timestamp: new Date(row.timestamp),
-      value: row.value || 0,
-    }));
+    return toHistoricalPoints(result.rows || []);
   }
 
   /**

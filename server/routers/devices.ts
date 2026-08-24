@@ -13,6 +13,7 @@ import { getDb } from '../db';
 import { assets } from '../../drizzle/schema';
 import { eq } from 'drizzle-orm';
 import { mqttService } from '../_core/mqtt';
+import { isUniqueViolation } from '../pg-errors';
 
 const scryptAsync = promisify(scrypt);
 
@@ -86,20 +87,34 @@ export const devicesRouter = router({
       const mqttUsername = input.deviceId;
       const mqttPassword = generateSecurePassword();
 
-      const deviceId = await devicesDb.createDevice({
-        assetId: input.assetId,
-        deviceId: input.deviceId,
-        deviceType: input.deviceType,
-        manufacturer: input.manufacturer,
-        model: input.model,
-        firmwareVersion: input.firmwareVersion,
-        mqttClientId,
-        mqttUsername,
-        mqttPasswordHash: await hashPassword(mqttPassword),
-        status: 'offline',
-        telemetryInterval: input.telemetryInterval,
-        enabled: true,
-      });
+      let deviceId: number;
+      try {
+        deviceId = await devicesDb.createDevice({
+          assetId: input.assetId,
+          deviceId: input.deviceId,
+          deviceType: input.deviceType,
+          manufacturer: input.manufacturer,
+          model: input.model,
+          firmwareVersion: input.firmwareVersion,
+          mqttClientId,
+          mqttUsername,
+          mqttPasswordHash: await hashPassword(mqttPassword),
+          status: 'offline',
+          telemetryInterval: input.telemetryInterval,
+          enabled: true,
+        });
+      } catch (error) {
+        // A device identifier is the credential's subject, so re-registering one
+        // would either issue a second secret for a device the platform already
+        // trusts or leak the raw SQL of the constraint that stopped it.
+        if (!isUniqueViolation(error)) throw error;
+        throw new TRPCError({
+          code: 'CONFLICT',
+          message:
+            `Device '${input.deviceId}' is already registered. Its credential is issued once; ` +
+            'rotate it on the existing device rather than registering it again.',
+        });
+      }
 
       // Log device registration
       await devicesDb.createDeviceLog({
@@ -115,6 +130,51 @@ export const devicesRouter = router({
           clientId: mqttClientId,
           username: mqttUsername,
           password: mqttPassword, // Only returned once during registration
+        },
+      };
+    }),
+
+  /**
+   * Rotate a registered device's credential.
+   *
+   * Registration refuses to issue a second secret for a device the platform
+   * already trusts and tells the operator to rotate instead, so this is the
+   * route that makes that instruction actionable: the old secret stops
+   * authenticating the moment the new hash is stored, and the rotation is
+   * logged against the device it re-keyed.
+   */
+  rotateCredential: adminProcedure
+    .input(z.object({ deviceId: z.string() }))
+    .mutation(async ({ input }) => {
+      const device = await devicesDb.getDeviceByDeviceId(input.deviceId);
+      if (!device) {
+        throw new TRPCError({
+          code: 'NOT_FOUND',
+          message: `Device '${input.deviceId}' is not registered, so it has no credential to rotate.`,
+        });
+      }
+
+      const mqttPassword = generateSecurePassword();
+      const mqttClientId = `device-${device.assetId}-${Date.now()}`;
+      await devicesDb.updateDevice(device.id, {
+        mqttClientId,
+        mqttUsername: device.deviceId,
+        mqttPasswordHash: await hashPassword(mqttPassword),
+      });
+
+      await devicesDb.createDeviceLog({
+        deviceId: device.id,
+        eventType: 'info',
+        message: 'Device credential rotated',
+        metadata: JSON.stringify({ rotatedBy: 'admin' }),
+      });
+
+      return {
+        deviceId: device.id,
+        mqttCredentials: {
+          clientId: mqttClientId,
+          username: device.deviceId,
+          password: mqttPassword, // Only returned once, at rotation
         },
       };
     }),

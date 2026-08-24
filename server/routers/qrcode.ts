@@ -1,6 +1,25 @@
+import { TRPCError } from "@trpc/server";
 import { z } from "zod";
 import { protectedProcedure, router } from "../_core/trpc";
-import { generatePaymentQRCode, parsePaymentQRCode } from "../_core/qrcode";
+import {
+  generateSignedPaymentQRCode,
+  parsePaymentQRCode,
+  qrSigningConfigured,
+} from "../_core/qrcode";
+
+/**
+ * A deployment with no signing key cannot issue a payment code, and must say so
+ * rather than return a generic failure a client would retry.
+ */
+function requireSigning(): void {
+  if (!qrSigningConfigured()) {
+    throw new TRPCError({
+      code: "PRECONDITION_FAILED",
+      message:
+        "Payment QR codes are unavailable on this deployment: QR_SIGNING_SECRET is not configured, and an unsigned payment code would be attacker-controllable.",
+    });
+  }
+}
 
 export const qrcodeRouter = router({
   /**
@@ -26,8 +45,19 @@ export const qrcodeRouter = router({
       // The signature attests who asked for the code, not that the encoded
       // merchant/recipient belongs to them: consumers must still authorize the
       // payee against issuedByUserId before moving money.
-      const qrData = await generatePaymentQRCode({ ...input, issuedByUserId: ctx.user.id });
-      return qrData;
+      requireSigning();
+      const generated = await generateSignedPaymentQRCode({
+        ...input,
+        issuedByUserId: ctx.user.id,
+      });
+      // The payload goes back with the image: the caller has to store and
+      // re-present the bytes a scanner would read, not a summary of them.
+      return {
+        image: generated.image,
+        payload: generated.payload,
+        reference: generated.reference,
+        expiresAt: generated.expiresAt.toISOString(),
+      };
     }),
 
   /**
@@ -36,6 +66,7 @@ export const qrcodeRouter = router({
   parse: protectedProcedure
     .input(z.object({ qrData: z.string() }))
     .mutation(async ({ input }) => {
+      requireSigning();
       const parsed = await parsePaymentQRCode(input.qrData);
       return parsed;
     }),

@@ -7,6 +7,7 @@ import { getDb } from '../../db';
 import { priceSignalSites } from '../../../drizzle/price-signal-schema';
 import {
   PriceSignalError,
+  baselineFleetNet,
   buildFleetSites,
   coordinateFleetSignal,
   getFleetSignal,
@@ -27,6 +28,54 @@ function toTRPCError(error: unknown): never {
 }
 
 export const priceSignalRouter = router({
+  /**
+   * What the fleet plans to do if no signal is sent.
+   *
+   * A coordination that misses its target is refused publication, so an operator
+   * needs to know what the fleet would do unprompted before asking it for a
+   * profile: the difference between the two is the flexibility actually on offer.
+   */
+  baseline: adminProcedure
+    .input(
+      z.object({
+        userIds: z.array(z.number().int().positive()).min(1).max(200),
+        intervalMinutes: z.number().int().min(5).max(60).default(15),
+        horizon: z.number().int().min(1).max(288),
+        siteImportLimitW: z.number().positive(),
+        siteExportLimitW: z.number().nonnegative(),
+        scopeType: z.enum(['fleet', 'community', 'region']).default('fleet'),
+        scopeId: z.number().int().positive().optional(),
+        region: z.string().max(50).optional(),
+      })
+    )
+    .query(async ({ input }) => {
+      try {
+        const built = await buildFleetSites({
+          userIds: input.userIds,
+          horizon: input.horizon,
+          intervalMinutes: input.intervalMinutes,
+          siteImportLimitW: input.siteImportLimitW,
+          siteExportLimitW: input.siteExportLimitW,
+          scopeType: input.scopeType,
+          scopeId: input.scopeId,
+          region: input.region,
+        });
+        const baseline = await baselineFleetNet({
+          sites: built.sites,
+          horizon: input.horizon,
+        });
+        return {
+          netW: baseline.netW,
+          solver: baseline.solver,
+          sites: built.sites.map(site => ({ siteRef: site.siteRef, userId: site.userId })),
+          excludedSites: built.excluded,
+          baseImportPricesCentsPerKwh: built.baseImportPricesCentsPerKwh,
+        };
+      } catch (error) {
+        toTRPCError(error);
+      }
+    }),
+
   /**
    * Solve for the price that makes the fleet want the grid's profile.
    *

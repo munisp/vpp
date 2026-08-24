@@ -13,12 +13,18 @@ import {
 import { redisCache } from "./services/redis-cache";
 
 // Demand Response Events
-export async function createDREvent(event: InsertDemandResponseEvent) {
+export async function createDREvent(event: InsertDemandResponseEvent): Promise<number> {
   const db = await getDb();
   if (!db) throw new Error("Database not available");
-  
-  await db.insert(demandResponseEvents).values(event);
-  return 0; // Return success
+
+  const [inserted] = await db
+    .insert(demandResponseEvents)
+    .values(event)
+    .returning({ id: demandResponseEvents.id });
+  if (!inserted) {
+    throw new Error("Demand response event was not stored");
+  }
+  return inserted.id;
 }
 
 export async function getDREvents(filters?: {

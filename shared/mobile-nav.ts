@@ -86,6 +86,13 @@ export const MOBILE_NAV_GROUPS: MobileNavGroup[] = [
       { screen: 'AuditLogs', label: 'Audit Logs', icon: '📝', adminOnly: true },
       { screen: 'TradingStrategies', label: 'Strategies', icon: '⚡', adminOnly: true },
       { screen: 'WorkflowMonitor', label: 'Workflows', icon: '🔄', adminOnly: true },
+      {
+        screen: 'JourneyAssurance',
+        label: 'Journeys',
+        icon: '🧭',
+        adminOnly: true,
+        keywords: ['journey', 'coverage', 'scenario', 'suite', 'evidence'],
+      },
       { screen: 'MatterLoads', label: 'Home Loads', icon: '🏠', adminOnly: true },
       {
         screen: 'LedgerReconciliation',

@@ -49,5 +49,35 @@ module.exports = {
       max_restarts: 10,
       min_uptime: '10s',
     },
+    {
+      // Stakeholder journeys. One instance: journeys write run records keyed by
+      // run key, and a second worker would only contend for the same activities.
+      name: 'vpp-journey-worker',
+      script: 'server/workflows/journey-worker.ts',
+      interpreter: 'node',
+      interpreter_args: '--import tsx',
+      instances: 1,
+      exec_mode: 'fork',
+      env: {
+        NODE_ENV: 'development',
+        TEMPORAL_ADDRESS: 'localhost:7233',
+        TEMPORAL_NAMESPACE: 'default',
+      },
+      env_production: {
+        NODE_ENV: 'production',
+        TEMPORAL_ADDRESS: process.env.TEMPORAL_ADDRESS || 'localhost:7233',
+        TEMPORAL_NAMESPACE: process.env.TEMPORAL_NAMESPACE || 'default',
+      },
+      error_file: './logs/vpp-journey-worker-error.log',
+      out_file: './logs/vpp-journey-worker-out.log',
+      log_date_format: 'YYYY-MM-DD HH:mm:ss Z',
+      merge_logs: true,
+      autorestart: true,
+      watch: false,
+      max_memory_restart: '512M',
+      restart_delay: 5000,
+      max_restarts: 10,
+      min_uptime: '10s',
+    },
   ],
 };

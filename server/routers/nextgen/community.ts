@@ -13,8 +13,8 @@ export const communityRouter = router({
       allocationMethod: z.enum(['equal_share', 'proportional_capacity', 'proportional_consumption', 'dynamic_pricing', 'custom']).default('proportional_capacity'),
       canIsland: z.boolean().default(false),
     }))
-    .mutation(async ({ input }) => {
-      return communityEnergy.createCommunity(input);
+    .mutation(async ({ input, ctx }) => {
+      return communityEnergy.createCommunity(input, ctx.user.id);
     }),
 
   getCommunity: protectedProcedure
@@ -23,19 +23,34 @@ export const communityRouter = router({
       return communityEnergy.getCommunity(input.communityId);
     }),
 
-    addMember: protectedProcedure
-      .input(z.object({
-        communityId: z.number(),
-        role: z.enum(['admin', 'operator', 'member', 'prosumer']).default('member'),
-        contributedCapacityKw: z.number().optional(),
-        sharePercentage: z.number().optional(),
-        autoParticipate: z.boolean().optional(),
-        priorityLevel: z.number().optional(),
-      }))
-      .mutation(async ({ input, ctx }) => {
-        const { communityId, ...options } = input;
-        return communityEnergy.addMember(communityId, ctx.user.id, options);
-      }),
+  /**
+   * Ask to join a community. The request is recorded pending, and neither the
+   * role nor the share is the applicant's to choose: a self-declared `admin`
+   * would govern a community that never admitted them, and a self-declared
+   * share would take allocation money from the members who earned it.
+   */
+  addMember: protectedProcedure
+    .input(z.object({
+      communityId: z.number(),
+      autoParticipate: z.boolean().optional(),
+    }))
+    .mutation(async ({ input, ctx }) => {
+      return communityEnergy.addMember(input.communityId, ctx.user.id, {
+        role: 'member',
+        autoParticipate: input.autoParticipate,
+      });
+    }),
+
+  /** Admit a pending applicant, as one of the community's own admins. */
+  approveMember: protectedProcedure
+    .input(z.object({ memberId: z.number().int().positive() }))
+    .mutation(async ({ input, ctx }) => {
+      return communityEnergy.approveMember(
+        input.memberId,
+        ctx.user.id,
+        ctx.user.role === 'admin'
+      );
+    }),
 
   getCommunityMembers: protectedProcedure
     .input(z.object({ communityId: z.number() }))

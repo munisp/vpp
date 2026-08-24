@@ -174,11 +174,15 @@ export default function TradingStrategiesScreen() {
   const handleBacktest = async (id: number, period: '7d' | '30d' | '90d') => {
     try {
       const result = await backtestMutation.mutateAsync({ id, period });
+      // The server states whether it measured anything at all, so an unmeasured
+      // backtest is reported as such instead of as a 0% return.
       Alert.alert(
-        'Backtest Complete',
-        `Simulated ${result.results.simulatedTrades} trades\n` +
-        `Projected Profit: ${result.results.projectedProfit.toFixed(2)} TZS\n` +
-        `Success Rate: ${result.results.successRate.toFixed(1)}%`
+        result.results.measured ? 'Backtest Complete' : 'Nothing to Backtest',
+        result.results.measured
+          ? `${result.message}\n` +
+            `Projected Profit: ${result.results.projectedProfit.toFixed(2)} TZS\n` +
+            `Success Rate: ${result.results.successRate === null ? 'not measured' : `${result.results.successRate.toFixed(1)}%`}`
+          : result.message
       );
       refetch();
     } catch (error: any) {
@@ -315,10 +319,18 @@ export default function TradingStrategiesScreen() {
                   <View style={styles.backtestStat}>
                     <Text style={styles.backtestLabel}>Success Rate</Text>
                     <Text style={styles.backtestValue}>
-                      {((strategy.backtestResults as any).successRate || 0).toFixed(1)}%
+                      {typeof (strategy.backtestResults as any).successRate === 'number'
+                        ? `${(strategy.backtestResults as any).successRate.toFixed(1)}%`
+                        : 'not measured'}
                     </Text>
                   </View>
                 </View>
+                {(strategy.backtestResults as any).measured === false && (
+                  <Text style={styles.backtestCaveat}>
+                    No recorded trade met this strategy's conditions over the period, so these
+                    figures are the absence of a result rather than a measured return.
+                  </Text>
+                )}
               </View>
             )}
 
@@ -848,6 +860,11 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '600',
     color: '#111827',
+  },
+  backtestCaveat: {
+    marginTop: 8,
+    fontSize: 12,
+    color: '#6b7280',
   },
   backtestResults: {
     backgroundColor: '#f3f4f6',

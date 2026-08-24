@@ -25,6 +25,7 @@ export default function QRGenerator() {
   const [recipientName, setRecipientName] = useState("");
   const [billType, setBillType] = useState("");
   const [qrCodeUrl, setQrCodeUrl] = useState<string | null>(null);
+  const [qrPayload, setQrPayload] = useState<string | null>(null);
   const [generating, setGenerating] = useState(false);
   const recordGeneration = trpc.qrHistory.recordGeneration.useMutation();
   const generateQRMutation = trpc.qrcode.generate.useMutation();
@@ -64,16 +65,16 @@ export default function QRGenerator() {
         billType: billType || undefined,
         description: description || undefined,
       });
-      // The generate endpoint returns a base64 data URL string directly
-      const generatedQrCode: string = typeof response === 'string' ? response : '';
+      const generatedQrCode = response.image;
       setQrCodeUrl(generatedQrCode);
-      // Record generation to history
-      const qrPayload = JSON.stringify({ type: paymentType, amount, currency });
+      setQrPayload(response.payload);
+      // Record the signed payload a scanner reads, not a description of it: a
+      // history row holding anything else cannot be re-presented or verified.
       await recordGeneration.mutateAsync({
         paymentType,
         amount: parseFloat(amount).toString(),
         currency,
-        qrCodeData: qrPayload,
+        qrCodeData: response.payload,
         qrCodeImage: generatedQrCode,
         merchantName: merchantName || undefined,
         recipientName: recipientName || undefined,
@@ -103,18 +104,13 @@ export default function QRGenerator() {
   };
 
   const handleCopyQRData = () => {
-    const qrData = {
-      type: paymentType,
-      amount: Math.round(parseFloat(amount) * 100),
-      currency,
-      merchantName,
-      recipientName,
-      billType,
-      description,
-    };
+    if (!qrPayload) {
+      toast.error("Generate a QR code first — there is no signed payload to copy yet.");
+      return;
+    }
 
-    navigator.clipboard.writeText(JSON.stringify(qrData, null, 2));
-    toast.success("QR data copied to clipboard!");
+    navigator.clipboard.writeText(qrPayload);
+    toast.success("Signed QR payload copied to clipboard!");
   };
 
   const handleReset = () => {
@@ -124,6 +120,7 @@ export default function QRGenerator() {
     setRecipientName("");
     setBillType("");
     setQrCodeUrl(null);
+    setQrPayload(null);
   };
 
   const formatCurrency = (value: string) => {

@@ -47,6 +47,15 @@ function getQRSigningSecret(): string {
   return secret;
 }
 
+/**
+ * Whether this deployment can sign a payment QR code at all. Callers use it to
+ * refuse the feature with a reason instead of failing inside the encoder.
+ */
+export function qrSigningConfigured(): boolean {
+  const secret = process.env.QR_SIGNING_SECRET;
+  return typeof secret === "string" && secret.length >= 32;
+}
+
 function canonicalize(data: QRPaymentData): string {
   const normalized: Record<string, unknown> = {
     ...data,
@@ -88,13 +97,36 @@ export async function generatePaymentQRCode(
   paymentData: QRPaymentData,
   options: QRCodeOptions = {}
 ): Promise<string> {
+  return (await generateSignedPaymentQRCode(paymentData, options)).image;
+}
+
+/**
+ * The image and the payload encoded in it. The payload is what a scanner reads
+ * and what `parsePaymentQRCode` verifies, so a caller that needs to record,
+ * re-present or verify the code it just issued has to be given it — deriving a
+ * payload of its own would store something no scanner would ever produce.
+ */
+export interface SignedPaymentQRCode {
+  image: string;
+  payload: string;
+  reference: string;
+  expiresAt: Date;
+}
+
+export async function generateSignedPaymentQRCode(
+  paymentData: QRPaymentData,
+  options: QRCodeOptions = {}
+): Promise<SignedPaymentQRCode> {
+  // Read the key before the try: a deployment with no signing key is refusing
+  // to issue payment codes, which is a different thing from a code that could
+  // not be rendered, and the caller has to be able to tell them apart.
+  getQRSigningSecret();
+  const reference = paymentData.reference || generatePaymentReference();
+  const expiresAt = paymentData.expiresAt
+    ? new Date(paymentData.expiresAt)
+    : new Date(Date.now() + 15 * 60 * 1000);
   try {
-    // Add timestamp and reference if not provided
-    const data: QRPaymentData = {
-      ...paymentData,
-      reference: paymentData.reference || generatePaymentReference(),
-      expiresAt: paymentData.expiresAt || new Date(Date.now() + 15 * 60 * 1000), // 15 minutes default
-    };
+    const data: QRPaymentData = { ...paymentData, reference, expiresAt };
 
     const payload = buildSignedPayload(data);
 
@@ -114,7 +146,7 @@ export async function generatePaymentQRCode(
     // Generate QR code as base64 data URL
     const qrCodeDataURL = await QRCode.toDataURL(payload, qrOptions);
 
-    return qrCodeDataURL;
+    return { image: qrCodeDataURL, payload, reference, expiresAt };
   } catch (error) {
     console.error("[QRCode] Failed to generate QR code:", error);
     throw new Error("Failed to generate payment QR code");
@@ -132,6 +164,7 @@ export async function generatePaymentQRCodeBuffer(
   paymentData: QRPaymentData,
   options: QRCodeOptions = {}
 ): Promise<Buffer> {
+  getQRSigningSecret();
   try {
     const data: QRPaymentData = {
       ...paymentData,

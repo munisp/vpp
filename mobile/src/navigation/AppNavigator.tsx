@@ -42,6 +42,7 @@ import DigitalTwinScreen from '../screens/DigitalTwinScreen';
 import LocationalFlexibilityScreen from '../screens/LocationalFlexibilityScreen';
 import NetworkFeasibilityScreen from '../screens/NetworkFeasibilityScreen';
 import DesignStudyScreen from '../screens/DesignStudyScreen';
+import ProtocolConformanceScreen from '../screens/ProtocolConformanceScreen';
 import MatterLoadsScreen from '../screens/MatterLoadsScreen';
 import ServiceStatusScreen from '../screens/ServiceStatusScreen';
 import LedgerReconciliationScreen from '../screens/LedgerReconciliationScreen';
@@ -186,6 +187,7 @@ export default function AppNavigator() {
       <Stack.Screen name="LocationalFlexibility" component={LocationalFlexibilityScreen} />
       <Stack.Screen name="NetworkFeasibility" component={NetworkFeasibilityScreen} />
       <Stack.Screen name="DesignStudy" component={DesignStudyScreen} />
+      <Stack.Screen name="ProtocolConformance" component={ProtocolConformanceScreen} />
       <Stack.Screen name="MatterLoads" component={MatterLoadsScreen} />
       <Stack.Screen name="ServiceStatus" component={ServiceStatusScreen} />
       <Stack.Screen name="LedgerReconciliation" component={LedgerReconciliationScreen} />

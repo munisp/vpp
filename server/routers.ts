@@ -92,6 +92,7 @@ import {
   prepaidRouter,
   networkModelRouter,
   designStudyRouter,
+  protocolConformanceRouter,
 } from './routers/nextgen';
 
 // Start performance alerting
@@ -196,6 +197,7 @@ export const appRouter = router({
   prepaid: prepaidRouter,
   networkModel: networkModelRouter,
   designStudy: designStudyRouter,
+  protocolConformance: protocolConformanceRouter,
   settlement: settlementRouter,
   edge: edgeRouter,
   carbon: carbonRouter,

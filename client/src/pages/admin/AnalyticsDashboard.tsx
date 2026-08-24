@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import DashboardLayout from '@/components/DashboardLayout';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -23,8 +23,9 @@ type DateRange = 'today' | 'week' | 'month' | 'year';
 export default function AnalyticsDashboard() {
   const [dateRange, setDateRange] = useState<DateRange>('month');
 
-  // Calculate date range
-  const getDateRange = () => {
+  // Memoised: the range ends at "now", so recomputing it per render would give
+  // every query a new key and refetch forever.
+  const dateRangeParams = useMemo(() => {
     const end = new Date();
     const start = new Date();
     
@@ -47,9 +48,7 @@ export default function AnalyticsDashboard() {
       startDate: start.toISOString(),
       endDate: end.toISOString(),
     };
-  };
-
-  const dateRangeParams = getDateRange();
+  }, [dateRange]);
 
   // Fetch all analytics data
   const { data: overview, isLoading: overviewLoading } = trpc.adminAnalytics.getOverview.useQuery(dateRangeParams);

@@ -253,6 +253,23 @@ describe('proof states', () => {
     expect(proof.state).toBe<ProtocolProofState>('suite_failed');
   });
 
+  it('stops reading proven once a newer run has failed', async () => {
+    // An older pass is still inside the evidence window, but last night's run
+    // failed: a regression must not hide behind the run it regressed from.
+    const passed = runRow({ id: 1, completedAt: new Date(NOW.getTime() - 10 * 86_400_000) });
+    const failed = runRow({
+      id: 2,
+      outcome: 'failed',
+      passedCases: 9,
+      failedCases: 1,
+      completedAt: new Date(NOW.getTime() - 86_400_000),
+    });
+    const { adapterProof } = await loadService([[passed], [failed]]);
+    const proof = await adapterProof('ocpp16', NOW);
+    expect(proof.state).toBe<ProtocolProofState>('suite_failed');
+    expect(proof.run?.id).toBe(2);
+  });
+
   it('reads no runs at all as claimed but unproven', async () => {
     const { adapterProof } = await loadService([[], []]);
     const proof = await adapterProof('ocpp16', NOW);

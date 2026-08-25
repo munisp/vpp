@@ -17,10 +17,14 @@ const appSource = readFileSync(new URL('../App.tsx', import.meta.url), 'utf8');
 /** component name -> source file, from App.tsx's own imports. */
 function importedPages(): Map<string, string> {
   const pages = new Map<string, string>();
-  for (const match of appSource.matchAll(
-    /import\s+(\w+)\s+from\s+["'](?:@\/|\.\/)(pages\/[^"']+)["']/g
-  )) {
-    pages.set(match[1], `client/src/${match[2]}.tsx`);
+  const importPatterns = [
+    /import\s+(\w+)\s+from\s+["'](?:@\/|\.\/)(pages\/[^"']+)["']/g,
+    /const\s+(\w+)\s*=\s*lazy\(\(\)\s*=>\s*import\(\s*["'](?:@\/|\.\/)(pages\/[^"']+)["']\s*\)\s*\)/g,
+  ];
+  for (const pattern of importPatterns) {
+    for (const match of appSource.matchAll(pattern)) {
+      pages.set(match[1], `client/src/${match[2]}.tsx`);
+    }
   }
   return pages;
 }

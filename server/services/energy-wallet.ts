@@ -57,6 +57,20 @@ export interface TopUpResult {
   gatewayMessage?: string;
 }
 
+export function deriveWalletBalanceCents(input: {
+  paymentsCompletedCents: number;
+  topUpsCompletedCents: number;
+  billingsPayableCents: number;
+  tokenPurchasesCents: number;
+}): number {
+  return (
+    input.paymentsCompletedCents +
+    input.topUpsCompletedCents -
+    input.billingsPayableCents -
+    input.tokenPurchasesCents
+  );
+}
+
 const GATEWAY_INITIATORS: Record<TopUpMethod, (req: { amount: number; phoneNumber: string; accountReference: string; description: string }) => Promise<PaymentResponse>> = {
   mpesa: initiateMpesaPayment,
   airtel_money: initiateAirtelPayment,
@@ -81,7 +95,7 @@ export class EnergyWalletService {
     const ledger = paymentsResult.rows[0] || {};
 
     const billingsResult = await db.execute<SqlRow>(sql`
-      SELECT COALESCE(SUM("totalValue"), 0) as issued_cents
+      SELECT COALESCE(SUM("consumerShare"), 0) as issued_cents
       FROM billings
       WHERE "userId" = ${userId} AND status IN ('issued', 'paid', 'overdue')
     `);
@@ -101,8 +115,12 @@ export class EnergyWalletService {
     const tokenPurchasesCents = Number(ledger.token_purchases_cents || 0);
     const billingsIssuedCents = Number(billingRow.issued_cents || 0);
     const topUpsCompletedCents = Number(topUpRow.completed_cents || 0);
-    const balanceCents =
-      paymentsCompletedCents + topUpsCompletedCents - billingsIssuedCents - tokenPurchasesCents;
+    const balanceCents = deriveWalletBalanceCents({
+      paymentsCompletedCents,
+      topUpsCompletedCents,
+      billingsPayableCents: billingsIssuedCents,
+      tokenPurchasesCents,
+    });
 
     const insertResult = await db.insert(walletBalanceSnapshots).values({
       userId,
@@ -246,6 +264,49 @@ export class EnergyWalletService {
     const db = await getDb();
     if (!db) throw new Error('Database not available');
 
+    if (triggerType !== 'auto') {
+      return this.startTopUp(db, userId, amountCents, method, phoneNumber, triggerType);
+    }
+
+    // A threshold check and provider request are separated by network I/O. Hold
+    // a transaction-scoped per-user lock across that narrow sequence so two
+    // callers cannot both observe a low balance and create two automatic
+    // charges before either attempt is recorded. This is intentionally limited
+    // to auto top-ups; consecutive manual purchases remain user-directed.
+    return db.transaction(async tx => {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(${userId})`);
+
+      const existing = await tx
+        .select({ id: walletTopUpAttempts.id })
+        .from(walletTopUpAttempts)
+        .where(
+          sql`${walletTopUpAttempts.userId} = ${userId}
+            AND ${walletTopUpAttempts.triggerType} = 'auto'
+            AND ${walletTopUpAttempts.status} = 'initiated'`
+        )
+        .orderBy(desc(walletTopUpAttempts.createdAt))
+        .limit(1);
+
+      if (existing.length > 0) {
+        return {
+          topUpInitiated: false,
+          reason: 'auto_top_up_pending',
+          attemptId: Number(existing[0].id),
+        };
+      }
+
+      return this.startTopUp(tx, userId, amountCents, method, phoneNumber, triggerType);
+    });
+  }
+
+  private async startTopUp(
+    db: any,
+    userId: number,
+    amountCents: number,
+    method: TopUpMethod,
+    phoneNumber: string,
+    triggerType: 'auto' | 'manual'
+  ): Promise<TopUpResult> {
     const accountReference = `WALLET-${userId}-${Date.now().toString(36)}`;
 
     let gatewayResponse: PaymentResponse;

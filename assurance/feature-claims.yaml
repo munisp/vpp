@@ -1,0 +1,150 @@
+schema_version: 1
+assessment_scope: mission-critical platform assurance
+assessment_state: in_progress
+source_revision: dc65f985a7302754ece4830a8859d7cf2f3242a8
+working_tree_note: >-
+  The assessed working tree also contains uncommitted mobile pnpm migration changes.
+  No claim below is verified until evidence is recorded against the final committed revision.
+claims:
+  - id: FC-API-001
+    claim: The Node/TypeScript API exposes authenticated tRPC procedures and payment webhooks with readiness checks.
+    authority: README.md:56-71; server/_core/index.ts
+    component: server API bootstrap and routers
+    entry_points:
+      - server/_core/index.ts
+      - server/routers
+    production_configuration:
+      - .env.example
+      - docker-compose.prod.yml
+    evidence_required:
+      - frozen dependency install
+      - typecheck
+      - public-interface API integration test with PostgreSQL and Redis
+      - authorization negative tests
+    status: blocked
+    reason: Real isolated dependency environment and authenticated public-interface evidence have not yet been executed.
+
+  - id: FC-PAY-001
+    claim: Payment initiation, provider callbacks, and settlement use deterministic identities and avoid duplicate money movement.
+    authority: README.md:40-42; CONTRIBUTING.md:21; server/_core/index.ts:107-124,161-165
+    component: payment routers, webhooks, workflows, ledger adapter
+    entry_points:
+      - server/routers/payments.ts
+      - server/webhooks/payment-callbacks.ts
+      - server/workflows/payment-workflow.ts
+    production_configuration:
+      - .env.example:134-168
+      - docker-compose.prod.yml:44-46
+    evidence_required:
+      - TigerBeetle and PostgreSQL integration test
+      - provider sandbox callback verification
+      - duplicate and conflicting idempotency-key tests
+      - timeout and crash-recovery test
+      - reconciliation evidence
+    status: blocked
+    reason: No provider sandbox credentials, real TigerBeetle runtime, or end-to-end recovery evidence has been supplied in this assessment.
+
+  - id: FC-TRADE-001
+    claim: P2P, B2B, and P2B trading settle on evidence only and obey integer-unit accounting rules.
+    authority: README.md:37-42; CONTRIBUTING.md:67-69
+    component: trading routers, workflows, database schema, ledger adapter
+    entry_points:
+      - server/routers/p2p-trading.ts
+      - server/routers/trading.ts
+      - server/workflows/trading-workflow.ts
+      - drizzle
+    production_configuration:
+      - .env.example:228-250
+    evidence_required:
+      - real database and ledger integration test
+      - concurrency/idempotency test
+      - settlement evidence and reconciliation test
+    status: blocked
+    reason: Critical-flow durable-state and concurrency evidence is pending.
+
+  - id: FC-GRID-001
+    claim: Grid control setpoints are bounded, expire safely, and dispatch through real protocol adapters.
+    authority: README.md:29-31; .env.example:218-250; server/_core/index.ts:215-226
+    component: control delivery, protocol service, Modbus poller
+    entry_points:
+      - server/services/control-delivery.ts
+      - services/grid-protocols
+      - services/modbus-poller
+    production_configuration:
+      - .env.example:218-250
+    evidence_required:
+      - Go and Rust suites
+      - real protocol integration or certified device/sandbox evidence
+      - expiry/fallback failure-injection evidence
+    status: blocked
+    reason: Physical-device or approved protocol-sandbox integration has not been executed.
+
+  - id: FC-EVENT-001
+    claim: Domain events are recorded transactionally and published/consumed through Kafka with detectable missing configuration.
+    authority: README.md:60-64; .env.example:101-120; server/_core/index.ts:242-280
+    component: outbox relay and event consumer
+    entry_points:
+      - server/services/events
+      - server/_core/index.ts
+    production_configuration:
+      - .env.example:101-120
+    evidence_required:
+      - PostgreSQL plus Kafka integration test
+      - duplicate delivery/replay test
+      - outbox failure/recovery test
+    status: blocked
+    reason: No real Kafka environment or recovery test has been run during this assessment.
+
+  - id: FC-WEB-001
+    claim: The React/Vite PWA is built as a user-facing platform surface with route-level loading and provenance-facing workflows.
+    authority: README.md:53-54; package.json
+    component: client PWA
+    entry_points:
+      - client/src/App.tsx
+      - client/src
+    production_configuration:
+      - vite.config.ts
+      - Dockerfile.client
+    evidence_required:
+      - frozen install
+      - typecheck and unit suite
+      - production build
+      - browser E2E and PWA offline validation
+    status: partially_verified
+    reason: Unit suite and production build were previously executed; browser public-interface and offline evidence remain pending.
+
+  - id: FC-MOBILE-001
+    claim: The React Native mobile application provides a supported platform surface with reproducible dependencies.
+    authority: README.md:53-54; mobile/README.md
+    component: mobile Expo application
+    entry_points:
+      - mobile
+    production_configuration:
+      - mobile/app.json
+      - mobile/metro.config.js
+    evidence_required:
+      - frozen pnpm install
+      - Expo Doctor
+      - Android and iOS production exports/builds
+      - native feature tests for camera, QR, biometrics, and push
+    status: partially_verified
+    reason: Android JavaScript export and Expo Doctor passed in the local environment; iOS and physical-device capability evidence remain pending.
+
+  - id: FC-OPS-001
+    claim: Production deployment requires configured durable dependencies, secrets, health checks, and operational recovery controls.
+    authority: docker-compose.prod.yml; DEPLOYMENT.md; .env.example
+    component: Docker compose deployment and observability configuration
+    entry_points:
+      - docker-compose.prod.yml
+      - docker-compose.middleware.yml
+      - docker-compose.monitoring.yml
+    production_configuration:
+      - docker-compose.prod.yml
+      - .env.example
+    evidence_required:
+      - compose configuration validation
+      - isolated deployment
+      - readiness and rollback test
+      - backup/restore rehearsal
+    status: blocked
+    reason: No production-shaped compose deployment, backup/restore rehearsal, or rollback test has been executed in this assessment.

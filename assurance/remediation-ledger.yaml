@@ -1,0 +1,158 @@
+schema_version: 1
+assessment_state: in_progress
+source_revision: dc65f985a7302754ece4830a8859d7cf2f3242a8
+findings:
+  - id: ASSUR-001
+    severity: high
+    category: release-evidence
+    state: discovered
+    affected_scope: repository release target
+    evidence: >-
+      The assessment target has uncommitted mobile migration changes in addition to
+      pushed commit dc65f98, so no immutable revision currently contains the full assessed state.
+    impact: A release cannot be reproduced, peer reviewed, or attributed to one immutable revision.
+    required_remediation: Commit the reviewed mobile migration separately or revert it before release evaluation.
+
+  - id: ASSUR-002
+    severity: high
+    category: real-dependency-integration
+    state: external_blocked
+    affected_scope: payments, settlement, reconciliation, and provider webhooks
+    evidence: >-
+      README.md identifies payment-provider sandboxes and production ledger integration as not proven
+      without credentials; no approved sandbox credentials or real TigerBeetle runtime are available
+      in this assessment environment.
+    impact: Funds-affecting idempotency, provider-unknown-outcome recovery, and reconciliation cannot be release-verified.
+    minimum_unblocking_action: Provide an isolated TigerBeetle/PostgreSQL environment and approved provider-sandbox credentials with safe test accounts.
+
+  - id: ASSUR-003
+    severity: high
+    category: deployment-recovery
+    state: external_blocked
+    affected_scope: production topology, migration, backup, restore, and rollback
+    evidence: >-
+      Production compose defines PostgreSQL, Redis, Keycloak, Temporal, Kafka, MinIO, and application
+      services, but no provisioned non-production environment or approved secrets are available for a full deployment/recovery rehearsal.
+    impact: Production deployment safety, restore behavior, and rollback remain unverified.
+    minimum_unblocking_action: Provide a disposable production-shaped environment and non-production secrets; authorize compose deployment, migration, backup, restore, and rollback tests.
+
+  - id: ASSUR-004
+    severity: high
+    category: external-device-integration
+    state: external_blocked
+    affected_scope: grid control and field protocol integrations
+    evidence: >-
+      README.md identifies physical OCPP/Matter hardware and utility meters as not proven in this environment.
+    impact: Real command delivery, device response, safe fallback, and field interoperability remain unverified.
+    minimum_unblocking_action: Provide approved protocol simulators or device/sandbox access with non-production assets and test credentials.
+
+  - id: ASSUR-005
+    severity: medium
+    category: web-hardening
+    state: discovered
+    affected_scope: PWA server response security headers
+    evidence: >-
+      server/_core/index.ts disables Helmet contentSecurityPolicy because the PWA uses an inline service-worker registration script.
+    impact: The application does not enforce an application-layer CSP; effective reverse-proxy CSP configuration has not been verified.
+    required_remediation: Externalize the inline registration or define, test, and document a nonce/hash-based CSP that permits required PWA behavior.
+
+  - id: ASSUR-006
+    severity: medium
+    category: dependency-management
+    state: remediated
+    affected_scope: root pnpm configuration
+    evidence: >-
+      patchedDependencies and overrides were moved from package.json to pnpm-workspace.yaml; the lockfile
+      was regenerated once and pnpm install --frozen-lockfile then completed successfully with pnpm 10.4.1.
+    impact: The root dependency patch and override configuration is now reproducible from the version-controlled workspace configuration and lockfile.
+    remediation: Moved pnpm settings to pnpm-workspace.yaml, regenerated pnpm-lock.yaml, and verified a frozen install.
+
+  - id: ASSUR-007
+    severity: high
+    category: funds-integrity
+    state: mitigated_pending_external_integration
+    affected_scope: server/routers/payments.ts payment initiation
+    evidence: >-
+      The gateway-call catch block marks every thrown initiation error as failed. A network timeout
+      or reset after a provider accepts a request is an unknown outcome, not evidence that no charge
+      was initiated. The mobile caller displays any tRPC error as "Payment Failed", which encourages retry.
+    impact: A client can be told a provider request failed after the provider accepted it, then retry and create a duplicate charge.
+    root_cause: The error path does not distinguish confidently pre-send failures from unknown provider outcomes.
+    remediation: Retained timeout/reset outcomes as pending with reconciliation metadata, returned a non-error do-not-retry response, and added a regression test. Provider-sandbox confirmation remains externally blocked.
+
+  - id: ASSUR-008
+    severity: high
+    category: critical-workflow-test-coverage
+    state: remediated_with_unit_coverage
+    affected_scope: workers/trading-worker
+    evidence: >-
+      The deployed trading-worker directory contains only main.py, Dockerfile, and requirements.txt;
+      it has no test files at any depth. CI explicitly treats the absence of top-level Python tests as a passing skip.
+    impact: A deployed trading workflow has no executable behavioral, failure, or recovery coverage in the repository assurance gates.
+    remediation: Added test_main.py with atomic-fill and rollback coverage; CI now discovers this test suite. PostgreSQL/Temporal integration coverage remains externally blocked.
+
+  - id: ASSUR-009
+    severity: critical
+    category: dependency-vulnerability
+    state: remediated
+    affected_scope: root web/server production dependency graph
+    evidence: >-
+      Initial pnpm audit --prod found 5 critical advisories. Upgrading jsPDF to 4.2.1 and applying
+      pnpm 10.15.1 workspace overrides for fast-xml-parser 5.3.5, protobufjs 7.5.5, and
+      websocket-driver 0.7.5 reduced the final audit to 0 critical, 46 high, 66 moderate, and 14 low advisories.
+    impact: The critical advisory gate is now clear, but remaining high and moderate advisory paths still require a separately reviewed remediation program.
+    remediation: Regenerated pnpm-lock.yaml with pnpm 10.15.1, completed a frozen install, and verified no critical root production advisory remains.
+
+  - id: ASSUR-010
+    severity: critical
+    category: dependency-vulnerability
+    state: remediated
+    affected_scope: mobile production dependency graph
+    evidence: >-
+      Initial pnpm audit --prod found 3 critical advisories. pnpm 10.15.1 workspace overrides for
+      fast-xml-parser 4.5.4, shell-quote 1.8.4, and tar 7.5.19 reduced the final audit to
+      0 critical, 52 high, 18 moderate, and 2 low advisories.
+    impact: The critical advisory gate is now clear, but remaining high and moderate mobile advisory paths still require a separately reviewed remediation program.
+    remediation: Regenerated mobile/pnpm-lock.yaml with pnpm 10.15.1, completed a frozen install, and verified Expo Doctor plus Android export with no critical mobile production advisory remaining.
+
+  - id: ASSUR-011
+    severity: high
+    category: secret-scan-coverage
+    state: remediated
+    affected_scope: .github/workflows/ci.yml secret-scan job
+    evidence: >-
+      The CI-equivalent gitleaks detect command and its explicit Git-history mode both reported "0 commits scanned"
+      against a non-shallow repository containing 161 commits. A direct git log patch-stream scan found the documented historical VAPID exposure.
+    impact: CI currently provides no demonstrated full-history secret-scanning coverage despite its full-history claim.
+    remediation: Added scripts/secret-scan.sh and wired CI to scan the working tree plus added content from every historical commit except the documented retired-key commit. The script completed successfully in this assessment.
+
+  - id: ASSUR-012
+    severity: critical
+    category: authorization-and-control
+    state: remediated
+    affected_scope: server/routers/nextgen/edge.ts
+    evidence: >-
+      Every edge gateway registration, fleet listing, command queue, command read, health read, and emergency-stop procedure uses protectedProcedure only. The service performs no caller ownership or role checks and accepts an arbitrary gateway identifier.
+    impact: Any authenticated user can enumerate edge gateways and queue or emergency-stop commands for another site.
+    remediation: Changed all edge gateway and control procedures to adminProcedure and added a regression test that rejects non-administrator enumeration and emergency-stop calls.
+
+  - id: ASSUR-013
+    severity: critical
+    category: trading-concurrency
+    state: remediated_with_unit_coverage
+    affected_scope: workers/trading-worker/main.py update_order_status
+    evidence: >-
+      The worker reads an order energy/status row and later updates it without a conditional predicate or lock.
+      Concurrent activities can read the same pending quantity, each subtract independently, and overfill or overwrite each other.
+    impact: Concurrent automated trading can execute more energy than an order offered, corrupting trade state and settlement amounts.
+    remediation: Replaced the read-modify-write sequence with a conditional atomic UPDATE and added tests for predicate use, stale-fill rollback, and invalid quantity refusal.
+
+  - id: ASSUR-014
+    severity: high
+    category: payment-recovery
+    state: remediated_with_unit_coverage
+    affected_scope: server/webhooks/payment-callbacks.ts executePostPaymentActions
+    evidence: >-
+      The callback persists a completed payment before executing billing, token, trade, and notification side effects. The encompassing catch only logs a later side-effect failure, while callback idempotency prevents replay from retrying it.
+    impact: Provider-confirmed payments can have missing downstream actions without a durable reconciliation marker.
+    remediation: Persists a structured postPaymentActionFailure marker on the payment row and verifies it with a callback-recovery regression test.

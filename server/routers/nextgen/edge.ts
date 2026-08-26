@@ -1,9 +1,9 @@
 import { z } from 'zod';
-import { protectedProcedure, router } from '../../_core/trpc';
+import { adminProcedure, router } from '../../_core/trpc';
 import { edgeOrchestration } from '../../services/edge-orchestration';
 
 export const edgeRouter = router({
-    registerGateway: protectedProcedure
+    registerGateway: adminProcedure
       .input(z.object({
         gatewayId: z.string(),
         name: z.string(),
@@ -22,7 +22,7 @@ export const edgeRouter = router({
         return edgeOrchestration.registerGateway(gatewayId, name, options);
       }),
 
-  getGateways: protectedProcedure
+  getGateways: adminProcedure
     .input(z.object({
       siteId: z.number().optional(),
       communityId: z.number().optional(),
@@ -31,7 +31,7 @@ export const edgeRouter = router({
       return edgeOrchestration.getGateways(input || {});
     }),
 
-    queueCommand: protectedProcedure
+    queueCommand: adminProcedure
       .input(z.object({
         gatewayId: z.string(),
         commandType: z.enum(['set_power', 'set_soc_target', 'start_charging', 'stop_charging', 'enable_v2g', 'disable_v2g', 'emergency_stop', 'update_config']),
@@ -47,19 +47,19 @@ export const edgeRouter = router({
         return edgeOrchestration.queueCommand(gatewayId, command);
       }),
 
-  getCommand: protectedProcedure
+  getCommand: adminProcedure
     .input(z.object({ commandId: z.union([z.number(), z.string()]) }))
     .query(async ({ input }) => {
       return edgeOrchestration.getCommand(input.commandId);
     }),
 
-  getGatewayHealth: protectedProcedure
+  getGatewayHealth: adminProcedure
     .input(z.object({ gatewayId: z.string() }))
     .query(async ({ input }) => {
       return edgeOrchestration.getGatewayHealth(input.gatewayId);
     }),
 
-  emergencyStop: protectedProcedure
+  emergencyStop: adminProcedure
     .input(z.object({ gatewayId: z.string(), reason: z.string() }))
     .mutation(async ({ input }) => {
       return edgeOrchestration.emergencyStop(input.gatewayId, input.reason);

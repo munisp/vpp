@@ -24,6 +24,15 @@ export default function QRPaymentScreen({ navigation }: any) {
   // optional phoneNumber (required for the mobile-money gateway prompt).
   const initiatePaymentMutation = trpc.payments.initiate.useMutation({
     onSuccess: async (data) => {
+      if (data.reconciliationRequired) {
+        Alert.alert(
+          'Payment Status Pending Confirmation',
+          `${data.message}${data.payment?.id ? `\nReference: PAY${data.payment.id}` : ''}`,
+          [{ text: 'OK' }]
+        );
+        return;
+      }
+
       await HapticService.paymentCompleted();
       Alert.alert(
         'Payment Initiated',

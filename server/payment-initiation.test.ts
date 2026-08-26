@@ -19,6 +19,7 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 interface Recorded {
   created: Array<Record<string, unknown>>;
   statuses: Array<{ id: number; status: string; expected?: string }>;
+  metadata: Array<{ id: number; patch: Record<string, unknown> }>;
   requests: Array<Record<string, unknown>>;
 }
 
@@ -37,7 +38,9 @@ function mocks(recorded: Recorded, gateway: () => unknown) {
     ) => {
       recorded.statuses.push({ id, status, expected });
     },
-    updatePaymentMetadata: async () => undefined,
+    updatePaymentMetadata: async (id: number, patch: Record<string, unknown>) => {
+      recorded.metadata.push({ id, patch });
+    },
   }));
 
   const initiator = async (request: Record<string, unknown>) => {
@@ -67,7 +70,7 @@ async function initiate(input: Record<string, unknown>) {
 }
 
 function recorder(): Recorded {
-  return { created: [], statuses: [], requests: [] };
+  return { created: [], statuses: [], metadata: [], requests: [] };
 }
 
 afterEach(() => {
@@ -132,6 +135,30 @@ describe('payments.initiate', () => {
     });
     expect(recorded.statuses).toEqual([
       { id: 501, status: 'failed', expected: 'pending' },
+    ]);
+  });
+
+  it('retains a timeout as pending for reconciliation instead of declaring the charge failed', async () => {
+    const recorded = recorder();
+    mocks(recorded, () => new Error('ETIMEDOUT while waiting for provider response'));
+
+    const result = await initiate({ ...base, paymentMethod: 'mpesa' });
+
+    expect(result).toMatchObject({
+      success: false,
+      reconciliationRequired: true,
+      payment: { id: 501, status: 'pending' },
+    });
+    expect(recorded.statuses).toEqual([]);
+    expect(recorded.metadata).toEqual([
+      {
+        id: 501,
+        patch: expect.objectContaining({
+          providerOutcome: 'unknown',
+          reconciliationRequired: true,
+          providerInitiationError: expect.stringContaining('ETIMEDOUT'),
+        }),
+      },
     ]);
   });
 

@@ -45,6 +45,20 @@ function gatewayFailureCode(message: string): TRPCError['code'] {
   return /_NOT_CONFIGURED$/.test(message) ? 'SERVICE_UNAVAILABLE' : 'BAD_GATEWAY';
 }
 
+/**
+ * A connection refusal means no provider process accepted the request. A timeout,
+ * reset, or broken socket can occur after the provider received it; that outcome
+ * is unknown and must remain reconcilable instead of being declared failed.
+ */
+function providerOutcomeIsUnknown(error: unknown): boolean {
+  const details = error instanceof Error
+    ? `${(error as Error & { code?: string }).code ?? ''} ${error.message}`
+    : String(error);
+  return /\b(ETIMEDOUT|ECONNABORTED|ECONNRESET|EPIPE|ERR_NETWORK|timeout|timed out|socket hang up)\b/i.test(
+    details
+  );
+}
+
 const VerifyPaymentInputSchema = z.object({
   paymentId: z.number().int().positive(),
 });
@@ -134,10 +148,31 @@ export const paymentsRouter = router({
         try {
           gatewayResponse = await paymentGateway[GATEWAY_INITIATORS[input.paymentMethod]](request);
         } catch (error) {
-          // The provider was never reached, so nothing is in flight: retire the
-          // reservation rather than leaving a payment a status query could later
-          // resolve as completed.
           const message = error instanceof Error ? error.message : String(error);
+
+          // A gateway timeout or reset can happen after the provider accepted the
+          // request. Keep the payment pending with a durable reason and return a
+          // truthful response so the caller does not create a second charge.
+          if (providerOutcomeIsUnknown(error)) {
+            await db.updatePaymentMetadata(payment.id, {
+              ...(input.energyKwh ? { energyKwh: input.energyKwh } : {}),
+              providerOutcome: 'unknown',
+              providerOutcomeObservedAt: new Date().toISOString(),
+              providerInitiationError: message,
+              reconciliationRequired: true,
+            });
+            return {
+              success: false,
+              payment,
+              gatewayResponse: null,
+              reconciliationRequired: true,
+              message:
+                'We could not confirm whether the provider received this payment request. Do not retry; use the payment reference while its status is reconciled.',
+            };
+          }
+
+          // A confidently pre-send failure, such as an unconfigured gateway or
+          // refused connection, cannot have created a provider-side charge.
           await db.updatePaymentStatus(payment.id, 'failed', undefined, 'pending');
           throw new TRPCError({ code: gatewayFailureCode(message), message });
         }

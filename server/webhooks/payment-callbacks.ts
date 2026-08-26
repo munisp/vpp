@@ -425,9 +425,32 @@ async function executePostPaymentActions(
       'pushPaymentReceived'
     );
   } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
     console.error('[PostPayment] Error executing post-payment actions:', error);
-    // Don't throw - we've already updated the payment status
-    // Log for manual reconciliation
+
+    // The provider-confirmed payment remains completed, but any missed local
+    // side effect must be visible to reconciliation rather than existing only
+    // in ephemeral logs. Callback idempotency prevents blindly replaying it.
+    try {
+      await db
+        .update(payments)
+        .set({
+          metadata: JSON.stringify({
+            ...metadata,
+            postPaymentActionFailure: {
+              reason,
+              recordedAt: new Date().toISOString(),
+              paymentType,
+            },
+          }),
+        })
+        .where(eq(payments.id, payment.id));
+    } catch (recordError) {
+      console.error(
+        `[PostPayment] Failed to persist reconciliation marker for payment ${payment.id}:`,
+        recordError
+      );
+    }
   }
 }
 

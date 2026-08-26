@@ -93,6 +93,13 @@ export class RedisRateLimitStore implements Store {
   private readonly limiter: string;
   private readonly onRedisFailure: RedisFailurePolicy;
   private readonly local = new LocalWindowCounter();
+  /**
+   * Redis exposes a remaining TTL rather than an absolute expiry timestamp.
+   * Keep the first locally observed reset instant for a key so repeat calls on
+   * this replica do not make a fixed Redis window appear to slide by one
+   * millisecond because Date.now() and PTTL are sampled separately.
+   */
+  private readonly observedResetAt = new Map<string, number>();
   private windowMs: number;
   private ownsClient: boolean;
   private downgradeLogged = false;
@@ -154,10 +161,20 @@ export class RedisRateLimitStore implements Store {
       }
       if (ttl < 0) {
         await this.client.pexpire(redisKey, this.windowMs);
-        ttl = this.windowMs;
+        // Read Redis' expiry after setting it. Reconstructing the reset from a
+        // later local Date.now() can report a window that moves forward by a
+        // millisecond even though Redis correctly kept its original expiry.
+        ttl = Number(await this.client.pttl(redisKey));
+        if (ttl < 0) throw new Error('Redis did not retain an expiry for the counter');
       }
       this.downgradeLogged = false;
-      return { totalHits, resetTime: new Date(Date.now() + ttl) };
+      const estimatedResetAt = Date.now() + ttl;
+      const observed = this.observedResetAt.get(redisKey);
+      const resetAt = observed && observed > Date.now()
+        ? Math.min(observed, estimatedResetAt)
+        : estimatedResetAt;
+      this.observedResetAt.set(redisKey, resetAt);
+      return { totalHits, resetTime: new Date(resetAt) };
     } catch (error) {
       return this.handleFailure(key, error);
     }
@@ -207,11 +224,14 @@ export class RedisRateLimitStore implements Store {
 
   async resetKey(key: string): Promise<void> {
     this.local.reset(key);
-    await this.client.del(this.keyFor(key));
+    const redisKey = this.keyFor(key);
+    this.observedResetAt.delete(redisKey);
+    await this.client.del(redisKey);
   }
 
   async resetAll(): Promise<void> {
     this.local.resetAll();
+    this.observedResetAt.clear();
     // SCAN rather than KEYS: this runs against a shared production Redis, where
     // KEYS blocks the server for the length of the keyspace.
     let cursor = '0';

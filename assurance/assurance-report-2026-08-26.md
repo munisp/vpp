@@ -1,6 +1,6 @@
 # Mission-Critical Assurance Report
 
-**Assessor:** Manus AI
+**Assessor:** Independent Assurance Review
 
 **Assessment date:** 2026-08-26
 

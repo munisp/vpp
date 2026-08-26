@@ -149,7 +149,7 @@ Run scripts in this order:
 ./scripts/build-orchestrator.sh
 
 # 6. Configure orchestrator environment variables
-# (Use Manus platform secrets management)
+# Use the deployment-approved secrets manager
 
 # 7. Start orchestrator
 cd orchestrator
@@ -281,7 +281,7 @@ See `docs/ORCHESTRATOR_DEPLOYMENT.md` for production deployment guide.
 
 ## Environment Variables
 
-The orchestrator requires these environment variables (configured via Manus platform):
+The orchestrator requires these environment variables (configured through the deployment secrets manager):
 
 ```bash
 # Temporal

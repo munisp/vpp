@@ -110,10 +110,21 @@ VITE_APP_LOGO="/logo.svg"
 # Database
 DATABASE_URL="postgresql://user:password@db-server:5432/vpp_production"
 
-# Authentication
-JWT_SECRET="your-super-secret-jwt-key-change-this"
-OAUTH_SERVER_URL="https://api.yourdomain.com/oauth"
-VITE_OAUTH_PORTAL_URL="https://app.yourdomain.com/login"
+# Keycloak OpenID Connect
+JWT_SECRET="cryptographically-random-secret-at-least-32-characters"
+KEYCLOAK_URL="https://identity.yourdomain.com"
+KEYCLOAK_REALM="vpp"
+KEYCLOAK_CLIENT_ID="vpp-consumer-platform"
+KEYCLOAK_CLIENT_SECRET="keycloak-confidential-client-secret"
+KEYCLOAK_REDIRECT_URI="https://app.yourdomain.com/api/oauth/callback"
+KEYCLOAK_ALLOWED_REDIRECT_URIS="https://app.yourdomain.com/api/oauth/callback"
+
+# S3-compatible object storage (MinIO or equivalent)
+S3_ENDPOINT="https://objects.yourdomain.com"
+S3_REGION="us-east-1"
+S3_ACCESS_KEY="vpp-storage-access-key"
+S3_SECRET_KEY="vpp-storage-secret-key"
+S3_BUCKET="vpp-assets"
 
 # Payment Gateways
 MPESA_CONSUMER_KEY="your-mpesa-consumer-key"

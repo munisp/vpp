@@ -19,7 +19,7 @@ This document describes the integration layer that connects the consumer-facing 
 - Mobile app (React Native)
 - tRPC API
 - PostgreSQL database
-- Current authentication (Manus OAuth)
+- Current authentication (Keycloak OpenID Connect)
 
 ### Layer 2: Integration Layer (New)
 - Event publishers (Kafka producers)
@@ -163,18 +163,18 @@ import Keycloak from 'keycloak-connect';
 export class KeycloakAuthBridge {
   private keycloak: Keycloak.Keycloak;
   
-  async migrateUser(manusUser: User) {
+  async migrateUser(keycloakUser: User) {
     // Create user in Keycloak
     const keycloakUser = await this.keycloak.users.create({
-      username: manusUser.email,
-      email: manusUser.email,
-      firstName: manusUser.name,
+      username: keycloakUser.email,
+      email: keycloakUser.email,
+      firstName: keycloakUser.name,
       enabled: true,
       emailVerified: true
     });
     
     // Assign roles
-    if (manusUser.role === 'admin') {
+    if (keycloakUser.role === 'admin') {
       await this.assignRole(keycloakUser.id, 'admin');
     }
     
@@ -194,10 +194,10 @@ export class KeycloakAuthBridge {
 ```
 
 **Migration Strategy**:
-1. Phase 1: Dual authentication (Manus OAuth + Keycloak)
+1. Phase 1: Dual authentication (Keycloak OIDC)
 2. Phase 2: Gradual user migration
 3. Phase 3: Keycloak as primary
-4. Phase 4: Deprecate Manus OAuth
+4. Phase 4: Complete legacy identity retirement
 
 ### 4. Redis Cache Adapter
 

@@ -578,8 +578,8 @@ curl http://localhost:8080/realms/vpp-platform
 
 # Expected: Connection refused
 
-# Verify VPP platform continues with Manus OAuth
-# Users can still login via Manus
+# Verify VPP platform authenticates through Keycloak OpenID Connect
+# Users can authenticate through the configured Keycloak realm
 
 # Restart Keycloak
 docker start nextgen_keycloak

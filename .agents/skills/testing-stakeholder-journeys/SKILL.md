@@ -20,7 +20,7 @@ that missing ones surface as `blocked` rather than `passed`:
 | MinIO | `http://127.0.0.1:9000`, bucket `vpp-lake` | `LAKEHOUSE_STORE=s3` |
 | Ollama | `http://127.0.0.1:11434`, `qwen2.5:1.5b` | support-diagnosis journey |
 
-Env recipe (see e.g. `/home/ubuntu/pr59/env.sh`): `DATABASE_URL`, `JWT_SECRET`, `VITE_APP_ID`,
+Env recipe (see e.g. `/home/ubuntu/pr59/env.sh`): `DATABASE_URL`, `JWT_SECRET`, `KEYCLOAK_URL`, `KEYCLOAK_CLIENT_ID`,
 `TEMPORAL_ADDRESS`/`TEMPORAL_NAMESPACE`, `MQTT_BROKER_URL`, `OPTIMIZER_SERVICE_URL`+`OPTIMIZER_AUTH_TOKEN`,
 `TIGERBEETLE_ADDRESSES`+`TIGERBEETLE_CLUSTER_ID`, `LAKEHOUSE_*`/`S3_*`, `OLLAMA_URL`+`OLLAMA_MODEL`,
 `ML_ARTIFACT_DIR`.
@@ -36,7 +36,7 @@ find the PID with `ps` and `kill <pid>`.
 Mobile/PWA tRPC auth is the `app_session_id` **cookie**, which the browser console cannot set for the
 dev origin reliably. Run a tiny proxy (e.g. `/home/ubuntu/pr59/proxy.mjs` on `:3100`) that injects
 `Cookie: app_session_id=$(cat current.jwt)` and point the browser at the proxy. Mint HS256 JWTs with
-`{openId, appId, name}` against `JWT_SECRET`; swap the file to change identity (admin vs member) and
+`{openId, name}` against `JWT_SECRET`; swap the file to change identity (admin vs member) and
 reload. Verify with `auth.me`.
 
 ## What to assert

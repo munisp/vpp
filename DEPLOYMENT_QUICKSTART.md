@@ -58,7 +58,7 @@ This creates the `orchestrator/vpp-orchestrator` binary.
 
 ### Step 4: Configure Orchestrator Environment
 
-The orchestrator needs environment variables to connect to all services. You'll configure these through the Manus platform secrets management.
+The orchestrator needs environment variables to connect to all services. Configure these through the deployment's approved secrets manager.
 
 **Required Environment Variables:**
 

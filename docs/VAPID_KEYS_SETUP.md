@@ -32,9 +32,9 @@ VITE_VAPID_PUBLIC_KEY=<the same public key>
 
 ## Setup Instructions
 
-### 1. Add to Manus Management UI
+### 1. Add to the deployment secrets manager
 
-1. Open the Manus Management Dashboard
+1. Open the deployment secrets manager
 2. Navigate to **Settings** → **Secrets**
 3. Add the following secrets:
    - `VAPID_PUBLIC_KEY`: your generated public key

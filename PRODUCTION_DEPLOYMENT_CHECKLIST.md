@@ -250,9 +250,9 @@ sudo ./scripts/security-hardening.sh
 #### Required Variables
 - [x] `DATABASE_URL` - Database connection string
 - [x] `JWT_SECRET` - Session cookie signing secret
-- [x] `VITE_APP_ID` - Manus OAuth application ID
-- [x] `OAUTH_SERVER_URL` - Manus OAuth backend URL
-- [x] `VITE_OAUTH_PORTAL_URL` - Manus login portal URL
+- [x] `KEYCLOAK_CLIENT_ID` - Keycloak client identifier
+- [x] `KEYCLOAK_URL` - Keycloak server URL
+- [x] `KEYCLOAK_REDIRECT_URI` - approved Keycloak callback URL
 - [ ] `TEMPORAL_ADDRESS` - Temporal server address
 - [ ] `KEYCLOAK_SERVER_URL` - Keycloak server URL
 - [ ] `KEYCLOAK_REALM` - Keycloak realm name
@@ -545,7 +545,7 @@ If critical issues are discovered after deployment:
    pm2 stop all
    
    # Rollback to previous checkpoint
-   # (use webdev_rollback_checkpoint in Manus UI)
+   # Record the rollback checkpoint in the deployment change record
    ```
 
 2. **Verify Rollback:**

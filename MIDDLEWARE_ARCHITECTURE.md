@@ -196,7 +196,7 @@ This document describes the enterprise middleware integration for the Virtual Po
 - `admin-portal` - Admin dashboard
 
 **Integration:**
-- Replace Manus OAuth with Keycloak
+- Use Keycloak OpenID Connect for identity
 - Migrate existing users
 - Maintain backward compatibility
 

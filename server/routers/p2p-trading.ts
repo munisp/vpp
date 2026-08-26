@@ -148,14 +148,20 @@ export const p2pTradingRouter = router({
       const sellerAssets = await db
         .select({ id: assets.id })
         .from(assets)
-        .where(and(eq(assets.userId, ctx.user.id), eq(assets.status, 'active')))
+        .where(
+          and(
+            eq(assets.userId, ctx.user.id),
+            eq(assets.status, 'active'),
+            eq(assets.approvalStatus, 'approved')
+          )
+        )
         .limit(1);
 
       if (sellerAssets.length === 0) {
         throw new TRPCError({
           code: 'PRECONDITION_FAILED',
           message:
-            'You have no active asset that could deliver this energy, so the offer cannot be published.',
+            'You need an active, approved asset before publishing an energy offer.',
         });
       }
 

@@ -27,6 +27,11 @@ import {
   createRateLimitStore,
   SharedCounterUnavailableError,
 } from "../services/rate-limit-store";
+import {
+  analyticsLoaderSource,
+  getAnalyticsConfig,
+  productionCspDirectives,
+} from "./csp";
 
 function isPortAvailable(port: number): Promise<boolean> {
   return new Promise(resolve => {
@@ -59,13 +64,25 @@ async function startServer() {
   // so production refuses to start without somewhere to keep shared counters.
   assertSharedCountersAvailable();
 
-  // Security headers via helmet defaults (X-Content-Type-Options,
-  // X-Frame-Options, Referrer-Policy, HSTS in prod, etc.). CSP is disabled
-  // here on purpose: client/index.html ships an inline service-worker
-  // registration script that a strict script-src would block, and the Vite
-  // dev server also injects inline scripts. Enforce a CSP at the nginx layer
-  // once the inline script is externalized.
-  app.use(helmet({ contentSecurityPolicy: false }));
+  // Development Vite injects scripts for HMR, but production serves a static
+  // SPA whose script entries are all external. Enforce a narrow application
+  // CSP in production instead of relying on a perimeter-only policy.
+  const analytics = getAnalyticsConfig();
+  app.use(
+    helmet({
+      contentSecurityPolicy:
+        process.env.NODE_ENV === "production"
+          ? { directives: productionCspDirectives(analytics) }
+          : false,
+    })
+  );
+
+  // The static HTML references this same-origin loader. It prevents a
+  // build-time environment variable from becoming an inline or uncontrolled
+  // third-party script source while preserving optional analytics.
+  app.get("/analytics.js", (_req, res) => {
+    res.type("application/javascript").set("Cache-Control", "no-store").send(analyticsLoaderSource(analytics));
+  });
 
   // Global rate limit: 300 requests per 15 minutes per IP.
   // /api/grid is excluded and limited separately: it carries machine traffic

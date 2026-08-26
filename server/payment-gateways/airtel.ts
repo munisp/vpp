@@ -25,9 +25,31 @@ export class AirtelMoneyGateway extends BasePaymentGateway {
   private tokenExpiry: number = 0;
 
   protected getBaseUrl(): string {
-    return this.environment === 'production'
-      ? 'https://openapiuat.airtel.africa' // Replace with production URL when available
-      : 'https://openapiuat.airtel.africa';
+    const sandboxUrl = 'https://openapiuat.airtel.africa';
+    if (this.environment !== 'production') return sandboxUrl;
+
+    const configured = process.env.AIRTEL_PRODUCTION_BASE_URL?.trim();
+    if (!configured) {
+      throw new Error(
+        'AIRTEL_PRODUCTION_BASE_URL must be configured before Airtel production payments are enabled.'
+      );
+    }
+
+    let url: URL;
+    try {
+      url = new URL(configured);
+    } catch {
+      throw new Error('AIRTEL_PRODUCTION_BASE_URL must be an absolute HTTPS URL.');
+    }
+
+    if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash) {
+      throw new Error('AIRTEL_PRODUCTION_BASE_URL must be a credential-free HTTPS origin or path.');
+    }
+    if (url.origin === sandboxUrl) {
+      throw new Error('AIRTEL_PRODUCTION_BASE_URL must not point to the Airtel UAT endpoint.');
+    }
+
+    return url.pathname === '/' ? url.origin : `${url.origin}${url.pathname.replace(/\/$/, '')}`;
   }
 
   private get creds(): AirtelCredentials {

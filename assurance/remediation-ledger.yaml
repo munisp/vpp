@@ -98,10 +98,11 @@ findings:
     affected_scope: root web/server production dependency graph
     evidence: >-
       Initial pnpm audit --prod found 5 critical advisories. Upgrading jsPDF to 4.2.1 and applying
-      pnpm 10.15.1 workspace overrides for fast-xml-parser 5.3.5, protobufjs 7.5.5, and
-      websocket-driver 0.7.5 reduced the final audit to 0 critical, 46 high, 66 moderate, and 14 low advisories.
-    impact: The critical advisory gate is now clear, but remaining high and moderate advisory paths still require a separately reviewed remediation program.
-    remediation: Regenerated pnpm-lock.yaml with pnpm 10.15.1, completed a frozen install, and verified no critical root production advisory remains.
+      tested pnpm 10.15.1 workspace overrides reduced the final audit to 0 critical, 0 high,
+      0 moderate, and 1 low advisory.
+    impact: The root critical, high, and moderate advisory gates are clear. One low advisory remains in
+      `keycloak-connect > jwk-to-pem > elliptic`, for which the audit publishes no fixed version.
+    remediation: Regenerated pnpm-lock.yaml with pnpm 10.15.1, completed a frozen install, and verified no root critical, high, or moderate production advisory remains.
 
   - id: ASSUR-010
     severity: critical
@@ -109,11 +110,34 @@ findings:
     state: remediated
     affected_scope: mobile production dependency graph
     evidence: >-
-      Initial pnpm audit --prod found 3 critical advisories. pnpm 10.15.1 workspace overrides for
-      fast-xml-parser 4.5.4, shell-quote 1.8.4, and tar 7.5.19 reduced the final audit to
-      0 critical, 52 high, 18 moderate, and 2 low advisories.
-    impact: The critical advisory gate is now clear, but remaining high and moderate mobile advisory paths still require a separately reviewed remediation program.
+      Initial pnpm audit --prod found 3 critical advisories. Tested pnpm 10.15.1 workspace overrides
+      reduced the final audit to 0 critical, 2 high, 0 moderate, and 0 low advisories.
+    impact: The mobile critical and moderate advisory gates are clear. Both residual high findings are
+      unpatched `image-size@1.2.1` advisories inherited through React Native Metro.
     remediation: Regenerated mobile/pnpm-lock.yaml with pnpm 10.15.1, completed a frozen install, and verified Expo Doctor plus Android export with no critical mobile production advisory remaining.
+
+  - id: ASSUR-015
+    severity: high
+    category: dependency-vulnerability
+    state: vendor_blocked
+    affected_scope: mobile React Native Metro dependency graph
+    evidence: >-
+      Final mobile pnpm audit --prod reports `image-size@1.2.1` under
+      `react-native > @react-native/community-cli-plugin > metro > image-size` for
+      GHSA-w3rx-r6r6-pgpr and GHSA-5p2g-fcmc-qvqq. The audit publishes no patched version.
+    impact: Crafted image inputs processed by the inherited Metro tooling can trigger an infinite-loop denial of service.
+    minimum_unblocking_action: Upgrade Expo/React Native/Metro to a supported vendor release that removes or replaces image-size, then repeat mobile frozen-install, audit, Expo Doctor, and Android export verification.
+
+  - id: ASSUR-016
+    severity: low
+    category: dependency-vulnerability
+    state: vendor_blocked
+    affected_scope: root Keycloak/JWK dependency graph
+    evidence: >-
+      Final root pnpm audit --prod reports `elliptic@6.6.1` under
+      `keycloak-connect > jwk-to-pem > elliptic` for GHSA-848j-6mx2-7j84. The audit publishes no patched version.
+    impact: The legacy cryptographic primitive remains a tracked low-severity dependency risk.
+    minimum_unblocking_action: Upgrade or replace the Keycloak/JWK dependency chain when the owning vendor publishes a fixed path, then repeat the root audit.
 
   - id: ASSUR-011
     severity: high

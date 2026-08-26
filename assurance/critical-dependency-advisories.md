@@ -1162,4 +1162,3 @@
 - `. > expo-secure-store@12.8.1 > expo@50.0.21 > @expo/cli@0.17.13 > tar@6.2.1`
 - `. > expo-web-browser@12.8.2 > expo@50.0.21 > @expo/cli@0.17.13 > cacache@15.3.0 > tar@6.2.1`
 - `. > expo-web-browser@12.8.2 > expo@50.0.21 > @expo/cli@0.17.13 > tar@6.2.1`
-

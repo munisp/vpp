@@ -1,11 +1,13 @@
 # Mission-Critical Assurance Report
 
-**Assessor:** Manus AI  
-**Assessment date:** 2026-08-26  
-**Baseline commit:** `dc65f985a7302754ece4830a8859d7cf2f3242a8` on `perf/route-lazy-loading`  
-**Assessment state:** Source changes are present in the working tree and are **not yet committed**. This report is therefore evidence for review, not a release certificate.
+**Assessor:** Manus AI
 
-> **Release decision: DO NOT SHIP.** The reviewed source now passes the available build and test gates, the root and mobile production dependency graphs have **zero critical advisories**, and several critical defects were remediated. However, high and moderate dependency advisories remain, and real payment, ledger, database, provider, deployment-recovery, and field-device evidence is unavailable. Those conditions still violate the assurance scope’s release prerequisites.
+**Assessment date:** 2026-08-26
+
+**Baseline commit:** `dc65f985a7302754ece4830a8859d7cf2f3242a8` on `perf/route-lazy-loading`
+**Assessment state:** The reviewed remediation chain is committed locally on `perf/route-lazy-loading` and requires peer review before it can be considered a release candidate.
+
+> **Release decision: DO NOT SHIP.** The reviewed source now passes the available build and test gates. The root production dependency graph has **zero critical, high, and moderate advisories**; the mobile graph has **zero critical and moderate advisories**, with two vendor-unpatched high advisories in Metro's `image-size` dependency. Real payment, ledger, database, provider, deployment-recovery, and field-device evidence is also unavailable. Those conditions still violate the assurance scope’s release prerequisites.
 
 ## Scope and evidence boundary
 
@@ -57,15 +59,15 @@ The production web build remains operational but reports an unremediated bundle 
 | ASSUR-003 | High | No production-shaped deployment, migration, backup/restore, or rollback rehearsal. | Provide a disposable environment and authorize an end-to-end deployment/recovery exercise. |
 | ASSUR-004 | High | No approved protocol simulator or field-device sandbox. | Validate command delivery, acknowledgement, expiry, fallback, and telemetry behavior against real/simulated adapters. |
 | ASSUR-005 | Medium | Application-layer CSP is disabled due to inline PWA registration. | Externalize the script or apply/test a strict nonce/hash CSP at the reverse proxy. |
-| ASSUR-009 | Remediated critical gate | Root production audit is **0 critical, 46 high, 66 moderate, and 14 low** after patched jsPDF and transitive dependency resolutions. | Triage remaining high/moderate advisories under a separate reviewed upgrade program. |
-| ASSUR-010 | Remediated critical gate | Mobile production audit is **0 critical, 52 high, 18 moderate, and 2 low** after patched Expo/React Native transitive resolutions. | Triage remaining high/moderate advisories under a supported Expo SDK upgrade program. |
+| ASSUR-009 | Remediated | Root production audit is **0 critical, 0 high, 0 moderate, and 1 low** after tested pnpm override and lockfile remediation. The remaining `elliptic@6.6.1` advisory under `keycloak-connect > jwk-to-pem` has no published fix. | Upgrade or replace the Keycloak/JWK dependency chain when its vendor releases a non-vulnerable path; reassess the accepted low residual. |
+| ASSUR-010 | Partially remediated | Mobile production audit is **0 critical, 2 high, 0 moderate, and 0 low** after tested Expo/React Native transitive resolutions. Both high findings are `image-size@1.2.1` under React Native Metro and have no published fix. | Upgrade Expo/React Native/Metro to a vendor release that removes or replaces `image-size`; do not suppress the findings. |
 | ASSUR-001 | High | No immutable release candidate includes the full assurance work; the repository has uncommitted remediation, mobile migration, and evidence-manifest changes. | Split reviewable concerns into commits, obtain review, and assess the exact release commit. |
 
 ## Required follow-through
 
-First, split the working tree into reviewable commits: mobile pnpm/Expo changes, assurance manifests and CI secret scanning, payment recovery, edge authorization, and trading-worker concurrency. Run the same gates against the resulting immutable candidate.
+First, obtain peer review for the local remediation chain and run the same gates against its immutable candidate before proposing it for release.
 
-Second, continue the dependency remediation program for the remaining high and moderate advisories. The critical paths are now fixed through targeted direct upgrades and workspace overrides; do not use broad `--latest` upgrades. Map each remaining advisory to its direct dependency, select a supported upgrade path, regenerate locks, run the complete cross-language suite, and repeat the audit.
+Second, maintain the dependency remediation program. Tested pnpm overrides eliminate all root critical/high/moderate advisories and all mobile critical/moderate advisories; two mobile Metro `image-size` advisories and one low Keycloak/JWK `elliptic` advisory have no published fixes. Do not suppress them or use broad `--latest` upgrades. Upgrade the owning vendor dependency chains when a supported fixed release exists, regenerate locks, run the complete cross-language suite, and repeat the audit.
 
 Third, obtain safe non-production credentials and infrastructure for payment, ledger, PostgreSQL, Kafka, Temporal, provider, and grid-protocol integration testing. Execute failure injection for duplicate delivery, partial success, timeout, worker restart, and recovery. Finally, rehearse backup, restore, migration, and rollback in a production-shaped environment.
 

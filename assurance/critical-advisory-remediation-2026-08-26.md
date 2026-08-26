@@ -2,7 +2,7 @@
 
 **Scope:** Root and mobile `pnpm audit --prod` results captured on 2026-08-26. The full, unabridged dependency-path evidence is preserved in [critical-dependency-advisories.md](critical-dependency-advisories.md). This companion document summarizes the smallest safe remediation applied for each advisory.
 
-> **Result:** The root and mobile production dependency graphs now report **zero critical advisories**. The remaining high and moderate advisories are not silently accepted; they remain tracked in `assurance/remediation-ledger.yaml` for a separate, reviewable remediation program.
+> **Result:** The root production graph now reports **zero critical, high, and moderate advisories**. The mobile graph reports **zero critical and moderate advisories**; its two remaining high findings are vendor-unpatched `image-size@1.2.1` paths in React Native Metro and are tracked in `assurance/remediation-ledger.yaml`.
 
 | Surface | Advisory | Module and affected version | Exact dependency path class | Fixed version | Applied remediation | Final result |
 |---|---|---|---|---|---|---|
@@ -35,7 +35,7 @@ pnpm dlx expo-doctor
 pnpm exec expo export -p android
 ```
 
-All installation, build, type-check, test, Expo diagnostic, and Android-export gates passed. Final audit totals were **root: 0 critical, 46 high, 66 moderate, 14 low** and **mobile: 0 critical, 52 high, 18 moderate, 2 low**.
+All installation, build, type-check, test, Expo diagnostic, and Android-export gates passed. Final audit totals were **root: 0 critical, 0 high, 0 moderate, 1 low** and **mobile: 0 critical, 2 high, 0 moderate, 0 low**. The remaining mobile high findings are `image-size@1.2.1` inherited through React Native Metro; the advisory database lists no patched version.
 
 ## References
 

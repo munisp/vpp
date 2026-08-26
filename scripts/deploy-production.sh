@@ -62,8 +62,16 @@ validate_environment() {
     local required_vars=(
         "DATABASE_URL"
         "JWT_SECRET"
-        "VITE_APP_ID"
-        "OAUTH_SERVER_URL"
+        "KEYCLOAK_URL"
+        "KEYCLOAK_REALM"
+        "KEYCLOAK_CLIENT_ID"
+        "KEYCLOAK_CLIENT_SECRET"
+        "KEYCLOAK_REDIRECT_URI"
+        "KEYCLOAK_ALLOWED_REDIRECT_URIS"
+        "S3_ENDPOINT"
+        "S3_ACCESS_KEY"
+        "S3_SECRET_KEY"
+        "S3_BUCKET"
     )
     
     local missing_vars=()

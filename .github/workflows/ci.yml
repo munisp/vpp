@@ -36,6 +36,38 @@ jobs:
       - name: Build server bundle (esbuild)
         run: pnpm build:server
 
+  mobile:
+    name: Mobile (asset policy, Expo Doctor, Android export)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: mobile/pnpm-lock.yaml
+
+      - name: Enforce mobile asset policy
+        run: ./scripts/check-mobile-assets.sh
+
+      - name: Install mobile dependencies
+        working-directory: mobile
+        run: pnpm install --frozen-lockfile
+
+      - name: Expo Doctor
+        working-directory: mobile
+        run: pnpm dlx expo-doctor
+
+      - name: Android export
+        working-directory: mobile
+        run: pnpm exec expo export -p android
+
   python-workers:
     name: Python workers (py_compile + pytest)
     runs-on: ubuntu-latest

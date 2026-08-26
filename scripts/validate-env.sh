@@ -44,13 +44,15 @@ check_var "DATABASE_URL"
 check_var "JWT_SECRET"
 echo ""
 
-echo "Checking OAuth Configuration:"
-echo "----------------------------"
-check_var "VITE_APP_ID"
-check_var "OAUTH_SERVER_URL"
-check_var "VITE_OAUTH_PORTAL_URL"
-check_var "OWNER_OPEN_ID"
-check_var "OWNER_NAME"
+echo "Checking Keycloak Identity Configuration:"
+echo "-----------------------------------------"
+check_var "KEYCLOAK_URL"
+check_var "KEYCLOAK_REALM"
+check_var "KEYCLOAK_CLIENT_ID"
+check_var "KEYCLOAK_CLIENT_SECRET"
+check_var "KEYCLOAK_REDIRECT_URI"
+check_var "KEYCLOAK_ALLOWED_REDIRECT_URIS"
+check_var "OWNER_USER_ID" false
 echo ""
 
 echo "Checking Application Configuration:"
@@ -59,12 +61,19 @@ check_var "VITE_APP_TITLE"
 check_var "VITE_APP_LOGO"
 echo ""
 
-echo "Checking API Configuration:"
-echo "-------------------------"
-check_var "BUILT_IN_FORGE_API_URL"
-check_var "BUILT_IN_FORGE_API_KEY"
-check_var "VITE_FRONTEND_FORGE_API_KEY"
-check_var "VITE_FRONTEND_FORGE_API_URL"
+echo "Checking Standalone Service Configuration:"
+echo "------------------------------------------"
+check_var "S3_ENDPOINT"
+check_var "S3_ACCESS_KEY"
+check_var "S3_SECRET_KEY"
+check_var "S3_BUCKET"
+check_var "LLM_BASE_URL" false
+check_var "LLM_API_KEY" false
+check_var "LLM_MODEL" false
+check_var "IMAGE_GENERATION_BASE_URL" false
+check_var "TRANSCRIPTION_BASE_URL" false
+check_var "GOOGLE_MAPS_API_KEY" false
+check_var "OWNER_NOTIFICATION_WEBHOOK_URL" false
 echo ""
 
 echo "Checking Analytics Configuration:"

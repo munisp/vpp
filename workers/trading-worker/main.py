@@ -254,40 +254,42 @@ async def create_trade(buyer_id: int, seller_id: int, quantity: float, price: in
 
 @activity.defn
 async def update_order_status(order_id: int, quantity_filled: float) -> bool:
-    """Update order quantity and status in the trades table"""
+    """Atomically apply one positive fill to a pending order.
+
+    The predicate protects against duplicate delivery and concurrent workers: the
+    update succeeds only while the order is pending and still contains the full
+    requested quantity. A stale or over-sized fill is an error, not a partial
+    success that could over-settle the order.
+    """
     logger.info(f"Updating order {order_id}, filled: {quantity_filled}kWh")
-    
+    filled_wh = int(quantity_filled * 1000)
+    if filled_wh <= 0:
+        raise ValueError("quantity_filled must be a positive whole-Wh amount")
+
     connection = get_db_connection()
     cursor = connection.cursor()
-    
-    try:
-        # Get current order
-        cursor.execute("SELECT energy, status FROM trades WHERE id = %s", (order_id,))
-        order = cursor.fetchone()
-        
-        if not order:
-            raise ValueError(f"Order {order_id} not found")
 
-        current_energy_wh = order[0]
-        filled_wh = int(quantity_filled * 1000)
-        remaining_wh = current_energy_wh - filled_wh
-        
-        if remaining_wh <= 0:
-            # Order fully filled
-            cursor.execute(
-                "UPDATE trades SET status = 'executed', energy = 0 WHERE id = %s",
-                (order_id,)
+    try:
+        cursor.execute(
+            """UPDATE trades
+               SET energy = energy - %s,
+                   status = CASE WHEN energy = %s THEN 'executed' ELSE status END
+               WHERE id = %s
+                 AND status = 'pending'
+                 AND energy >= %s
+               RETURNING id, energy, status""",
+            (filled_wh, filled_wh, order_id, filled_wh),
+        )
+        updated = cursor.fetchone()
+        if not updated:
+            raise ValueError(
+                f"Order {order_id} is not pending with at least {filled_wh} Wh remaining; "
+                "refusing a stale, duplicate, or over-sized fill"
             )
-        else:
-            # Partial fill - update remaining quantity
-            cursor.execute(
-                "UPDATE trades SET energy = %s WHERE id = %s",
-                (remaining_wh, order_id)
-            )
-        
+
         connection.commit()
         return True
-    except Error as e:
+    except (Error, ValueError) as e:
         connection.rollback()
         raise RuntimeError(f"Failed to update order {order_id}: {e}") from e
     finally:

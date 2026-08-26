@@ -1,20 +1,4 @@
-/**
- * Image generation helper using internal ImageService
- *
- * Example usage:
- *   const { url: imageUrl } = await generateImage({
- *     prompt: "A serene landscape with mountains"
- *   });
- *
- * For editing:
- *   const { url: imageUrl } = await generateImage({
- *     prompt: "Add a rainbow to this landscape",
- *     originalImages: [{
- *       url: "https://example.com/original.jpg",
- *       mimeType: "image/jpeg"
- *     }]
- *   });
- */
+import crypto from "node:crypto";
 import { storagePut } from "server/storage";
 import { ENV } from "./env";
 
@@ -27,66 +11,77 @@ export type GenerateImageOptions = {
   }>;
 };
 
-export type GenerateImageResponse = {
-  url?: string;
+export type GenerateImageResponse = { url?: string };
+
+type ImagesResponse = {
+  data?: Array<{ b64_json?: string; revised_prompt?: string }>;
 };
 
-export async function generateImage(
-  options: GenerateImageOptions
-): Promise<GenerateImageResponse> {
-  if (!ENV.forgeApiUrl) {
-    throw new Error("BUILT_IN_FORGE_API_URL is not configured");
+function imageGenerationUrl(): string {
+  if (!ENV.imageGenerationBaseUrl) {
+    throw new Error("IMAGE_GENERATION_BASE_URL is not configured");
   }
-  if (!ENV.forgeApiKey) {
-    throw new Error("BUILT_IN_FORGE_API_KEY is not configured");
+  if (!ENV.imageGenerationApiKey) {
+    throw new Error("IMAGE_GENERATION_API_KEY is not configured");
+  }
+  if (!ENV.imageGenerationModel) {
+    throw new Error("IMAGE_GENERATION_MODEL is not configured");
+  }
+  return new URL("v1/images/generations", `${ENV.imageGenerationBaseUrl}/`).toString();
+}
+
+/**
+ * Generate an image through an explicitly configured OpenAI-compatible service
+ * and store the returned bytes in the platform's S3-compatible object store.
+ * Image editing is not enabled until the selected provider's compatible editing
+ * endpoint and file-validation contract are separately implemented.
+ */
+export async function generateImage(options: GenerateImageOptions): Promise<GenerateImageResponse> {
+  if (!options.prompt.trim()) {
+    throw new Error("Image-generation prompt is required");
+  }
+  if (options.originalImages?.length) {
+    throw new Error(
+      "Image editing is not configured for the standalone image-generation service."
+    );
   }
 
-  // Build the full URL by appending the service path to the base URL
-  const baseUrl = ENV.forgeApiUrl.endsWith("/")
-    ? ENV.forgeApiUrl
-    : `${ENV.forgeApiUrl}/`;
-  const fullUrl = new URL(
-    "images.v1.ImageService/GenerateImage",
-    baseUrl
-  ).toString();
-
-  const response = await fetch(fullUrl, {
+  const response = await fetch(imageGenerationUrl(), {
     method: "POST",
     headers: {
       accept: "application/json",
       "content-type": "application/json",
-      "connect-protocol-version": "1",
-      authorization: `Bearer ${ENV.forgeApiKey}`,
+      authorization: `Bearer ${ENV.imageGenerationApiKey}`,
     },
     body: JSON.stringify({
+      model: ENV.imageGenerationModel,
       prompt: options.prompt,
-      original_images: options.originalImages || [],
+      response_format: "b64_json",
     }),
   });
 
   if (!response.ok) {
     const detail = await response.text().catch(() => "");
     throw new Error(
-      `Image generation request failed (${response.status} ${response.statusText})${detail ? `: ${detail}` : ""}`
+      `Image generation failed (${response.status} ${response.statusText})${detail ? `: ${detail}` : ""}`
     );
   }
 
-  const result = (await response.json()) as {
-    image: {
-      b64Json: string;
-      mimeType: string;
-    };
-  };
-  const base64Data = result.image.b64Json;
-  const buffer = Buffer.from(base64Data, "base64");
+  const result = (await response.json()) as ImagesResponse;
+  const b64Json = result.data?.[0]?.b64_json;
+  if (!b64Json) {
+    throw new Error("Image generation service returned no base64 image data.");
+  }
 
-  // Save to S3
+  const buffer = Buffer.from(b64Json, "base64");
+  if (buffer.length === 0) {
+    throw new Error("Image generation service returned an empty image.");
+  }
+
   const { url } = await storagePut(
-    `generated/${Date.now()}.png`,
+    `generated/${Date.now()}-${crypto.randomUUID()}.png`,
     buffer,
-    result.image.mimeType
+    "image/png"
   );
-  return {
-    url,
-  };
+  return { url };
 }

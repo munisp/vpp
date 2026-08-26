@@ -161,22 +161,6 @@ export class KeycloakAuthBridge {
     return roles.every(role => this.hasRole(user, role));
   }
 
-  // Exchange Manus OAuth token for Keycloak token (migration helper)
-  async exchangeManusToken(manusToken: string): Promise<string | null> {
-    try {
-      // This would call Manus OAuth API to get user info
-      // Then create or get Keycloak user
-      // Then generate Keycloak token
-      // This is a placeholder for the actual implementation
-      
-      console.log('[Keycloak] Token exchange not yet implemented');
-      return null;
-    } catch (error) {
-      console.error('[Keycloak] Error exchanging Manus token:', error);
-      return null;
-    }
-  }
-
   // Logout user
   async logout(token: string): Promise<boolean> {
     try {

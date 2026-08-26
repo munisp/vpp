@@ -54,12 +54,12 @@ export default function LoginScreen() {
           {loading ? (
             <ActivityIndicator color="#fff" />
           ) : (
-            <Text style={styles.loginButtonText}>Sign In with Manus</Text>
+            <Text style={styles.loginButtonText}>Sign In</Text>
           )}
         </TouchableOpacity>
 
         <Text style={styles.footer}>
-          Secure authentication powered by Manus
+          Secure authentication powered by Keycloak
         </Text>
       </View>
     </View>

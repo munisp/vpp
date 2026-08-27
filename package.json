@@ -12,6 +12,8 @@
     "check": "tsc --noEmit",
     "format": "prettier --write .",
     "test": "vitest run",
+    "seed:platform": "tsx scripts/seed-platform.ts",
+    "test:e2e:seeded": "bash scripts/test-platform-e2e.sh",
     "db:push": "drizzle-kit generate && drizzle-kit migrate",
     "worker": "tsx server/workflows/worker.ts",
     "worker:dev": "tsx watch server/workflows/worker.ts",

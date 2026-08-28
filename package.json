@@ -14,6 +14,7 @@
     "test": "vitest run",
     "seed:platform": "tsx scripts/seed-platform.ts",
     "test:e2e:seeded": "bash scripts/test-platform-e2e.sh",
+    "test:e2e:grid": "docker compose -f docker-compose.grid-e2e.yml up --build --abort-on-container-exit --exit-code-from grid-e2e-test",
     "db:push": "drizzle-kit generate && drizzle-kit migrate",
     "worker": "tsx server/workflows/worker.ts",
     "worker:dev": "tsx watch server/workflows/worker.ts",

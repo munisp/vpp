@@ -1,0 +1,11 @@
+node_modules
+mobile/node_modules
+**/node_modules
+.git
+.dist
+dist
+coverage
+.vite
+mobile/.expo
+mobile/dist
+*.log

@@ -1,0 +1,92 @@
+# Isolated P0-4 grid safety topology. It is intentionally separate from shared
+# development infrastructure and uses only disposable test data and credentials.
+name: vpp-grid-e2e
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: vpp_e2e
+      POSTGRES_PASSWORD: vpp_e2e
+      POSTGRES_DB: vpp_grid_e2e
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vpp_e2e -d vpp_grid_e2e"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    tmpfs:
+      - /var/lib/postgresql/data
+    networks: [grid-e2e]
+
+  mqtt:
+    image: eclipse-mosquitto:2.0.20
+    command: ["mosquitto", "-c", "/mosquitto/config/mosquitto.conf"]
+    volumes:
+      - ./e2e/grid/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mosquitto_sub -h 127.0.0.1 -t '$SYS/broker/version' -C 1 -W 2 >/dev/null 2>&1"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+    tmpfs:
+      - /mosquitto/data
+      - /mosquitto/log
+    networks: [grid-e2e]
+
+  grid-protocols:
+    build:
+      context: ./services/grid-protocols
+      target: gridd
+    command: ["--config", "/config/e2e.yaml"]
+    volumes:
+      - ./services/grid-protocols/config/e2e.yaml:/config/e2e.yaml:ro
+    environment:
+      GRID_PROTOCOLS_LISTEN: ":9100"
+      GRID_PROTOCOL_SHARED_SECRET: grid-e2e-shared-secret-0123456789abcdef
+    networks: [grid-e2e]
+
+  ocpp-simulator:
+    build:
+      context: ./services/grid-protocols
+      target: ocpp-e2e-simulator
+    environment:
+      OCPP_E2E_URL: ws://grid-protocols:9100/ocpp/CP-E2E-1
+      OCPP_E2E_USERNAME: CP-E2E-1
+      OCPP_E2E_PASSWORD: ocpp-e2e-password-0123456789abcdef
+      OCPP_E2E_LISTEN: ":9200"
+    depends_on:
+      grid-protocols:
+        condition: service_started
+    networks: [grid-e2e]
+
+  grid-e2e-test:
+    build:
+      context: .
+      dockerfile: services/grid-protocols/Dockerfile
+      target: grid-e2e-test
+    working_dir: /workspace
+    environment:
+      DATABASE_URL: postgresql://vpp_e2e:vpp_e2e@postgres:5432/vpp_grid_e2e
+      GRID_PROTOCOL_SERVICE_URL: http://grid-protocols:9100
+      GRID_PROTOCOL_SHARED_SECRET: grid-e2e-shared-secret-0123456789abcdef
+      GRID_PROTOCOL_TIMEOUT_MS: "2500"
+      GRID_CONTROL_FALLBACK_LIMIT_W: "1400"
+      GRID_E2E_SIMULATOR_URL: http://ocpp-simulator:9200
+      GRID_E2E_ENABLED: "true"
+      NODE_ENV: test
+      CI: "true"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mqtt:
+        condition: service_healthy
+      grid-protocols:
+        condition: service_started
+      ocpp-simulator:
+        condition: service_started
+    networks: [grid-e2e]
+
+networks:
+  grid-e2e:
+    name: vpp-grid-e2e-isolated
+    internal: true

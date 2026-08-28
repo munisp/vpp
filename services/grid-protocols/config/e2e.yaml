@@ -1,0 +1,30 @@
+# Isolated test-only configuration for docker-compose.grid-e2e.yml.
+# Values are non-secret fixtures; this file must never be used in production.
+listen: ":9100"
+log_level: "info"
+
+platform:
+  # The simulator does not send platform-originating OCPP calls in this topology,
+  # but the daemon requires an explicit endpoint rather than guessing one.
+  base_url: "http://platform-e2e.invalid"
+  shared_secret: "grid-e2e-shared-secret-0123456789abcdef"
+  timeout: 2s
+
+ocpp:
+  enabled: true
+  versions: ["1.6"]
+  charge_points:
+    CP-E2E-1: "ocpp-e2e-password-0123456789abcdef"
+  heartbeat_interval: 5s
+  call_timeout: 2s
+
+control:
+  max_validity: 5m
+  sweep_interval: 1s
+
+openadr:
+  enabled: false
+sep2:
+  enabled: false
+matter:
+  enabled: false

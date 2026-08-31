@@ -7,9 +7,16 @@ supply or credit the wrong account, so security reports are handled ahead of fea
 
 Report privately, not in a public issue or pull request:
 
-- GitHub private vulnerability reporting (Security → Report a vulnerability) on this repository, or
-- email **security@vpp-platform.example** — replace this with the operator's real address before
-  publishing the repository; a policy that names an unread mailbox is worse than none.
+- Use **GitHub private vulnerability reporting**: open this repository on GitHub, go to
+  **Security → Advisories → Report a vulnerability**, and submit the draft advisory. It is
+  visible only to the maintainers until (and unless) an advisory is published.
+- If private vulnerability reporting is not enabled on the repository, open a minimal public
+  issue asking a maintainer for a private contact channel — do not include any detail of the
+  finding in that issue.
+
+No general security mailbox is published for this repository: a policy that names an unread
+mailbox is worse than none, and the GitHub advisory workflow is the channel that is actually
+monitored.
 
 Please include the affected component (API, worker, adapter, mobile app), the version or commit,
 what an attacker gains, and a reproduction. If you have a patch, attach it privately rather than

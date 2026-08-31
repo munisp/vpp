@@ -83,6 +83,27 @@ import MicrogridResilience from "@/pages/MicrogridResilience";
 import PrepaidEnergy from "@/pages/PrepaidEnergy";
 import DRForecast from "@/pages/DRForecast";
 import SmsCenter from "@/pages/SmsCenter";
+// Innovation pages (2026-08-31 wave — innov3)
+import EvChargingPlanner from "@/pages/EvChargingPlanner";
+import OutageRisk from "@/pages/OutageRisk";
+import LoadDisaggregation from "@/pages/LoadDisaggregation";
+import TariffAdvisor from "@/pages/TariffAdvisor";
+import DemandGuardian from "@/pages/DemandGuardian";
+import WorkOrders from "@/pages/WorkOrders";
+import FirmwareCampaigns from "@/pages/FirmwareCampaigns";
+import SavingsVerifier from "@/pages/SavingsVerifier";
+import FlexLoads from "@/pages/FlexLoads";
+import Portfolio from "@/pages/Portfolio";
+import GridRevenue from "@/pages/GridRevenue";
+import OffsetMarket from "@/pages/OffsetMarket";
+import InverterFaults from "@/pages/InverterFaults";
+import Challenges from "@/pages/Challenges";
+import DigestSettings from "@/pages/DigestSettings";
+import GreenButton from "@/pages/GreenButton";
+import CapacityBids from "@/pages/CapacityBids";
+import IslandMonitor from "@/pages/IslandMonitor";
+import DispatchWindows from "@/pages/DispatchWindows";
+import BudgetPlanner from "@/pages/BudgetPlanner";
 import SolarYield from "@/pages/SolarYield";
 import NtlDashboard from "@/pages/NtlDashboard";
 import ComplianceReports from "@/pages/ComplianceReports";
@@ -320,6 +341,27 @@ function Router() {
       <Route path="/money/prepaid" component={PrepaidEnergy} />
       <Route path="/sms-center" component={SmsCenter} />
       <Route path="/energy-analytics" component={Analytics} />
+      {/* Innovation routes (2026-08-31 wave — innov3) */}
+      <Route path="/ev-charging" component={EvChargingPlanner} />
+      <Route path="/outage-risk" component={OutageRisk} />
+      <Route path="/load-disaggregation" component={LoadDisaggregation} />
+      <Route path="/tariff-advisor" component={TariffAdvisor} />
+      <Route path="/demand-guardian" component={DemandGuardian} />
+      <Route path="/work-orders" component={WorkOrders} />
+      <Route path="/firmware-campaigns" component={FirmwareCampaigns} />
+      <Route path="/savings-verifier" component={SavingsVerifier} />
+      <Route path="/flex-loads" component={FlexLoads} />
+      <Route path="/portfolio" component={Portfolio} />
+      <Route path="/grid-revenue" component={GridRevenue} />
+      <Route path="/offset-market" component={OffsetMarket} />
+      <Route path="/inverter-faults" component={InverterFaults} />
+      <Route path="/challenges" component={Challenges} />
+      <Route path="/digest-settings" component={DigestSettings} />
+      <Route path="/green-button" component={GreenButton} />
+      <Route path="/capacity-bids" component={CapacityBids} />
+      <Route path="/island-monitor" component={IslandMonitor} />
+      <Route path="/dispatch-windows" component={DispatchWindows} />
+      <Route path="/budget-planner" component={BudgetPlanner} />
       <Route path="/404" component={NotFound} />
       <Route component={NotFound} />
     </Switch>

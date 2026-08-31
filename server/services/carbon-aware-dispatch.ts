@@ -26,8 +26,9 @@ export interface EmissionsFactor {
   gasPercent: number | null;
   nuclearPercent: number | null;
   dataSource: string | null;
-  // 'live' = from recorded emissions_factors data; 'default' = hardcoded regional fallback
-  emissionFactorSource: 'default' | 'live';
+  // Only 'live' factors from the emissions_factors table are ever returned;
+  // hardcoded regional fallbacks were removed (they were fabricated data).
+  emissionFactorSource: 'live';
 }
 
 export interface CarbonCredit {
@@ -50,18 +51,22 @@ export interface CarbonImpactReport {
   userId: number;
   periodStart: Date;
   periodEnd: Date;
-  totalEmissionsAvoided: number; // grams CO2
+  // Emissions-derived fields are null when no live emissions_factors data
+  // exists for the user's region/timestamps; energy fields are always real
+  // telemetry totals. Callers must render null as "unavailable".
+  totalEmissionsAvoided: number | null; // grams CO2
   totalRenewableGeneration: number; // Wh
   totalGridExport: number; // Wh
   totalGridImport: number; // Wh
-  netCarbonImpact: number; // grams CO2 (negative = net reduction)
-  equivalentTreesPlanted: number;
-  equivalentMilesDriven: number;
+  netCarbonImpact: number | null; // grams CO2 (negative = net reduction)
+  equivalentTreesPlanted: number | null;
+  equivalentMilesDriven: number | null;
   creditsEarned: number;
+  emissionsFactorSource: 'live' | 'unavailable';
   breakdown: {
-    byAsset: Array<{ assetId: number; assetName: string; emissionsAvoided: number }>;
-    byService: Array<{ service: string; emissionsAvoided: number }>;
-    byHour: Array<{ hour: number; emissionsAvoided: number; marginalRate: number }>;
+    byAsset: Array<{ assetId: number; assetName: string; emissionsAvoided: number | null }>;
+    byService: Array<{ service: string; emissionsAvoided: number | null }>;
+    byHour: Array<{ hour: number; emissionsAvoided: number | null; marginalRate: number | null }>;
   };
 }
 
@@ -72,13 +77,35 @@ export interface CarbonOptimizedDispatch {
   recommendedPowerWatts: number;
   marginalEmissions: number;
   emissionsImpact: number; // grams CO2 saved (positive) or added (negative)
-  carbonValue: number; // cents (based on carbon price)
-  confidence: number;
+  // null: no real carbon price source exists on the platform, so no monetary
+  // value is computed (never valued against an invented price).
+  carbonValue: number | null;
+  // From the real forecast quantiles; null when the forecast provides none.
+  confidence: number | null;
   reason: string;
 }
 
-// Default carbon price in cents per tonne CO2
-const DEFAULT_CARBON_PRICE_CENTS_PER_TONNE = 5000; // $50/tonne
+export type CarbonOptimizedDispatchResult =
+  | {
+      adviceAvailable: true;
+      region: string;
+      carbonPriceAvailable: boolean;
+      recommendations: CarbonOptimizedDispatch[];
+    }
+  | {
+      adviceAvailable: false;
+      reason: 'no_region' | 'forecast_unavailable';
+      carbonPriceAvailable: false;
+      recommendations: [];
+    };
+
+// users.country -> emissions_factors.region codes (same mapping used by
+// server/services/carbon-credits.ts). Region is never guessed beyond the
+// user's recorded country.
+const COUNTRY_TO_REGION: Record<string, string> = {
+  nigeria: 'NG-LAGOS',
+  tanzania: 'TZ-DAR',
+};
 
 export class CarbonAwareDispatchService {
   
@@ -162,43 +189,41 @@ export class CarbonAwareDispatchService {
 
     const row = result.rows[0];
     if (!row) {
-      // Return default emissions for region
-      return this.getDefaultEmissions(region);
+      // No live emissions data for this region — report unavailable instead
+      // of returning a fabricated regional default.
+      return null;
     }
 
     return this.mapRowToEmissionsFactor(row);
   }
 
   /**
-   * Get default emissions for a region
+   * Resolve the emissions region for a user from their recorded country.
+   * Returns null when the user (or their country mapping) cannot be resolved;
+   * callers must treat that as "no advice", never substitute a guess.
    */
-  private getDefaultEmissions(region: string): EmissionsFactor {
-    // Default emissions based on region (grams CO2 per kWh)
-    const defaults: Record<string, { marginal: number; average: number; renewable: number }> = {
-      'NG-LAGOS': { marginal: 450, average: 420, renewable: 15 },
-      'NG-ABUJA': { marginal: 480, average: 450, renewable: 12 },
-      'TZ-DAR': { marginal: 380, average: 350, renewable: 35 },
-      'TZ-ARUSHA': { marginal: 350, average: 320, renewable: 45 },
-      'DEFAULT': { marginal: 400, average: 380, renewable: 20 },
-    };
+  async resolveRegionForUser(userId: number): Promise<string | null> {
+    const db = await getDb();
+    if (!db) throw new Error('Database not available');
 
-    const regionDefaults = defaults[region] || defaults['DEFAULT'];
-    const now = new Date();
+    const result = await db.execute<SqlRow>(sql`
+      SELECT country FROM users WHERE id = ${userId} LIMIT 1
+    `);
+    const country = result.rows[0]?.country;
+    if (!country) return null;
+    return COUNTRY_TO_REGION[country] || null;
+  }
 
-    return {
-      id: 0,
-      region,
-      timestamp: now,
-      validUntil: new Date(now.getTime() + 3600000),
-      marginalEmissions: regionDefaults.marginal,
-      averageEmissions: regionDefaults.average,
-      renewablePercent: regionDefaults.renewable * 100,
-      coalPercent: null,
-      gasPercent: null,
-      nuclearPercent: null,
-      dataSource: 'default',
-      emissionFactorSource: 'default',
-    };
+  /**
+   * Real carbon price in cents per tonne CO2, or null when unavailable.
+   * There is currently no carbon market price source on the platform (no
+   * carbon price table/service; market_prices holds electricity tariffs
+   * only), so this always returns null until a real source is integrated.
+   * carbonValue stays null rather than being priced against an invented
+   * constant.
+   */
+  private async getRealCarbonPriceCentsPerTonne(_region: string): Promise<number | null> {
+    return null;
   }
 
   /**
@@ -208,9 +233,16 @@ export class CarbonAwareDispatchService {
     userId: number,
     horizonHours: number = 24,
     intervalMinutes: number = 15
-  ): Promise<CarbonOptimizedDispatch[]> {
+  ): Promise<CarbonOptimizedDispatchResult> {
     const db = await getDb();
     if (!db) throw new Error('Database not available');
+
+    // Region comes from the user's recorded country; without it there is no
+    // honest basis for region-specific advice.
+    const region = await this.resolveRegionForUser(userId);
+    if (!region) {
+      return { adviceAvailable: false, reason: 'no_region', carbonPriceAvailable: false, recommendations: [] };
+    }
 
     // Get user's assets
     const assetsResult = await db.execute<SqlRow>(sql`
@@ -222,25 +254,46 @@ export class CarbonAwareDispatchService {
     `);
     const assets = assetsResult.rows || [];
 
-    // Get emissions forecast
-    const region = 'NG-LAGOS'; // Should be derived from user location
-    const emissionsForecast = await probabilisticForecasting.forecastEmissions(region, horizonHours, 60);
+    // Get emissions forecast. Defensive: the forecasting service is being
+    // migrated to report forecastAvailable:false instead of fabricated data —
+    // treat an explicit unavailable flag, a failure, or empty points as
+    // "no forecast" and never fall back to constants.
+    let emissionsForecast: Awaited<ReturnType<typeof probabilisticForecasting.forecastEmissions>> | null = null;
+    try {
+      emissionsForecast = await probabilisticForecasting.forecastEmissions(region, horizonHours, 60);
+    } catch (error) {
+      console.error('[CarbonDispatch] Emissions forecast failed:', error);
+      emissionsForecast = null;
+    }
+    const forecastPoints =
+      emissionsForecast &&
+      (emissionsForecast as { forecastAvailable?: boolean }).forecastAvailable !== false &&
+      Array.isArray(emissionsForecast.points)
+        ? emissionsForecast.points
+        : [];
+    if (forecastPoints.length === 0) {
+      return { adviceAvailable: false, reason: 'forecast_unavailable', carbonPriceAvailable: false, recommendations: [] };
+    }
+
+    // Real carbon price, if any (currently none — see method comment).
+    const carbonPriceCentsPerTonne = await this.getRealCarbonPriceCentsPerTonne(region);
+    const carbonPriceAvailable = carbonPriceCentsPerTonne !== null;
 
     const recommendations: CarbonOptimizedDispatch[] = [];
     const now = new Date();
-    const intervalsCount = (horizonHours * 60) / intervalMinutes;
+    const intervalsCount = Math.floor((horizonHours * 60) / intervalMinutes);
 
-    // Average emissions for comparison
-    const avgEmissions = emissionsForecast.points.reduce((sum, p) => sum + p.values.p50, 0) / emissionsForecast.points.length;
+    // Average emissions for comparison (derived from the real forecast points)
+    const avgEmissions = forecastPoints.reduce((sum, p) => sum + p.values.p50, 0) / forecastPoints.length;
 
     for (let i = 0; i < intervalsCount; i++) {
       const intervalStart = new Date(now.getTime() + i * intervalMinutes * 60000);
       const intervalEnd = new Date(intervalStart.getTime() + intervalMinutes * 60000);
-      
-      // Get emissions for this interval (hourly forecast, so divide by 4)
-      const forecastIndex = Math.floor(i / 4);
-      const emissionsPoint = emissionsForecast.points[forecastIndex];
-      const marginalEmissions = emissionsPoint?.values.p50 || avgEmissions;
+
+      // Map this interval onto the hourly forecast points
+      const forecastIndex = Math.floor((i * intervalMinutes) / 60);
+      const emissionsPoint = forecastPoints[forecastIndex];
+      const marginalEmissions = emissionsPoint?.values.p50 ?? avgEmissions;
 
       for (const asset of assets) {
         const maxExport = asset.max_power_export || asset.capacity;
@@ -277,7 +330,9 @@ export class CarbonAwareDispatchService {
         if (Math.abs(recommendedPower) > 100) { // Minimum 100W threshold
           const energyWh = (recommendedPower * intervalMinutes) / 60;
           const emissionsImpact = Math.round((energyWh / 1000) * marginalEmissions);
-          const carbonValue = Math.round((emissionsImpact / 1000000) * DEFAULT_CARBON_PRICE_CENTS_PER_TONNE);
+          const carbonValue = carbonPriceCentsPerTonne !== null
+            ? Math.round((emissionsImpact / 1000000) * carbonPriceCentsPerTonne)
+            : null;
 
           recommendations.push({
             assetId: asset.id,
@@ -286,8 +341,10 @@ export class CarbonAwareDispatchService {
             recommendedPowerWatts: Math.round(recommendedPower),
             marginalEmissions,
             emissionsImpact: recommendedPower > 0 ? emissionsImpact : -emissionsImpact,
-            carbonValue: recommendedPower > 0 ? carbonValue : -carbonValue,
-            confidence: emissionsPoint?.values.confidence || 60,
+            carbonValue: carbonValue !== null
+              ? (recommendedPower > 0 ? carbonValue : -carbonValue)
+              : null,
+            confidence: emissionsPoint?.values.confidence ?? null,
             reason,
           });
         }
@@ -296,7 +353,7 @@ export class CarbonAwareDispatchService {
 
     console.log(`[CarbonDispatch] Generated ${recommendations.length} carbon-optimized recommendations for user ${userId}`);
 
-    return recommendations;
+    return { adviceAvailable: true, region, carbonPriceAvailable, recommendations };
   }
 
   /**
@@ -309,6 +366,10 @@ export class CarbonAwareDispatchService {
   ): Promise<CarbonImpactReport> {
     const db = await getDb();
     if (!db) throw new Error('Database not available');
+
+    // Region from the user's recorded country; null means no emissions rates
+    // can be looked up and emissions-derived fields will report unavailable.
+    const region = await this.resolveRegionForUser(userId);
 
     // Get user's energy data
     const telemetryResult = await db.execute<SqlRow>(sql`
@@ -343,34 +404,44 @@ export class CarbonAwareDispatchService {
     const byService: Map<string, number> = new Map();
     const byHour: Map<number, { emissionsAvoided: number; marginalRate: number; count: number }> = new Map();
 
+    let importEmissions = 0;
+    // Set whenever an emissions rate was needed but no live data existed;
+    // emissions-derived report fields then become null ("unavailable").
+    let emissionsLookupFailed = false;
+
     // Process telemetry
     for (const t of telemetry) {
       const hour = new Date(t.timestamp).getHours();
       const power = t.power || 0;
-      
-      // Get emissions rate for this timestamp
-      const emissionsRate = await this.getEmissionsRateAt(t.timestamp, 'NG-LAGOS');
-      
+
+      // Emissions rate for this timestamp from stored data only; null when
+      // no live factor exists (never a fabricated fallback).
+      const emissionsRate = region ? await this.getEmissionsRateAt(t.timestamp, region) : null;
+      if (emissionsRate === null) emissionsLookupFailed = true;
+
       // Calculate energy for 5-minute interval (typical telemetry interval)
       const energyWh = (power * 5) / 60;
 
       if (power > 0) {
         // Export - avoiding grid emissions
         totalGridExport += energyWh;
-        const avoided = (energyWh / 1000) * emissionsRate;
-        totalEmissionsAvoided += avoided;
 
-        // Track by asset
-        const assetData = byAsset.get(t.asset_id) || { name: t.asset_name, emissionsAvoided: 0 };
-        assetData.emissionsAvoided += avoided;
-        byAsset.set(t.asset_id, assetData);
+        if (emissionsRate !== null) {
+          const avoided = (energyWh / 1000) * emissionsRate;
+          totalEmissionsAvoided += avoided;
 
-        // Track by hour
-        const hourData = byHour.get(hour) || { emissionsAvoided: 0, marginalRate: 0, count: 0 };
-        hourData.emissionsAvoided += avoided;
-        hourData.marginalRate += emissionsRate;
-        hourData.count++;
-        byHour.set(hour, hourData);
+          // Track by asset
+          const assetData = byAsset.get(t.asset_id) || { name: t.asset_name, emissionsAvoided: 0 };
+          assetData.emissionsAvoided += avoided;
+          byAsset.set(t.asset_id, assetData);
+
+          // Track by hour
+          const hourData = byHour.get(hour) || { emissionsAvoided: 0, marginalRate: 0, count: 0 };
+          hourData.emissionsAvoided += avoided;
+          hourData.marginalRate += emissionsRate;
+          hourData.count++;
+          byHour.set(hour, hourData);
+        }
 
         // Track renewable generation
         if (t.assetType === 'solar' || t.assetType === 'wind') {
@@ -379,6 +450,9 @@ export class CarbonAwareDispatchService {
       } else {
         // Import - adding grid emissions
         totalGridImport += Math.abs(energyWh);
+        if (emissionsRate !== null) {
+          importEmissions += (Math.abs(energyWh) / 1000) * emissionsRate;
+        }
       }
     }
 
@@ -387,41 +461,47 @@ export class CarbonAwareDispatchService {
       if (s.energy_wh && s.energy_wh > 0) {
         const service = s.event_type || 'other';
         const currentService = byService.get(service) || 0;
-        
-        // Estimate emissions avoided based on average rate
-        const avgRate = 400; // grams CO2/kWh
-        const avoided = (s.energy_wh / 1000) * avgRate;
+
+        // Emissions avoided at the event's actual rate; null rate means the
+        // service breakdown cannot be computed honestly.
+        const eventRate = region && s.created_at ? await this.getEmissionsRateAt(new Date(s.created_at), region) : null;
+        if (eventRate === null) {
+          emissionsLookupFailed = true;
+          continue;
+        }
+        const avoided = (s.energy_wh / 1000) * eventRate;
         byService.set(service, currentService + avoided);
       }
     }
 
-    // Calculate net impact
-    const avgImportEmissions = 400; // grams CO2/kWh
-    const importEmissions = (totalGridImport / 1000) * avgImportEmissions;
-    const netCarbonImpact = importEmissions - totalEmissionsAvoided;
+    const emissionsAvailable = !emissionsLookupFailed;
 
-    // Calculate equivalents
-    const equivalentTreesPlanted = Math.round(totalEmissionsAvoided / 21000); // ~21kg CO2 per tree per year
-    const equivalentMilesDriven = Math.round(totalEmissionsAvoided / 404); // ~404g CO2 per mile
+    // Calculate net impact
+    const netCarbonImpact = emissionsAvailable ? Math.round(importEmissions - totalEmissionsAvoided) : null;
+
+    // Calculate equivalents (conversion factors are fixed physical constants,
+    // but only applied to real emissions totals)
+    const equivalentTreesPlanted = emissionsAvailable ? Math.round(totalEmissionsAvoided / 21000) : null; // ~21kg CO2 per tree per year
+    const equivalentMilesDriven = emissionsAvailable ? Math.round(totalEmissionsAvoided / 404) : null; // ~404g CO2 per mile
 
     // Calculate credits earned (1 credit per MWh of renewable generation)
     const creditsEarned = Math.floor(totalRenewableGeneration / 1000000);
 
-    // Format breakdown
+    // Format breakdown (emissions fields null when unavailable)
     const breakdown = {
       byAsset: Array.from(byAsset.entries()).map(([assetId, data]) => ({
         assetId,
         assetName: data.name,
-        emissionsAvoided: Math.round(data.emissionsAvoided),
+        emissionsAvoided: emissionsAvailable ? Math.round(data.emissionsAvoided) : null,
       })),
       byService: Array.from(byService.entries()).map(([service, emissionsAvoided]) => ({
         service,
-        emissionsAvoided: Math.round(emissionsAvoided),
+        emissionsAvoided: emissionsAvailable ? Math.round(emissionsAvoided) : null,
       })),
       byHour: Array.from(byHour.entries()).map(([hour, data]) => ({
         hour,
-        emissionsAvoided: Math.round(data.emissionsAvoided),
-        marginalRate: Math.round(data.marginalRate / data.count),
+        emissionsAvoided: emissionsAvailable ? Math.round(data.emissionsAvoided) : null,
+        marginalRate: emissionsAvailable && data.count > 0 ? Math.round(data.marginalRate / data.count) : null,
       })).sort((a, b) => a.hour - b.hour),
     };
 
@@ -429,24 +509,27 @@ export class CarbonAwareDispatchService {
       userId,
       periodStart,
       periodEnd,
-      totalEmissionsAvoided: Math.round(totalEmissionsAvoided),
+      totalEmissionsAvoided: emissionsAvailable ? Math.round(totalEmissionsAvoided) : null,
       totalRenewableGeneration: Math.round(totalRenewableGeneration),
       totalGridExport: Math.round(totalGridExport),
       totalGridImport: Math.round(totalGridImport),
-      netCarbonImpact: Math.round(netCarbonImpact),
+      netCarbonImpact,
       equivalentTreesPlanted,
       equivalentMilesDriven,
       creditsEarned,
+      emissionsFactorSource: emissionsAvailable ? 'live' : 'unavailable',
       breakdown,
     };
   }
 
   /**
-   * Get emissions rate at a specific timestamp
+   * Get emissions rate at a specific timestamp from stored emissions_factors
+   * data only. Returns null when no live factor covers the timestamp — never
+   * a fabricated fallback.
    */
-  private async getEmissionsRateAt(timestamp: Date, region: string): Promise<number> {
+  private async getEmissionsRateAt(timestamp: Date, region: string): Promise<number | null> {
     const db = await getDb();
-    if (!db) return 400; // Default
+    if (!db) return null;
 
     const result = await db.execute<SqlRow>(sql`
       SELECT marginal_emissions FROM emissions_factors
@@ -458,7 +541,7 @@ export class CarbonAwareDispatchService {
     `);
 
     const row = result.rows[0];
-    return row?.marginal_emissions || 400;
+    return row?.marginal_emissions ?? null;
   }
 
   /**
@@ -555,19 +638,59 @@ export class CarbonAwareDispatchService {
   }
 
   /**
-   * Get real-time carbon intensity signal
+   * Get real-time carbon intensity signal.
+   * signalAvailable is false (with null current/recommendation) whenever the
+   * live emissions factor or the forecast is unavailable — no fabricated
+   * intensity is ever substituted.
    */
   async getCarbonIntensitySignal(region: string): Promise<{
-    current: number;
-    forecast: Array<{ timestamp: Date; intensity: number; confidence: number }>;
-    recommendation: 'charge' | 'discharge' | 'hold';
+    signalAvailable: boolean;
+    current: number | null;
+    emissionFactorSource: 'live' | 'unavailable';
+    forecast: Array<{ timestamp: Date; intensity: number; confidence: number | null }>;
+    recommendation: 'charge' | 'discharge' | 'hold' | null;
     reason: string;
   }> {
     const current = await this.getCurrentEmissions(region);
-    const forecast = await probabilisticForecasting.forecastEmissions(region, 24, 60);
 
-    const currentIntensity = current?.marginalEmissions || 400;
-    const avgForecast = forecast.points.reduce((sum, p) => sum + p.values.p50, 0) / forecast.points.length;
+    // Defensive: treat an explicit unavailable flag, a failure, or empty
+    // points as "no forecast".
+    let forecastResult: Awaited<ReturnType<typeof probabilisticForecasting.forecastEmissions>> | null = null;
+    try {
+      forecastResult = await probabilisticForecasting.forecastEmissions(region, 24, 60);
+    } catch (error) {
+      console.error('[CarbonDispatch] Emissions forecast failed:', error);
+      forecastResult = null;
+    }
+    const forecastPoints =
+      forecastResult &&
+      (forecastResult as { forecastAvailable?: boolean }).forecastAvailable !== false &&
+      Array.isArray(forecastResult.points)
+        ? forecastResult.points
+        : [];
+
+    const forecast = forecastPoints.slice(0, 24).map(p => ({
+      timestamp: p.timestamp,
+      intensity: p.values.p50,
+      confidence: p.values.confidence ?? null,
+    }));
+
+    const currentIntensity = current?.marginalEmissions ?? null;
+
+    if (currentIntensity === null || forecastPoints.length === 0) {
+      return {
+        signalAvailable: false,
+        current: currentIntensity,
+        emissionFactorSource: current ? 'live' : 'unavailable',
+        forecast,
+        recommendation: null,
+        reason: currentIntensity === null
+          ? 'Carbon intensity unavailable - no live emissions data for region'
+          : 'Carbon intensity signal unavailable - emissions forecast unavailable',
+      };
+    }
+
+    const avgForecast = forecastPoints.reduce((sum, p) => sum + p.values.p50, 0) / forecastPoints.length;
 
     let recommendation: 'charge' | 'discharge' | 'hold';
     let reason: string;
@@ -584,12 +707,10 @@ export class CarbonAwareDispatchService {
     }
 
     return {
+      signalAvailable: true,
       current: currentIntensity,
-      forecast: forecast.points.slice(0, 24).map(p => ({
-        timestamp: p.timestamp,
-        intensity: p.values.p50,
-        confidence: p.values.confidence,
-      })),
+      emissionFactorSource: 'live',
+      forecast,
       recommendation,
       reason,
     };

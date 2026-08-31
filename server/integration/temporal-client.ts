@@ -22,11 +22,6 @@ export interface DREventWorkflowInput {
   participants: string[];
 }
 
-export interface ReconciliationWorkflowInput {
-  date: string;
-  gateway?: string;
-}
-
 export interface TradingWorkflowInput {
   tradeId: number;
   userId: number;
@@ -173,108 +168,12 @@ export class TemporalWorkflowClient {
     }
   }
 
-  // Reconciliation workflows
-  async startReconciliationWorkflow(input: ReconciliationWorkflowInput): Promise<WorkflowHandle> {
-    const client = await getTemporalClient();
-    
-    const workflowId = `reconciliation-${input.date}${input.gateway ? `-${input.gateway}` : ''}`;
-    
-    const handle = await client.workflow.start('reconcilePayments', {
-      taskQueue: TASK_QUEUES.RECONCILIATION,
-      workflowId,
-      args: [input],
-      searchAttributes: {
-        ReconciliationDate: [input.date],
-        ...(input.gateway && { Gateway: [input.gateway] })
-      }
-    });
-
-    console.log(`[Temporal] Started reconciliation workflow: ${handle.workflowId}`);
-    return handle;
-  }
-
-  async getReconciliationWorkflowResult(date: string, gateway?: string): Promise<any> {
-    const client = await getTemporalClient();
-    const workflowId = `reconciliation-${date}${gateway ? `-${gateway}` : ''}`;
-    const handle = client.workflow.getHandle(workflowId);
-    
-    try {
-      const result = await handle.result();
-      return result;
-    } catch (error) {
-      console.error(`[Temporal] Error getting reconciliation result:`, error);
-      return null;
-    }
-  }
-
-  // Scheduled workflows
-  async scheduleReconciliation(schedule: {
-    scheduleId: string;
-    spec: {
-      cronExpressions: string[];
-    };
-    gateway?: string;
-  }): Promise<void> {
-    const client = await getTemporalClient();
-    
-    await client.schedule.create({
-      scheduleId: schedule.scheduleId,
-      spec: {
-        cronExpressions: schedule.spec.cronExpressions
-      },
-      action: {
-        type: 'startWorkflow',
-        workflowType: 'reconcilePayments',
-        taskQueue: TASK_QUEUES.RECONCILIATION,
-        args: [{
-          date: new Date().toISOString().split('T')[0],
-          gateway: schedule.gateway
-        }]
-      }
-    });
-
-    console.log(`[Temporal] Created schedule: ${schedule.scheduleId}`);
-  }
-
-  // Notification workflows
-  async startNotificationWorkflow(input: {
-    userId: string;
-    type: string;
-    title: string;
-    message: string;
-    channels: string[];
-  }): Promise<WorkflowHandle> {
-    const client = await getTemporalClient();
-    
-    const handle = await client.workflow.start('sendNotification', {
-      taskQueue: TASK_QUEUES.NOTIFICATIONS,
-      workflowId: `notification-${Date.now()}-${input.userId}`,
-      args: [input]
-    });
-
-    console.log(`[Temporal] Started notification workflow: ${handle.workflowId}`);
-    return handle;
-  }
-
-  // Batch notification workflows
-  async startBatchNotificationWorkflow(input: {
-    userIds: string[];
-    type: string;
-    title: string;
-    message: string;
-    channels: string[];
-  }): Promise<WorkflowHandle> {
-    const client = await getTemporalClient();
-    
-    const handle = await client.workflow.start('sendBatchNotifications', {
-      taskQueue: TASK_QUEUES.NOTIFICATIONS,
-      workflowId: `batch-notification-${Date.now()}`,
-      args: [input]
-    });
-
-    console.log(`[Temporal] Started batch notification workflow: ${handle.workflowId}`);
-    return handle;
-  }
+  // NOTE: reconciliation and notification workflow starters were removed.
+  // They dispatched 'reconcilePayments' / 'sendNotification' /
+  // 'sendBatchNotifications' to the RECONCILIATION and NOTIFICATIONS task
+  // queues, but no workflow definition or worker consumes those queues, so
+  // every dispatch was silently dead. Reintroduce a starter only together
+  // with a worker that registers the workflow type.
 
   // Health check
   async isHealthy(): Promise<boolean> {

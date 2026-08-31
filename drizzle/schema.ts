@@ -776,3 +776,8 @@ export * from './innovations-schema';
 export * from './grid-intel-schema';
 export * from './trust-access-schema';
 export * from './grid-protocol-schema';
+// Innovation schema tables (2026-08-31 wave — innov3)
+export * from './innov3-planning-schema';
+export * from './innov3-fieldops-schema';
+export * from './innov3-market-schema';
+export * from './innov3-control-schema';

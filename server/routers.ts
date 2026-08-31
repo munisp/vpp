@@ -95,6 +95,30 @@ import {
   protocolConformanceRouter,
 } from './routers/nextgen';
 
+// Innovation routers (2026-08-31 wave — innov3). Note: the 'evCharging' key
+// is already used by the nextgen router, so the planner is registered as
+// 'evChargingPlanner'.
+import { evChargingRouter as innov3EvChargingRouter } from './routers/innov3/evCharging';
+import { outageRiskRouter } from './routers/innov3/outageRisk';
+import { loadDisaggregationRouter } from './routers/innov3/loadDisaggregation';
+import { tariffAdvisorRouter } from './routers/innov3/tariffAdvisor';
+import { demandGuardianRouter } from './routers/innov3/demandGuardian';
+import { workOrdersRouter } from './routers/innov3/workOrders';
+import { firmwareCampaignsRouter } from './routers/innov3/firmwareCampaigns';
+import { savingsVerifierRouter } from './routers/innov3/savingsVerifier';
+import { flexLoadsRouter } from './routers/innov3/flexLoads';
+import { portfolioRouter } from './routers/innov3/portfolio';
+import { gridRevenueRouter } from './routers/innov3/gridRevenue';
+import { offsetMarketRouter } from './routers/innov3/offsetMarket';
+import { inverterFaultsRouter } from './routers/innov3/inverterFaults';
+import { challengesRouter } from './routers/innov3/challenges';
+import { digestRouter } from './routers/innov3/digest';
+import { greenButtonRouter } from './routers/innov3/greenButton';
+import { capacityBidsRouter } from './routers/innov3/capacityBids';
+import { islandMonitorRouter } from './routers/innov3/islandMonitor';
+import { dispatchWindowsRouter } from './routers/innov3/dispatchWindows';
+import { budgetPlannerRouter } from './routers/innov3/budgetPlanner';
+
 // Start performance alerting
 if (process.env.NODE_ENV === 'production') {
   performanceAlerting.start();
@@ -162,6 +186,27 @@ export const appRouter = router({
 
   // Innovation routers (2026-08-11 wave)
   energyAdvisor: energyAdvisorRouter,
+  // Innovation routers (2026-08-31 wave — innov3)
+  evChargingPlanner: innov3EvChargingRouter,
+  outageRisk: outageRiskRouter,
+  loadDisaggregation: loadDisaggregationRouter,
+  tariffAdvisor: tariffAdvisorRouter,
+  demandGuardian: demandGuardianRouter,
+  workOrders: workOrdersRouter,
+  firmwareCampaigns: firmwareCampaignsRouter,
+  savingsVerifier: savingsVerifierRouter,
+  flexLoads: flexLoadsRouter,
+  portfolio: portfolioRouter,
+  gridRevenue: gridRevenueRouter,
+  offsetMarket: offsetMarketRouter,
+  inverterFaults: inverterFaultsRouter,
+  challenges: challengesRouter,
+  digest: digestRouter,
+  greenButton: greenButtonRouter,
+  capacityBids: capacityBidsRouter,
+  islandMonitor: islandMonitorRouter,
+  dispatchWindows: dispatchWindowsRouter,
+  budgetPlanner: budgetPlannerRouter,
   dynamicTariffs: dynamicTariffsRouter,
   batteryHealth: batteryHealthRouter,
   p2pMatching: p2pMatchingRouter,

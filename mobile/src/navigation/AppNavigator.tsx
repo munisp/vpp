@@ -49,6 +49,14 @@ import LedgerReconciliationScreen from '../screens/LedgerReconciliationScreen';
 import LakehouseScreen from '../screens/LakehouseScreen';
 import ModelHealthScreen from '../screens/ModelHealthScreen';
 import DiagnosticsScreen from '../screens/DiagnosticsScreen';
+import BudgetPlannerScreen from '../screens/BudgetPlannerScreen';
+import EvChargingScreen from '../screens/EvChargingScreen';
+import OutageRiskScreen from '../screens/OutageRiskScreen';
+import TariffAdvisorScreen from '../screens/TariffAdvisorScreen';
+import ChallengesScreen from '../screens/ChallengesScreen';
+import DigestSettingsScreen from '../screens/DigestSettingsScreen';
+import PortfolioScreen from '../screens/PortfolioScreen';
+import WorkOrdersScreen from '../screens/WorkOrdersScreen';
 
 const Stack = createNativeStackNavigator();
 const Tab = createBottomTabNavigator();
@@ -194,6 +202,14 @@ export default function AppNavigator() {
       <Stack.Screen name="Lakehouse" component={LakehouseScreen} />
       <Stack.Screen name="ModelHealth" component={ModelHealthScreen} />
       <Stack.Screen name="Diagnostics" component={DiagnosticsScreen} />
+      <Stack.Screen name="BudgetPlanner" component={BudgetPlannerScreen} />
+      <Stack.Screen name="EvCharging" component={EvChargingScreen} />
+      <Stack.Screen name="OutageRisk" component={OutageRiskScreen} />
+      <Stack.Screen name="TariffAdvisor" component={TariffAdvisorScreen} />
+      <Stack.Screen name="Challenges" component={ChallengesScreen} />
+      <Stack.Screen name="DigestSettings" component={DigestSettingsScreen} />
+      <Stack.Screen name="Portfolio" component={PortfolioScreen} />
+      <Stack.Screen name="WorkOrders" component={WorkOrdersScreen} />
           </>
         )}
       </Stack.Navigator>

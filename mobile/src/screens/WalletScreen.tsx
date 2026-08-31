@@ -14,6 +14,7 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import { trpc } from '../services/trpc';
 import { HapticService } from '../services/hapticService';
+import { formatCentsTzs } from '../utils/payment';
 
 type TopUpMethod = 'mpesa' | 'airtel_money' | 'tigo_pesa';
 
@@ -23,8 +24,7 @@ const METHOD_LABELS: Record<TopUpMethod, string> = {
   tigo_pesa: 'Tigo Pesa',
 };
 
-const formatTzs = (cents: number | null | undefined) =>
-  cents == null ? '—' : `${(cents / 100).toFixed(0)} TZS`;
+const formatTzs = formatCentsTzs;
 
 export default function WalletScreen({ navigation }: any) {
   const [topUpModalVisible, setTopUpModalVisible] = useState(false);

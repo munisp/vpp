@@ -81,8 +81,10 @@ describe('nav model', () => {
 
   it('matches the filter on labels, keywords and paths', () => {
     const groups = getNavGroups('admin');
+    // "order" matches the market order book and field-ops work orders.
     expect(searchNavItems(groups, 'order').map(match => match.item.path)).toEqual([
       '/market/order-book',
+      '/work-orders',
     ]);
     // "noc" only appears as a keyword on the operations wall.
     expect(searchNavItems(groups, 'noc').map(match => match.item.path)).toEqual([

@@ -70,7 +70,7 @@ jobs:
           if ls test_*.py *_test.py >/dev/null 2>&1; then
             python -m pytest -v
           else
-            echo "No pytest test files in ${{ matrix.worker }}, skipping."
+            echo "::warning::NO PYTEST FILES in ${{ matrix.worker }}: this job verified compilation only, NOT behavior. Add tests or treat this green as compile-only."
           fi
 
   optimizer:
@@ -102,6 +102,34 @@ jobs:
       - name: Benchmark (reproducible, fixed seed)
         working-directory: services/optimizer
         run: python -m benchmarks.run --quick
+
+  ml-service:
+    name: ML service (compileall + pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            services/ml/requirements.txt
+            services/ml/requirements-dev.txt
+
+      - name: Install dependencies
+        working-directory: services/ml
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt pytest
+
+      - name: py_compile all sources
+        working-directory: services/ml
+        run: python -m compileall -q vppml tests
+
+      - name: pytest
+        working-directory: services/ml
+        run: python -m pytest -v
 
   gridmodel:
     name: Network feasibility (compileall + pytest)
@@ -192,12 +220,13 @@ jobs:
       - name: Install librdkafka
         run: sudo apt-get update && sudo apt-get install -y librdkafka-dev
 
-      # go.sum is intentionally not committed; resolve modules reproducibly.
-      - name: Resolve modules
+      # go.mod and go.sum are both committed. tidy is a check, not a fix:
+      # -diff fails the job if go.mod/go.sum are not already tidy.
+      - name: Verify modules (download + tidy diff-check)
         working-directory: orchestrator
         run: |
           go mod download
-          go mod tidy
+          go mod tidy -diff
 
       - name: Build
         working-directory: orchestrator
@@ -206,6 +235,34 @@ jobs:
       - name: Vet
         working-directory: orchestrator
         run: go vet ./...
+
+  go-dr-worker:
+    name: Go DR worker (build + vet + test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache: true
+          cache-dependency-path: workers/dr-worker/go.mod
+
+      - name: Resolve modules
+        working-directory: workers/dr-worker
+        run: go mod download
+
+      - name: Build
+        working-directory: workers/dr-worker
+        run: go build ./...
+
+      - name: Vet
+        working-directory: workers/dr-worker
+        run: go vet ./...
+
+      - name: Test
+        working-directory: workers/dr-worker
+        run: go test ./...
 
   go-mqtt-fluvio-bridge:
     name: Go mqtt-fluvio-bridge (build + vet)

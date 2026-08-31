@@ -25,7 +25,7 @@ services:
     restart: unless-stopped
     ports:
       - "${VPP_SERVER_PORT:-3000}:3000"
-    environment:
+    environment: &vpp-server-env
       NODE_ENV: production
       PORT: "3000"
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required (postgresql://user:pass@host:5432/db)}
@@ -87,6 +87,85 @@ services:
       - temporal
       - postgres
       - redis
+    networks:
+      - vpp-network
+
+  # ==========================================================================
+  # TypeScript Temporal workers (same image as vpp-server, worker entry point).
+  # Without these, workflows started by the API (processPayment,
+  # orchestrateDREvent, executeTrade/automatedTradingWorkflow,
+  # prepaidIssuanceWorkflow) would sit on task queues nobody consumes.
+  # ==========================================================================
+  payment-worker:
+    image: vpp/server:latest
+    restart: unless-stopped
+    command: ["tsx", "server/workflows/worker.ts"]
+    environment: *vpp-server-env
+    depends_on:
+      - temporal
+      - postgres
+      - redis
+    # Workers expose no HTTP port; verify the worker process is alive instead.
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f 'server/workflows/worker.ts' >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+    networks:
+      - vpp-network
+
+  dr-worker:
+    image: vpp/server:latest
+    restart: unless-stopped
+    command: ["tsx", "server/workflows/dr-worker.ts"]
+    environment: *vpp-server-env
+    depends_on:
+      - temporal
+      - postgres
+      - redis
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f 'server/workflows/dr-worker.ts' >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+    networks:
+      - vpp-network
+
+  trading-worker:
+    image: vpp/server:latest
+    restart: unless-stopped
+    command: ["tsx", "server/workflows/trading-worker.ts"]
+    environment: *vpp-server-env
+    depends_on:
+      - temporal
+      - postgres
+      - redis
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f 'server/workflows/trading-worker.ts' >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+    networks:
+      - vpp-network
+
+  prepaid-worker:
+    image: vpp/server:latest
+    restart: unless-stopped
+    command: ["tsx", "server/workflows/prepaid-worker.ts"]
+    environment: *vpp-server-env
+    depends_on:
+      - temporal
+      - postgres
+      - redis
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f 'server/workflows/prepaid-worker.ts' >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
     networks:
       - vpp-network
 

@@ -5,8 +5,10 @@
  */
 
 import { getDb } from './db';
-import { drForecasts, gridMonitoring, telemetry, drResponses, demandResponseEvents } from '../drizzle/schema';
-import { desc, gte, lte, and, sql } from 'drizzle-orm';
+import { assets, drForecasts, gridMonitoring, telemetry, drResponses, demandResponseEvents } from '../drizzle/schema';
+import { desc, gte, lte, and, eq, sql } from 'drizzle-orm';
+
+type Db = NonNullable<Awaited<ReturnType<typeof getDb>>>;
 
 interface ForecastInput {
   targetDate: Date;
@@ -16,13 +18,36 @@ interface ForecastInput {
 }
 
 interface ForecastResult {
-  predictedLoad: number;
-  predictedPeak: number;
-  drPotential: number;
-  confidence: number;
-  gridStatus: 'normal' | 'stressed' | 'critical';
-  recommendedAction: 'none' | 'monitor' | 'prepare_event' | 'trigger_event';
+  forecastAvailable: boolean; // false when there is no real history to forecast from
+  reason?: 'insufficient_history' | 'grid_capacity_unavailable';
+  capacityAvailable: boolean; // false when no real registered asset capacity exists
+  predictedLoad: number | null;
+  predictedPeak: number | null;
+  drPotential: number | null;
+  confidence: number | null;
+  gridStatus: 'normal' | 'stressed' | 'critical' | null;
+  recommendedAction: 'none' | 'monitor' | 'prepare_event' | 'trigger_event' | null;
   recommendedReduction?: number;
+}
+
+/**
+ * Sum real registered asset capacity, converted to kW. Returns null when
+ * no capacity is registered — grid-capacity-derived fields are then
+ * unavailable rather than computed against an assumed capacity.
+ */
+async function getRegisteredCapacityKw(db: Db): Promise<number | null> {
+  const result = await db
+    .select({
+      totalCapacityWatts: sql<number>`SUM(${assets.capacity})`,
+    })
+    .from(assets)
+    .where(eq(assets.status, 'active'));
+
+  const totalWatts = result[0]?.totalCapacityWatts;
+  if (totalWatts == null || !Number.isFinite(Number(totalWatts)) || Number(totalWatts) <= 0) {
+    return null;
+  }
+  return Number(totalWatts) / 1000; // watts -> kW
 }
 
 /**
@@ -61,14 +86,20 @@ export async function generateLoadForecast(input: ForecastInput): Promise<Foreca
   });
 
   if (relevantData.length === 0) {
-    // No historical data, use conservative estimates
+    // No historical data — NEVER fabricate a plausible forecast. Refuse loudly.
+    console.warn(
+      `[DR Forecasting] Forecast unavailable for ${input.targetDate.toISOString()} hour ${hour}: insufficient_history (no grid monitoring data for this hour/day)`
+    );
     return {
-      predictedLoad: 5000, // 5 MW default
-      predictedPeak: 6000,
-      drPotential: 500, // 500 kW
-      confidence: 30,
-      gridStatus: 'normal',
-      recommendedAction: 'none',
+      forecastAvailable: false,
+      reason: 'insufficient_history',
+      capacityAvailable: false,
+      predictedLoad: null,
+      predictedPeak: null,
+      drPotential: null,
+      confidence: null,
+      gridStatus: null,
+      recommendedAction: null,
     };
   }
 
@@ -88,34 +119,48 @@ export async function generateLoadForecast(input: ForecastInput): Promise<Foreca
   // Calculate DR potential based on historical participation
   const drPotential = await calculateDRPotential();
 
-  // Determine grid status based on predicted load vs capacity
-  const GRID_CAPACITY = 10000; // 10 MW assumed capacity
-  const loadPercentage = (predictedLoad / GRID_CAPACITY) * 100;
+  // Determine grid status based on predicted load vs REAL registered capacity.
+  // Never assume a capacity — when none is registered, capacity-derived
+  // fields (gridStatus / recommendedAction) are explicitly unavailable.
+  const registeredCapacityKw = await getRegisteredCapacityKw(db);
 
-  let gridStatus: 'normal' | 'stressed' | 'critical';
-  let recommendedAction: 'none' | 'monitor' | 'prepare_event' | 'trigger_event';
+  let gridStatus: 'normal' | 'stressed' | 'critical' | null = null;
+  let recommendedAction: 'none' | 'monitor' | 'prepare_event' | 'trigger_event' | null = null;
   let recommendedReduction: number | undefined;
+  let reason: ForecastResult['reason'];
 
-  if (loadPercentage > 90) {
-    gridStatus = 'critical';
-    recommendedAction = 'trigger_event';
-    recommendedReduction = Math.ceil((predictedLoad - GRID_CAPACITY * 0.85) / 100) * 100;
-  } else if (loadPercentage > 80) {
-    gridStatus = 'stressed';
-    recommendedAction = 'prepare_event';
-    recommendedReduction = Math.ceil((predictedLoad - GRID_CAPACITY * 0.75) / 100) * 100;
-  } else if (loadPercentage > 70) {
-    gridStatus = 'normal';
-    recommendedAction = 'monitor';
+  if (registeredCapacityKw === null) {
+    reason = 'grid_capacity_unavailable';
+    console.warn(
+      '[DR Forecasting] Grid status unavailable: no registered asset capacity; refusing to assume one'
+    );
   } else {
-    gridStatus = 'normal';
-    recommendedAction = 'none';
+    const loadPercentage = (predictedLoad / registeredCapacityKw) * 100;
+
+    if (loadPercentage > 90) {
+      gridStatus = 'critical';
+      recommendedAction = 'trigger_event';
+      recommendedReduction = Math.ceil((predictedLoad - registeredCapacityKw * 0.85) / 100) * 100;
+    } else if (loadPercentage > 80) {
+      gridStatus = 'stressed';
+      recommendedAction = 'prepare_event';
+      recommendedReduction = Math.ceil((predictedLoad - registeredCapacityKw * 0.75) / 100) * 100;
+    } else if (loadPercentage > 70) {
+      gridStatus = 'normal';
+      recommendedAction = 'monitor';
+    } else {
+      gridStatus = 'normal';
+      recommendedAction = 'none';
+    }
   }
 
   // Calculate confidence based on data availability
   const confidence = Math.min(95, 50 + (relevantData.length * 5));
 
   return {
+    forecastAvailable: true,
+    reason,
+    capacityAvailable: registeredCapacityKw !== null,
     predictedLoad: Math.round(predictedLoad),
     predictedPeak: Math.round(maxLoad * 1.1), // 10% above historical max
     drPotential: Math.round(drPotential),
@@ -157,6 +202,26 @@ export async function saveForecast(
   const db = await getDb();
   if (!db) return;
 
+  // NEVER persist a fabricated or partial forecast as if it were real.
+  // The dr_forecasts schema requires non-null predictions and its
+  // grid_status enum has no 'unavailable' value, so an unavailable
+  // forecast simply cannot be represented honestly — skip it loudly.
+  if (
+    !result.forecastAvailable ||
+    result.predictedLoad === null ||
+    result.predictedPeak === null ||
+    result.drPotential === null ||
+    result.confidence === null ||
+    result.gridStatus === null ||
+    result.recommendedAction === null
+  ) {
+    console.warn(
+      `[DR Forecasting] NOT persisting forecast for ${input.targetDate.toISOString()} hour ${input.targetHour}: ` +
+      `forecast unavailable (reason: ${result.reason ?? 'missing_fields'}) — refusing to store a fabricated forecast row`
+    );
+    return;
+  }
+
   await db.insert(drForecasts).values({
     forecastDate: input.targetDate,
     forecastHour: input.targetHour,
@@ -192,11 +257,15 @@ export async function generateDailyForecasts(): Promise<void> {
     const result = await generateLoadForecast(input);
     forecasts.push({ input, result });
 
-    // Save to database
+    // Save to database (saveForecast refuses to persist unavailable forecasts)
     await saveForecast(input, result);
   }
 
-  console.log(`Generated ${forecasts.length} forecasts for next 24 hours`);
+  const availableCount = forecasts.filter(f => f.result.forecastAvailable).length;
+  console.log(
+    `Generated ${availableCount} real forecasts for next 24 hours; ` +
+    `${forecasts.length - availableCount} hours unavailable (insufficient history) and NOT persisted`
+  );
 }
 
 /**

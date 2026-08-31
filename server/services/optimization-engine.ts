@@ -27,6 +27,7 @@ import {
   solveMilpDispatch,
 } from './milp-dispatch';
 import { requireCapability } from './degraded-operation';
+import { resolveRegionForUser } from './regions';
 import type { SqlRow } from '../sql-row';
 import { jsonSetText } from '../sql-json';
 
@@ -70,6 +71,9 @@ export interface DispatchSetpoint {
   // true when expected revenue/cost were computed from the estimated fallback
   // price curve rather than a real price forecast
   economicsEstimated?: boolean;
+  // true when expectedEmissionsSaved was computed from the assumed default
+  // carbon-intensity curve rather than a real emissions forecast
+  emissionsEstimated?: boolean;
 }
 
 export interface OptimizationResult {
@@ -119,6 +123,11 @@ interface IntervalContext {
   solarForecast?: ForecastQuantiles;
   // true when priceForecast is the hardcoded fallback curve, not real forecast data
   priceForecastEstimated?: boolean;
+  // true when emissionsForecast is the hardcoded fallback, not real forecast data.
+  // Objectives that need emissions refuse before consuming this; the flag exists
+  // so informational emissions figures are never silently trusted either.
+  emissionsForecastEstimated?: boolean;
+  emissionFactorSource?: 'forecast' | 'default';
 }
 
 /** Timestamp columns arrive as Date from pg but as a string from raw JSON rows. */
@@ -424,6 +433,7 @@ export class OptimizationEngine {
             ((context?.priceForecast.confidence ?? 0) + (context?.loadForecast.confidence ?? 0)) / 2
           ),
           economicsEstimated: context?.priceForecastEstimated === true,
+          emissionsEstimated: context?.emissionsForecastEstimated === true,
         });
       }
     }
@@ -502,16 +512,29 @@ export class OptimizationEngine {
     emissions?: ForecastResult;
     solar?: ForecastResult;
   }> {
-    const region = 'NG-LAGOS'; // Default region, should be derived from user/community
+    // Region is derived from the requesting user's real profile country —
+    // never hardcoded. When the region cannot be resolved, region-dependent
+    // forecasts (price/emissions) are omitted so downstream guards fire
+    // loudly instead of optimizing against assumed data.
+    const region = request.scope.userId
+      ? await resolveRegionForUser(request.scope.userId)
+      : null;
 
+    const canForecastLoad = !!request.scope.userId || !!region;
     const [loadForecast, priceForecast, emissionsForecast] = await Promise.all([
-      probabilisticForecasting.forecastLoad(
-        request.scope.userId ? { userId: request.scope.userId } : { region },
-        horizonHours,
-        intervalMinutes
-      ),
-      probabilisticForecasting.forecastPrice(region, horizonHours, 60),
-      probabilisticForecasting.forecastEmissions(region, horizonHours, 60),
+      canForecastLoad
+        ? probabilisticForecasting.forecastLoad(
+            request.scope.userId ? { userId: request.scope.userId } : { region: region! },
+            horizonHours,
+            intervalMinutes
+          )
+        : Promise.resolve(undefined),
+      region
+        ? probabilisticForecasting.forecastPrice(region, horizonHours, 60)
+        : Promise.resolve(undefined),
+      region
+        ? probabilisticForecasting.forecastEmissions(region, horizonHours, 60)
+        : Promise.resolve(undefined),
     ]);
 
     // Get solar forecast if user has solar assets
@@ -528,11 +551,15 @@ export class OptimizationEngine {
       }
     }
 
+    // Propagate unavailable forecasts as absent. An unavailable forecast has
+    // an empty series (never fabricated), and downstream guards key off
+    // presence — e.g. minimize_emissions refuses loudly when emissions is
+    // absent instead of optimizing against an assumed carbon intensity.
     return {
-      load: loadForecast,
-      price: priceForecast,
-      emissions: emissionsForecast,
-      solar: solarForecast,
+      load: loadForecast?.forecastAvailable ? loadForecast : undefined,
+      price: priceForecast?.forecastAvailable ? priceForecast : undefined,
+      emissions: emissionsForecast?.forecastAvailable ? emissionsForecast : undefined,
+      solar: solarForecast && solarForecast.forecastAvailable ? solarForecast : undefined,
     };
   }
 
@@ -576,6 +603,19 @@ export class OptimizationEngine {
 
     if (!forecasts.price) {
       warnings.push('No price forecast available: expected revenue/cost figures use an estimated fallback price curve with reduced confidence');
+    }
+
+    if (!forecasts.emissions) {
+      warnings.push('No emissions forecast available: expectedEmissionsSaved figures use the assumed default carbon-intensity curve and are flagged emissionsEstimated on every setpoint');
+    }
+
+    // Same refusal as the MILP path: never dispatch against the assumed
+    // 400 gCO2/kWh fallback when the objective IS emissions.
+    if (request.objective === 'minimize_emissions' && !forecasts.emissions) {
+      throw new Error(
+        'EMISSIONS_FORECAST_UNAVAILABLE: objective minimize_emissions requires a real emissions forecast; ' +
+          'refusing to optimize against an assumed carbon intensity'
+      );
     }
 
     // Track battery SoC through the schedule
@@ -644,6 +684,11 @@ export class OptimizationEngine {
     // is explicitly flagged `priceForecastEstimated: true` with heavily reduced
     // confidence so downstream revenue figures are never silently trusted.
     const priceForecastEstimated = !pricePoint;
+    // Same honesty rule as the price fallback: the static 400 gCO2/kWh curve is
+    // explicitly flagged. minimize_emissions refuses outright before this point
+    // when no real emissions forecast exists, so the fallback is only ever used
+    // for informational emissions-saved estimates.
+    const emissionsForecastEstimated = !emissionsPoint;
 
     return {
       timestamp,
@@ -652,6 +697,8 @@ export class OptimizationEngine {
       emissionsForecast: emissionsPoint?.values || { p10: 350, p50: 400, p90: 450, mean: 400, confidence: 50 },
       solarForecast: solarPoint?.values,
       priceForecastEstimated,
+      emissionsForecastEstimated,
+      emissionFactorSource: emissionsForecastEstimated ? 'default' : 'forecast',
     };
   }
 
@@ -747,6 +794,7 @@ export class OptimizationEngine {
       expectedEmissionsSaved,
       confidence: Math.round((context.priceForecast.confidence + context.loadForecast.confidence) / 2),
       economicsEstimated: context.priceForecastEstimated === true,
+      emissionsEstimated: context.emissionsForecastEstimated === true,
     };
   }
 

@@ -43,8 +43,20 @@ export interface ForecastResult {
     // false means the null metrics are simply "not yet measured"
     metricsEstimated: boolean;
   };
+  // false when history was insufficient to fit a model: points is empty and
+  // nothing was persisted or published. Consumers must check this before
+  // using points — an unavailable forecast is never fabricated.
+  forecastAvailable: boolean;
+  // why the forecast is unavailable (e.g. 'insufficient_history: ...');
+  // null when forecastAvailable is true
+  reason: string | null;
   createdAt: Date;
 }
+
+// Minimum history required to fit a seasonal model. Precedent:
+// battery-health.ts (MIN_SPAN_DAYS = 7) refuses to derive analytics from
+// thinner telemetry; forecasting follows the same floor.
+const MIN_HISTORY_SPAN_DAYS = 7;
 
 export interface HistoricalDataPoint {
   timestamp: Date;
@@ -185,6 +197,58 @@ export class ProbabilisticForecastingService {
   private modelVersion = '1.0.0';
 
   /**
+   * Returns a reason string when the history is too thin or degenerate to fit
+   * a model (null when sufficient). An unfitted model would emit all-zero
+   * quantiles that look like real forecasts, so we refuse instead.
+   */
+  private insufficientHistoryReason(data: HistoricalDataPoint[]): string | null {
+    if (data.length === 0) {
+      return 'insufficient_history: no historical data available';
+    }
+    const spanDays =
+      (data[data.length - 1].timestamp.getTime() - data[0].timestamp.getTime()) / 86400000;
+    if (spanDays < MIN_HISTORY_SPAN_DAYS) {
+      return `insufficient_history: ${spanDays.toFixed(1)} days of history; at least ${MIN_HISTORY_SPAN_DAYS} days are required`;
+    }
+    if (data.every(p => p.value === 0)) {
+      return 'insufficient_history: all historical values are zero';
+    }
+    return null;
+  }
+
+  /**
+   * Honest unavailable result: empty series, null metrics, nothing persisted
+   * to forecast_runs and nothing published to Kafka. Never presented as a
+   * completed run.
+   */
+  private unavailableForecast(
+    runId: string,
+    forecastType: string,
+    scopeType: string,
+    scopeId: number | null,
+    region: string | null,
+    horizonHours: number,
+    intervalMinutes: number,
+    reason: string
+  ): ForecastResult {
+    return {
+      runId,
+      forecastType,
+      scopeType,
+      scopeId,
+      region,
+      modelVersion: this.modelVersion,
+      horizonHours,
+      intervalMinutes,
+      points: [],
+      metrics: { mae: null, rmse: null, mape: null, metricsEstimated: false },
+      forecastAvailable: false,
+      reason,
+      createdAt: new Date(),
+    };
+  }
+
+  /**
    * Generate load forecast for an asset, user, community, or region
    */
   async forecastLoad(
@@ -201,6 +265,13 @@ export class ProbabilisticForecastingService {
 
     // Get historical data
     const historicalData = await this.getHistoricalLoad(scope, 30); // 30 days
+
+    // Refuse to fit/persist/publish a degenerate model as a completed run
+    const insufficient = this.insufficientHistoryReason(historicalData);
+    if (insufficient) {
+      console.warn(`[Forecasting] Load forecast unavailable for ${scopeType}=${scopeId || scope.region}: ${insufficient}`);
+      return this.unavailableForecast(runId, 'load', scopeType, scopeId, scope.region || null, horizonHours, intervalMinutes, insufficient);
+    }
 
     // Train model
     const model = new SeasonalModel();
@@ -239,6 +310,8 @@ export class ProbabilisticForecastingService {
       intervalMinutes,
       points,
       metrics,
+      forecastAvailable: true,
+      reason: null,
       createdAt: now,
     };
   }
@@ -260,6 +333,13 @@ export class ProbabilisticForecastingService {
 
     // Get historical generation data
     const historicalData = await this.getHistoricalGeneration(scope, 30, 'solar');
+
+    // Refuse to persist a degenerate (e.g. all-zero) model as a completed run
+    const insufficient = this.insufficientHistoryReason(historicalData);
+    if (insufficient) {
+      console.warn(`[Forecasting] Solar forecast unavailable for ${scopeType}=${scopeId || scope.region}: ${insufficient}`);
+      return this.unavailableForecast(runId, 'solar_generation', scopeType, scopeId, scope.region || null, horizonHours, intervalMinutes, insufficient);
+    }
 
     // Train model with solar-specific patterns
     const model = new SeasonalModel();
@@ -313,6 +393,8 @@ export class ProbabilisticForecastingService {
       intervalMinutes,
       points,
       metrics,
+      forecastAvailable: true,
+      reason: null,
       createdAt: now,
     };
   }
@@ -332,6 +414,13 @@ export class ProbabilisticForecastingService {
 
     // Get historical price data
     const historicalData = await this.getHistoricalPrices(region, 30);
+
+    // Refuse to persist a degenerate (e.g. all-zero) model as a completed run
+    const insufficient = this.insufficientHistoryReason(historicalData);
+    if (insufficient) {
+      console.warn(`[Forecasting] Price forecast unavailable for ${region}: ${insufficient}`);
+      return this.unavailableForecast(runId, 'price', 'region', null, region, horizonHours, intervalMinutes, insufficient);
+    }
 
     // Train model
     const model = new SeasonalModel();
@@ -377,6 +466,8 @@ export class ProbabilisticForecastingService {
       intervalMinutes,
       points,
       metrics,
+      forecastAvailable: true,
+      reason: null,
       createdAt: now,
     };
   }
@@ -397,9 +488,13 @@ export class ProbabilisticForecastingService {
     // Get historical emissions data
     const historicalData = await this.getHistoricalEmissions(region, 30);
 
-    // If no historical data, use default patterns
-    if (historicalData.length === 0) {
-      return this.generateDefaultEmissionsForecast(runId, region, horizonHours, intervalMinutes);
+    // No fabricated default curve: with insufficient history the forecast is
+    // explicitly unavailable (empty series, not persisted, not published)
+    // rather than an invented 380/450 gCO2/kWh pattern stored as a completed run.
+    const insufficient = this.insufficientHistoryReason(historicalData);
+    if (insufficient) {
+      console.warn(`[Forecasting] Emissions forecast unavailable for ${region}: ${insufficient}`);
+      return this.unavailableForecast(runId, 'emissions', 'region', null, region, horizonHours, intervalMinutes, insufficient);
     }
 
     // Train model
@@ -433,6 +528,8 @@ export class ProbabilisticForecastingService {
       intervalMinutes,
       points,
       metrics,
+      forecastAvailable: true,
+      reason: null,
       createdAt: now,
     };
   }
@@ -483,6 +580,10 @@ export class ProbabilisticForecastingService {
         // Persisted values only exist after a real backtest wrote them
         metricsEstimated: run.mae_value != null || run.rmse_value != null || run.mape_value != null,
       },
+      // Only completed, data-derived runs are ever persisted (insufficient-data
+      // forecasts are not stored), so a retrievable run is always available.
+      forecastAvailable: true,
+      reason: null,
       createdAt: run.created_at,
     };
   }
@@ -614,68 +715,6 @@ export class ProbabilisticForecastingService {
   }
 
   /**
-   * Generate default emissions forecast when no historical data
-   */
-  private generateDefaultEmissionsForecast(
-    runId: string,
-    region: string,
-    horizonHours: number,
-    intervalMinutes: number
-  ): ForecastResult {
-    const points: ForecastPoint[] = [];
-    const now = new Date();
-    const intervalsCount = (horizonHours * 60) / intervalMinutes;
-
-    // Default emissions pattern (grams CO2 per kWh)
-    // Higher during peak hours when less efficient plants are used
-    const baseEmissions = region.startsWith('NG') ? 450 : 380; // Nigeria vs Tanzania
-
-    for (let i = 0; i < intervalsCount; i++) {
-      const timestamp = new Date(now.getTime() + i * intervalMinutes * 60 * 1000);
-      const hour = timestamp.getHours();
-      
-      let emissionsFactor = 1.0;
-      if (hour >= 18 && hour <= 22) {
-        emissionsFactor = 1.3; // Peak evening
-      } else if (hour >= 6 && hour <= 9) {
-        emissionsFactor = 1.15; // Morning peak
-      } else if (hour >= 11 && hour <= 15) {
-        emissionsFactor = 0.85; // Solar peak (lower emissions)
-      } else if (hour >= 0 && hour <= 5) {
-        emissionsFactor = 0.9; // Night (baseload)
-      }
-
-      const value = baseEmissions * emissionsFactor;
-      const uncertainty = value * 0.15; // 15% uncertainty
-
-      points.push({
-        timestamp,
-        values: {
-          p10: value - uncertainty,
-          p50: value,
-          p90: value + uncertainty,
-          mean: value,
-          confidence: 60, // Lower confidence for default forecast
-        },
-      });
-    }
-
-    return {
-      runId,
-      forecastType: 'emissions',
-      scopeType: 'region',
-      scopeId: null,
-      region,
-      modelVersion: this.modelVersion,
-      horizonHours,
-      intervalMinutes,
-      points,
-      metrics: { mae: null, rmse: null, mape: null, metricsEstimated: false },
-      createdAt: now,
-    };
-  }
-
-  /**
    * Calculate forecast accuracy metrics
    */
   private async calculateMetrics(
@@ -695,7 +734,13 @@ export class ProbabilisticForecastingService {
   }
 
   /**
-   * Store forecast run and values
+   * Store forecast run and values.
+   *
+   * Only data-derived runs are persisted, always as status='completed'.
+   * Insufficient-data forecasts are NOT stored: the forecast_runs_status enum
+   * ('running' | 'completed' | 'failed') has no 'insufficient_data' value, and
+   * persisting them under any existing status would make a fabricated/empty
+   * run indistinguishable from a real one.
    */
   private async storeForecastRun(
     runId: string,

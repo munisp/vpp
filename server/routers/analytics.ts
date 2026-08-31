@@ -24,7 +24,11 @@ export const analyticsRouter = router({
     }),
 
   /**
-   * Get energy flow data
+   * Get energy flow data, scoped to the requesting user's assets.
+   *
+   * analytics.getEnergyFlowData now joins assets and filters by
+   * assets.userId, so this is safe for any authenticated user — they only
+   * ever see their own telemetry.
    */
   getEnergyFlow: protectedProcedure
     .input(DateRangeSchema)

@@ -13,6 +13,7 @@ import {
 import { getDb } from '../../db';
 import { assets } from '../../../drizzle/schema';
 import { communityMembers } from '../../../drizzle/nextgen-vpp-schema';
+import { resolveRegionForUser } from '../../services/regions';
 
 /**
  * Accuracy for an asset is only visible to its owner: a competitor could infer
@@ -111,22 +112,38 @@ export const forecastingRouter = router({
 
   forecastPrice: protectedProcedure
     .input(z.object({
-      region: z.string().default('NG-LAGOS'),
+      // No hardcoded default region: falls back to the requesting user's real
+      // profile country; refuses loudly when no region can be resolved.
+      region: z.string().optional(),
       horizonHours: z.number().default(24),
       intervalMinutes: z.number().default(60),
     }))
-    .mutation(async ({ input }) => {
-      return probabilisticForecasting.forecastPrice(input.region, input.horizonHours, input.intervalMinutes);
+    .mutation(async ({ input, ctx }) => {
+      const region = input.region ?? (await resolveRegionForUser(ctx.user.id));
+      if (!region) {
+        throw new TRPCError({
+          code: 'PRECONDITION_FAILED',
+          message: 'no_region: cannot determine a forecast region — set your profile country or pass an explicit region',
+        });
+      }
+      return probabilisticForecasting.forecastPrice(region, input.horizonHours, input.intervalMinutes);
     }),
 
   forecastEmissions: protectedProcedure
     .input(z.object({
-      region: z.string().default('NG-LAGOS'),
+      region: z.string().optional(),
       horizonHours: z.number().default(24),
       intervalMinutes: z.number().default(60),
     }))
-    .mutation(async ({ input }) => {
-      return probabilisticForecasting.forecastEmissions(input.region, input.horizonHours, input.intervalMinutes);
+    .mutation(async ({ input, ctx }) => {
+      const region = input.region ?? (await resolveRegionForUser(ctx.user.id));
+      if (!region) {
+        throw new TRPCError({
+          code: 'PRECONDITION_FAILED',
+          message: 'no_region: cannot determine a forecast region — set your profile country or pass an explicit region',
+        });
+      }
+      return probabilisticForecasting.forecastEmissions(region, input.horizonHours, input.intervalMinutes);
     }),
 
   getForecast: protectedProcedure

@@ -10,6 +10,7 @@ import {
   Alert,
 } from 'react-native';
 import { trpc } from '../services/trpc';
+import { validatePaymentForm } from '../utils/payment';
 import ShareButton from '../components/ShareButton';
 import { ShareService } from '../services/shareService';
 import { HapticService } from '../services/hapticService';
@@ -71,28 +72,18 @@ export default function PaymentsScreen({ navigation }: any) {
   });
 
   const handleInitiatePayment = async () => {
-    if (!phoneNumber || !amount) {
-      await HapticService.validationError();
-      Alert.alert('Error', 'Please enter phone number and amount');
-      return;
-    }
-
-    const amountTzs = parseInt(amount, 10);
-    if (isNaN(amountTzs) || amountTzs <= 0) {
-      Alert.alert('Error', 'Please enter a valid amount');
-      return;
-    }
-
-    // Server schema requires energyKwh as a positive integer (kWh) for
-    // token purchases.
-    let energyKwhInt: number | undefined;
-    if (paymentType === 'token_purchase') {
-      const parsedKwh = parseInt(energyKwh, 10);
-      if (isNaN(parsedKwh) || parsedKwh <= 0) {
-        Alert.alert('Error', 'Please enter a valid energy amount (kWh)');
-        return;
+    const validation = validatePaymentForm({
+      phoneNumber,
+      amount,
+      paymentType,
+      energyKwh,
+    });
+    if (!validation.ok) {
+      if (validation.reason === 'missing_fields') {
+        await HapticService.validationError();
       }
-      energyKwhInt = parsedKwh;
+      Alert.alert('Error', validation.message);
+      return;
     }
 
     await HapticService.buttonPress();
@@ -101,11 +92,11 @@ export default function PaymentsScreen({ navigation }: any) {
     // integer number of kWh, only for token purchases.
     initiatePaymentMutation.mutate({
       paymentType,
-      amount: amountTzs * 100, // TZS -> cents
+      amount: validation.amountCents,
       paymentMethod: selectedGateway,
       phoneNumber,
       ...(paymentType === 'token_purchase'
-        ? { energyKwh: energyKwhInt }
+        ? { energyKwh: validation.energyKwhInt }
         : {}),
     });
   };

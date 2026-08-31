@@ -9,11 +9,10 @@ WORKDIR /app
 # system librdkafka.
 RUN apk add --no-cache build-base librdkafka-dev git
 
-# go.sum is intentionally not committed: resolve and pin modules in the
-# build stage so the build remains reproducible.
-COPY go.mod ./
-RUN go mod download \
-  && go mod tidy
+# go.mod and go.sum are both committed; download verifies against the
+# pinned go.sum checksums so the build is reproducible.
+COPY go.mod go.sum ./
+RUN go mod download
 
 # Copy sources and build
 COPY . .

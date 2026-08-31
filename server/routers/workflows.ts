@@ -2,6 +2,18 @@ import { z } from 'zod';
 import { adminProcedure, router } from '../_core/trpc';
 import { temporalQueryService } from '../integration/temporal-query';
 
+// Workflow types the server actually starts (server/integration/temporal-client.ts,
+// server/services/prepaid-issuance-entry.ts, and the trading-execution worker).
+// Temporal's `WorkflowType = '...'` visibility filter matches the registered type
+// name exactly, so these must be the runtime names, not class-style aliases.
+const WORKFLOW_TYPES = [
+  'processPayment',
+  'orchestrateDREvent',
+  'executeTrade',
+  'automatedTradingWorkflow',
+  'prepaidIssuanceWorkflow',
+] as const;
+
 export const workflowsRouter = router({
   /**
    * List workflows with filters
@@ -9,7 +21,7 @@ export const workflowsRouter = router({
   list: adminProcedure
     .input(
       z.object({
-        workflowType: z.enum(['DREventWorkflow', 'AutomatedTradingWorkflow', 'P2PTradingWorkflow', 'PaymentProcessingWorkflow']).optional(),
+        workflowType: z.enum(WORKFLOW_TYPES).optional(),
         status: z.enum(['running', 'completed', 'failed', 'cancelled', 'terminated']).optional(),
         limit: z.number().min(1).max(100).optional(),
         offset: z.number().min(0).optional(),
@@ -42,7 +54,7 @@ export const workflowsRouter = router({
    */
   getStats: adminProcedure
     .input(z.object({
-      workflowType: z.enum(['DREventWorkflow', 'AutomatedTradingWorkflow', 'P2PTradingWorkflow', 'PaymentProcessingWorkflow']).optional(),
+      workflowType: z.enum(WORKFLOW_TYPES).optional(),
     }).optional())
     .query(async ({ input }) => {
       const stats = await temporalQueryService.getWorkflowStats(input?.workflowType);

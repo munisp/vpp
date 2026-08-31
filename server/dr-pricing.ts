@@ -10,29 +10,38 @@
  */
 
 import { getDb } from './db';
-import { gridMonitoring, drParticipants, drResponses, marketPrices } from '../drizzle/schema';
+import { assets, gridMonitoring, drParticipants, drResponses, marketPrices } from '../drizzle/schema';
 import { desc, gte, sql, eq } from 'drizzle-orm';
 
+type Db = NonNullable<Awaited<ReturnType<typeof getDb>>>;
+
 interface PricingFactors {
-  gridStress: number; // 0-100
-  participantAvailability: number; // 0-100
-  marketPrice: number; // cents per kWh
-  timeOfDay: 'peak' | 'off-peak' | 'shoulder';
-  urgency: 'low' | 'medium' | 'high' | 'critical';
-  historicalPerformance: number; // 0-100
+  gridStress: number | null; // 0-100, null when no real grid data/capacity
+  gridStressAvailable: boolean;
+  participantAvailability: number | null; // 0-100, null when unavailable
+  availabilityAvailable: boolean;
+  marketPrice: number | null; // cents per kWh, null when no real price row
+  priceAvailable: boolean;
+  timeOfDay: 'peak' | 'off-peak' | 'shoulder'; // derived from clock — always real
+  urgency: 'low' | 'medium' | 'high' | 'critical' | null; // null without grid data
+  urgencyAvailable: boolean;
+  historicalPerformance: number | null; // 0-100, null without response history
+  performanceAvailable: boolean;
 }
 
 interface PricingResult {
-  baseRate: number; // cents per kWh
-  adjustedRate: number; // cents per kWh
-  multiplier: number;
+  pricingAvailable: boolean; // false when any input factor is unavailable — no fabricated price
+  unavailableFactors: string[]; // named reasons for refusal
+  baseRate: number; // cents per kWh (policy constant, always known)
+  adjustedRate: number | null; // cents per kWh, null when pricingAvailable=false
+  multiplier: number | null; // null when pricingAvailable=false
   factors: {
-    gridStressMultiplier: number;
-    availabilityMultiplier: number;
-    marketMultiplier: number;
+    gridStressMultiplier: number | null;
+    availabilityMultiplier: number | null;
+    marketMultiplier: number | null;
     timeMultiplier: number;
-    urgencyMultiplier: number;
-    performanceBonus: number;
+    urgencyMultiplier: number | null;
+    performanceBonus: number | null;
   };
   explanation: string;
 }
@@ -58,22 +67,62 @@ export async function calculateDynamicPrice(
   const factors = await collectPricingFactors(startTime);
   const baseRate = BASE_RATES[eventType];
 
-  // Calculate multipliers
-  const gridStressMultiplier = calculateGridStressMultiplier(factors.gridStress);
-  const availabilityMultiplier = calculateAvailabilityMultiplier(factors.participantAvailability);
-  const marketMultiplier = calculateMarketMultiplier(factors.marketPrice);
+  // Calculate multipliers only from factors backed by real data
+  const gridStressMultiplier = factors.gridStressAvailable && factors.gridStress !== null
+    ? calculateGridStressMultiplier(factors.gridStress)
+    : null;
+  const availabilityMultiplier = factors.availabilityAvailable && factors.participantAvailability !== null
+    ? calculateAvailabilityMultiplier(factors.participantAvailability)
+    : null;
+  const marketMultiplier = factors.priceAvailable && factors.marketPrice !== null
+    ? calculateMarketMultiplier(factors.marketPrice)
+    : null;
   const timeMultiplier = calculateTimeMultiplier(factors.timeOfDay);
-  const urgencyMultiplier = calculateUrgencyMultiplier(factors.urgency);
-  const performanceBonus = calculatePerformanceBonus(factors.historicalPerformance);
+  const urgencyMultiplier = factors.urgencyAvailable && factors.urgency !== null
+    ? calculateUrgencyMultiplier(factors.urgency)
+    : null;
+  const performanceBonus = factors.performanceAvailable && factors.historicalPerformance !== null
+    ? calculatePerformanceBonus(factors.historicalPerformance)
+    : null;
 
-  // Calculate total multiplier
+  // Never produce a plausible-looking price from missing inputs — refuse loudly.
+  const unavailableFactors: string[] = [];
+  if (gridStressMultiplier === null) unavailableFactors.push('grid_stress_unavailable');
+  if (availabilityMultiplier === null) unavailableFactors.push('participant_availability_unavailable');
+  if (marketMultiplier === null) unavailableFactors.push('no_market_price');
+  if (urgencyMultiplier === null) unavailableFactors.push('grid_urgency_unavailable');
+  if (performanceBonus === null) unavailableFactors.push('no_performance_history');
+
+  const pricingAvailable = unavailableFactors.length === 0;
+
+  if (!pricingAvailable) {
+    return {
+      pricingAvailable: false,
+      unavailableFactors,
+      baseRate,
+      adjustedRate: null,
+      multiplier: null,
+      factors: {
+        gridStressMultiplier,
+        availabilityMultiplier,
+        marketMultiplier,
+        timeMultiplier,
+        urgencyMultiplier,
+        performanceBonus,
+      },
+      explanation:
+        `Pricing UNAVAILABLE — refusing to fabricate a rate. Missing real inputs: ${unavailableFactors.join(', ')}.`,
+    };
+  }
+
+  // Calculate total multiplier (all factors verified available above)
   const multiplier =
-    gridStressMultiplier *
-    availabilityMultiplier *
-    marketMultiplier *
+    gridStressMultiplier! *
+    availabilityMultiplier! *
+    marketMultiplier! *
     timeMultiplier *
-    urgencyMultiplier +
-    performanceBonus;
+    urgencyMultiplier! +
+    performanceBonus!;
 
   const adjustedRate = Math.round(baseRate * multiplier);
 
@@ -92,6 +141,8 @@ export async function calculateDynamicPrice(
   );
 
   return {
+    pricingAvailable: true,
+    unavailableFactors: [],
     baseRate,
     adjustedRate,
     multiplier,
@@ -113,15 +164,8 @@ export async function calculateDynamicPrice(
 async function collectPricingFactors(startTime: Date): Promise<PricingFactors> {
   const db = await getDb();
   if (!db) {
-    // Return default factors if DB unavailable
-    return {
-      gridStress: 50,
-      participantAvailability: 70,
-      marketPrice: 500,
-      timeOfDay: 'shoulder',
-      urgency: 'medium',
-      historicalPerformance: 80,
-    };
+    // Never fabricate a plausible factor set when the DB is down — fail loudly.
+    throw new Error('Database not available: cannot collect real pricing factors');
   }
 
   // Get latest grid status
@@ -132,13 +176,18 @@ async function collectPricingFactors(startTime: Date): Promise<PricingFactors> {
     .limit(1);
 
   const gridData = latestGrid[0];
-  const gridStress = gridData ? calculateGridStress(gridData) : 50;
+
+  // Real registered capacity (kW) from the assets table — no assumed capacity
+  const registeredCapacityKw = await getRegisteredCapacityKw(db);
+  const gridStress = gridData && registeredCapacityKw !== null
+    ? calculateGridStress(gridData, registeredCapacityKw)
+    : null;
 
   // Get participant availability
-  const participantAvailability = await calculateParticipantAvailability();
+  const participantAvailability = await calculateParticipantAvailability(db);
 
-  // Get market price
-  const marketPrice = await getMarketPrice(startTime);
+  // Get market price (null when no real price row exists)
+  const marketPrice = await getMarketPrice(db, startTime);
 
   // Determine time of day
   const timeOfDay = getTimeOfDay(startTime);
@@ -147,25 +196,50 @@ async function collectPricingFactors(startTime: Date): Promise<PricingFactors> {
   const urgency = calculateUrgency(gridData);
 
   // Get historical performance
-  const historicalPerformance = await getHistoricalPerformance();
+  const historicalPerformance = await getHistoricalPerformance(db);
 
   return {
     gridStress,
+    gridStressAvailable: gridStress !== null,
     participantAvailability,
+    availabilityAvailable: participantAvailability !== null,
     marketPrice,
+    priceAvailable: marketPrice !== null,
     timeOfDay,
     urgency,
+    urgencyAvailable: urgency !== null,
     historicalPerformance,
+    performanceAvailable: historicalPerformance !== null,
   };
 }
 
 /**
- * Calculate grid stress level (0-100)
+ * Sum real registered asset capacity, converted to kW.
+ * Returns null when no capacity is registered — capacity is then unavailable.
  */
-function calculateGridStress(gridData: any): number {
-  if (!gridData) return 50;
+async function getRegisteredCapacityKw(db: Db): Promise<number | null> {
+  const result = await db
+    .select({
+      totalCapacityWatts: sql<number>`SUM(${assets.capacity})`,
+    })
+    .from(assets)
+    .where(eq(assets.status, 'active'));
 
-  const loadPercentage = (gridData.totalLoad / 10000) * 100; // Assuming 10MW capacity
+  const totalWatts = result[0]?.totalCapacityWatts;
+  if (totalWatts == null || !Number.isFinite(Number(totalWatts)) || Number(totalWatts) <= 0) {
+    return null;
+  }
+  return Number(totalWatts) / 1000; // watts -> kW
+}
+
+/**
+ * Calculate grid stress level (0-100) from real grid data and real
+ * registered capacity. Returns null when either is unavailable.
+ */
+function calculateGridStress(gridData: any, registeredCapacityKw: number): number | null {
+  if (!gridData || registeredCapacityKw <= 0) return null;
+
+  const loadPercentage = (gridData.totalLoad / registeredCapacityKw) * 100;
   const frequencyDeviation = Math.abs(gridData.frequency - 5000) / 50; // Deviation from 50Hz
 
   // Combine factors
@@ -174,12 +248,9 @@ function calculateGridStress(gridData: any): number {
 }
 
 /**
- * Calculate participant availability (0-100)
+ * Calculate participant availability (0-100) from real enrollment rows
  */
-async function calculateParticipantAvailability(): Promise<number> {
-  const db = await getDb();
-  if (!db) return 70;
-
+async function calculateParticipantAvailability(db: Db): Promise<number | null> {
   const result = await db
     .select({
       total: sql<number>`COUNT(*)`,
@@ -187,19 +258,20 @@ async function calculateParticipantAvailability(): Promise<number> {
     })
     .from(drParticipants);
 
-  const { total, active } = result[0] || { total: 0, active: 0 };
-  
-  if (total === 0) return 0;
+  if (!result[0]) return null;
+
+  const total = Number(result[0].total) || 0;
+  const active = Number(result[0].active) || 0;
+
+  if (total === 0) return 0; // Real fact: zero participants registered
   return Math.round((active / total) * 100);
 }
 
 /**
- * Get current market price
+ * Get current market price. Returns null when no real price row exists —
+ * we never fall back to an invented price.
  */
-async function getMarketPrice(time: Date): Promise<number> {
-  const db = await getDb();
-  if (!db) return 500; // Default 5 TZS per kWh
-
+async function getMarketPrice(db: Db, time: Date): Promise<number | null> {
   const result = await db
     .select()
     .from(marketPrices)
@@ -207,7 +279,7 @@ async function getMarketPrice(time: Date): Promise<number> {
     .orderBy(marketPrices.timestamp)
     .limit(1);
 
-  return result[0]?.price || 500;
+  return result[0]?.price ?? null;
 }
 
 /**
@@ -228,8 +300,8 @@ function getTimeOfDay(time: Date): 'peak' | 'off-peak' | 'shoulder' {
 /**
  * Calculate urgency level
  */
-function calculateUrgency(gridData: any): 'low' | 'medium' | 'high' | 'critical' {
-  if (!gridData) return 'medium';
+function calculateUrgency(gridData: any): 'low' | 'medium' | 'high' | 'critical' | null {
+  if (!gridData) return null; // No real grid data → urgency unavailable
 
   if (gridData.gridStatus === 'emergency') return 'critical';
   if (gridData.gridStatus === 'critical') return 'high';
@@ -240,10 +312,7 @@ function calculateUrgency(gridData: any): 'low' | 'medium' | 'high' | 'critical'
 /**
  * Get historical performance score
  */
-async function getHistoricalPerformance(): Promise<number> {
-  const db = await getDb();
-  if (!db) return 80;
-
+async function getHistoricalPerformance(db: Db): Promise<number | null> {
   // Calculate average performance from past DR events
   const result = await db
     .select({
@@ -258,7 +327,11 @@ async function getHistoricalPerformance(): Promise<number> {
     .from(drResponses)
     .where(gte(drResponses.responseTime, sql`(NOW() - INTERVAL '30 day')`));
 
-  return Math.round(result[0]?.avgPerformance || 80);
+  // AVG() returns null when there are no response rows — no real history
+  // means performance is unavailable, not an invented 80.
+  const avg = result[0]?.avgPerformance;
+  if (avg == null || !Number.isFinite(Number(avg))) return null;
+  return Math.round(Number(avg));
 }
 
 /**
@@ -373,19 +446,36 @@ export async function getPricingRecommendation(
   targetReduction: number,
   startTime: Date
 ): Promise<{
+  pricingAvailable: boolean;
+  unavailableFactors: string[];
   recommended: PricingResult;
-  minimum: number;
-  maximum: number;
-  optimal: number;
+  minimum: number | null;
+  maximum: number | null;
+  optimal: number | null;
 }> {
   const recommended = await calculateDynamicPrice(eventType, targetReduction, startTime);
-  
+
+  // Never quote a price range when the recommended price is fabricated-free
+  // refusal — propagate the unavailable state instead.
+  if (!recommended.pricingAvailable || recommended.adjustedRate === null) {
+    return {
+      pricingAvailable: false,
+      unavailableFactors: recommended.unavailableFactors,
+      recommended,
+      minimum: null,
+      maximum: null,
+      optimal: null,
+    };
+  }
+
   // Calculate range
   const minimum = Math.round(recommended.baseRate * 0.8);
   const maximum = Math.round(recommended.baseRate * 2.5);
   const optimal = recommended.adjustedRate;
-  
+
   return {
+    pricingAvailable: true,
+    unavailableFactors: [],
     recommended,
     minimum,
     maximum,

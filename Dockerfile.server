@@ -10,11 +10,9 @@ RUN corepack enable
 
 # Install all dependencies (incl. devDeps needed for the build).
 # patches/ is required by pnpm.patchedDependencies.
-# NOTE: --no-frozen-lockfile until pnpm-lock.yaml is regenerated to include
-# helmet and express-rate-limit (run: pnpm install --lockfile-only).
 COPY package.json pnpm-lock.yaml ./
 COPY patches ./patches
-RUN pnpm install --no-frozen-lockfile
+RUN pnpm install --frozen-lockfile
 
 # Copy sources and build the client bundle and the server bundle (dist/)
 COPY . .
@@ -31,11 +29,21 @@ RUN apk add --no-cache dumb-init \
 # Production dependencies only (bundle is built with --packages=external)
 COPY package.json pnpm-lock.yaml ./
 COPY patches ./patches
-RUN pnpm install --prod --no-frozen-lockfile \
+RUN pnpm install --prod --frozen-lockfile \
   && pnpm store prune
 
 # Built artifacts: dist/index.js (server) and dist/public (static client)
 COPY --from=builder /app/dist ./dist
+
+# The Temporal workers (server/workflows/{worker,dr-worker,trading-worker,prepaid-worker}.ts)
+# are TypeScript entry points that run from source: they require.resolve() their
+# workflow files, so the esbuild bundle cannot serve them. Ship the sources plus
+# tsx (exact version from the committed lockfile) for the worker containers.
+RUN npm install --global tsx@4.20.6
+COPY server ./server
+COPY shared ./shared
+COPY drizzle ./drizzle
+COPY tsconfig.json ./
 
 ENV NODE_ENV=production \
     PORT=3000

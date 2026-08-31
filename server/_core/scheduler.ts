@@ -14,6 +14,7 @@ import * as analyticsDb from '../analytics';
 import { checkPriceAlerts } from '../services/price-alert-engine';
 import { energyWallet } from '../services/energy-wallet';
 import { scoreDueForecastRuns } from '../services/forecast-accuracy';
+import { runWeeklyDigests } from '../services/innov3-digest';
 
 /**
  * Initialize scheduled report jobs
@@ -68,6 +69,18 @@ export function initScheduledReports() {
       }
     } catch (err) {
       console.error('[Scheduler] Wallet top-up reconciliation failed:', err);
+    }
+  });
+
+  // Weekly digest - Mondays 00:05 UTC. Compiles each subscriber's real weekly
+  // stats and dispatches via email/SMS; per-recipient failures are recorded,
+  // never marked sent. Idempotent per ISO week.
+  cron.schedule('5 0 * * 1', async () => {
+    try {
+      const result = await runWeeklyDigests();
+      console.log('[Scheduler] Weekly digest run complete:', JSON.stringify(result));
+    } catch (err) {
+      console.error('[Scheduler] Weekly digest run failed:', err);
     }
   });
 

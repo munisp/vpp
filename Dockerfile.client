@@ -7,11 +7,9 @@ WORKDIR /app
 
 RUN corepack enable
 
-# NOTE: --no-frozen-lockfile until pnpm-lock.yaml is regenerated to include
-# helmet and express-rate-limit (run: pnpm install --lockfile-only).
 COPY package.json pnpm-lock.yaml ./
 COPY patches ./patches
-RUN pnpm install --no-frozen-lockfile
+RUN pnpm install --frozen-lockfile
 
 # Vite config + client sources; outputs static files to dist/public
 COPY . .

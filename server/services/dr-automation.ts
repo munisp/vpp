@@ -8,8 +8,40 @@
 import { getDb } from '../db';
 import { demandResponseEvents, drParticipants, drResponses, users, assets } from '../../drizzle/schema';
 import { eq, and, gte, lte, sql, desc } from 'drizzle-orm';
+import { TRPCError } from '@trpc/server';
 import { redisCache } from './redis-cache';
 import { webhookNotificationService } from './webhook-notifications';
+
+type Db = NonNullable<Awaited<ReturnType<typeof getDb>>>;
+
+/**
+ * Compute a participant's reliability score (0-100) from their real DR
+ * response history. Returns scoreAvailable:false when the participant has
+ * no recorded history — we never invent a track record.
+ */
+async function computeReliabilityScore(
+  db: Db,
+  userId: number
+): Promise<{ score: number | null; scoreAvailable: boolean }> {
+  const responses = await db
+    .select()
+    .from(drResponses)
+    .where(eq(drResponses.userId, userId))
+    .orderBy(desc(drResponses.responseTime))
+    .limit(10);
+
+  if (responses.length === 0) {
+    return { score: null, scoreAvailable: false };
+  }
+
+  const successfulResponses = responses.filter(
+    r => (r.actualReduction || 0) >= (r.targetReduction || 0) * 0.8
+  );
+  return {
+    score: (successfulResponses.length / responses.length) * 100,
+    scoreAvailable: true,
+  };
+}
 
 export interface GridStressConditions {
   loadLevel: number; // Percentage of grid capacity (0-100)
@@ -262,13 +294,21 @@ class DRAutomationService {
     const participants = await query;
 
     // Filter based on criteria
-    const eligible = participants.filter(p => {
-      // Check reliability score
+    const eligible: typeof participants = [];
+    for (const p of participants) {
+      // Check reliability score from REAL response history. When the rule
+      // requires a minimum score and the participant has no history, the
+      // score is unavailable and we refuse to auto-enroll on an
+      // unverifiable criterion — we never assume a default score.
+      let score: number | null = null;
+      let scoreAvailable = false;
+      if (participantCriteria.minReliabilityScore || (participantCriteria.segments && participantCriteria.segments.length > 0)) {
+        ({ score, scoreAvailable } = await computeReliabilityScore(db, p.userId));
+      }
+
       if (participantCriteria.minReliabilityScore) {
-        // Calculate reliability from response history
-        const score = 70; // Default score, calculate from response history
-        if (score < participantCriteria.minReliabilityScore) {
-          return false;
+        if (!scoreAvailable || score === null || score < participantCriteria.minReliabilityScore) {
+          continue;
         }
       }
 
@@ -276,20 +316,25 @@ class DRAutomationService {
       if (participantCriteria.minCapacity) {
         const capacity = p.capacity || 0;
         if (capacity < participantCriteria.minCapacity) {
-          return false;
+          continue;
         }
       }
 
-      // Check segment
+      // Check segment — derived from the real reliability score. Without
+      // history the participant is 'unverified' and cannot match a segment.
       if (participantCriteria.segments && participantCriteria.segments.length > 0) {
-        const segment = 'reliable'; // Default segment
+        const segment = !scoreAvailable || score === null
+          ? 'unverified'
+          : score >= 80
+            ? 'high_performer'
+            : 'reliable';
         if (!participantCriteria.segments.includes(segment)) {
-          return false;
+          continue;
         }
       }
 
-      return true;
-    });
+      eligible.push(p);
+    }
 
     // Enroll eligible participants
     const enrollments = eligible.map(p => ({
@@ -316,6 +361,9 @@ class DRAutomationService {
     baseCompensation: number;
     performanceBonus: number;
     totalCompensation: number;
+    compensationRate: number;
+    reliabilityScore: number | null;
+    scoreAvailable: boolean;
   }> {
     const db = await getDb();
     if (!db) {
@@ -334,34 +382,34 @@ class DRAutomationService {
     }
 
     const eventData = event[0];
-    const compensationRate = eventData.compensationRate || 100;
 
-    // Calculate participant reliability from response history
-    const responses = await db
-      .select()
-      .from(drResponses)
-      .where(eq(drResponses.userId, userId))
-      .orderBy(desc(drResponses.responseTime))
-      .limit(10);
-
-    // Calculate reliability score from recent responses
-    let reliabilityScore = 50; // Default
-    if (responses.length > 0) {
-      const successfulResponses = responses.filter(r => (r.actualReduction || 0) >= (r.targetReduction || 0) * 0.8);
-      reliabilityScore = (successfulResponses.length / responses.length) * 100;
+    // Compensation rate is REQUIRED — never invent a money rate.
+    if (eventData.compensationRate == null || !Number.isFinite(eventData.compensationRate) || eventData.compensationRate <= 0) {
+      throw new TRPCError({
+        code: 'PRECONDITION_FAILED',
+        message: `no_compensation_rate: DR event ${eventId} has no real compensation rate; refusing to calculate compensation from a fabricated rate`,
+      });
     }
+    const compensationRate = eventData.compensationRate;
+
+    // Calculate participant reliability from real response history.
+    // No history → scoreAvailable:false, and no performance bonus is paid
+    // based on a track record we cannot verify.
+    const { score: reliabilityScore, scoreAvailable } = await computeReliabilityScore(db, userId);
 
     // Calculate base compensation
     const baseCompensation = actualReduction * compensationRate;
 
-    // Calculate performance bonus
+    // Calculate performance bonus (only from a real, available score)
     let bonusPercentage = 0;
-    if (reliabilityScore >= 90) {
-      bonusPercentage = 30;
-    } else if (reliabilityScore >= 80) {
-      bonusPercentage = 20;
-    } else if (reliabilityScore >= 70) {
-      bonusPercentage = 10;
+    if (scoreAvailable && reliabilityScore !== null) {
+      if (reliabilityScore >= 90) {
+        bonusPercentage = 30;
+      } else if (reliabilityScore >= 80) {
+        bonusPercentage = 20;
+      } else if (reliabilityScore >= 70) {
+        bonusPercentage = 10;
+      }
     }
 
     const performanceBonus = baseCompensation * (bonusPercentage / 100);
@@ -371,6 +419,9 @@ class DRAutomationService {
       baseCompensation,
       performanceBonus,
       totalCompensation,
+      compensationRate,
+      reliabilityScore,
+      scoreAvailable,
     };
   }
 

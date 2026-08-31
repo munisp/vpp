@@ -6,10 +6,13 @@
     "start": "expo start",
     "android": "expo start --android",
     "ios": "expo start --ios",
-    "web": "expo start --web"
+    "web": "expo start --web",
+    "test": "jest",
+    "check:imports": "node scripts/check-imports.mjs"
   },
   "dependencies": {
     "@expo/metro-runtime": "~3.1.1",
+    "@expo/vector-icons": "^14.0.0",
     "@react-native-async-storage/async-storage": "^1.21.0",
     "@react-native-community/datetimepicker": "~7.6.2",
     "@react-native-community/netinfo": "^11.2.1",
@@ -44,7 +47,12 @@
   },
   "devDependencies": {
     "@babel/core": "^7.23.7",
+    "@types/jest": "^29.5.11",
     "@types/react": "~18.2.45",
+    "babel-preset-expo": "~10.0.1",
+    "jest": "^29.7.0",
+    "jest-expo": "~50.0.4",
+    "react-test-renderer": "18.2.0",
     "typescript": "^5.3.3"
   },
   "private": true

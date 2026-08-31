@@ -45,6 +45,9 @@ class Query {
   orderBy(): Query {
     return this;
   }
+  groupBy(): Query {
+    return this;
+  }
   limit(): Query {
     return this;
   }
@@ -205,6 +208,9 @@ describe('buildFleetSites', () => {
       loadByUser: { 1: [1000, 1200], 2: [900, 900] },
     });
     state.rows.set(await assetsTable(), []);
+    // Region is derived, never assumed: both participants share one mappable
+    // profile country, so the fleet resolves to a single pricing region.
+    state.rows.set(await usersTable(), [{ country: 'nigeria' }]);
     state.execute = async () => ({ rows: [{ user_id: 1, samples: 500 }] });
 
     const { buildFleetSites } = await import('./services/price-signal');
@@ -220,6 +226,9 @@ describe('buildFleetSites', () => {
     mockDb();
     mockForecasting({ priceCentsPerKwh: [12, 18], loadByUser: { 1: [0, 0] } });
     state.rows.set(await assetsTable(), []);
+    // Region is derived, never assumed: both participants share one mappable
+    // profile country, so the fleet resolves to a single pricing region.
+    state.rows.set(await usersTable(), [{ country: 'nigeria' }]);
     state.execute = async () => ({ rows: [{ user_id: 1, samples: 500 }] });
 
     const { buildFleetSites, PriceSignalError } = await import('./services/price-signal');
@@ -232,6 +241,9 @@ describe('buildFleetSites', () => {
     mockDb();
     mockForecasting({ priceCentsPerKwh: [12], loadByUser: { 1: [1000, 1000] } });
     state.rows.set(await assetsTable(), []);
+    // Region is derived, never assumed: both participants share one mappable
+    // profile country, so the fleet resolves to a single pricing region.
+    state.rows.set(await usersTable(), [{ country: 'nigeria' }]);
     state.execute = async () => ({ rows: [{ user_id: 1, samples: 500 }] });
 
     const { buildFleetSites } = await import('./services/price-signal');
@@ -239,11 +251,65 @@ describe('buildFleetSites', () => {
       /covers 1 of 2 intervals/
     );
   });
+
+  it('refuses to price a fleet whose region cannot be derived, rather than assuming one', async () => {
+    mockDb();
+    mockForecasting({
+      priceCentsPerKwh: [12, 18],
+      loadByUser: { 1: [1000, 1200] },
+    });
+    state.rows.set(await assetsTable(), []);
+    // No participating user has a mappable profile country.
+    state.rows.set(await usersTable(), []);
+
+    const { buildFleetSites, PriceSignalError } = await import('./services/price-signal');
+    const failure = buildFleetSites({ ...baseInput, userIds: [1] });
+    await expect(failure).rejects.toBeInstanceOf(PriceSignalError);
+    await expect(failure).rejects.toThrow(/no_region/);
+  });
+
+  it('refuses to price a fleet spanning multiple regions under one signal', async () => {
+    mockDb();
+    mockForecasting({
+      priceCentsPerKwh: [12, 18],
+      loadByUser: { 1: [1000, 1200], 2: [900, 900] },
+    });
+    state.rows.set(await assetsTable(), []);
+    state.rows.set(await usersTable(), [{ country: 'nigeria' }, { country: 'tanzania' }]);
+
+    const { buildFleetSites, PriceSignalError } = await import('./services/price-signal');
+    const failure = buildFleetSites({ ...baseInput, userIds: [1, 2] });
+    await expect(failure).rejects.toBeInstanceOf(PriceSignalError);
+    await expect(failure).rejects.toThrow(/no_region.*multiple regions/);
+  });
+
+  it('skips region derivation entirely when the caller passes an explicit region', async () => {
+    mockDb();
+    mockForecasting({
+      priceCentsPerKwh: [12, 18],
+      loadByUser: { 1: [1000, 1200], 2: [900, 900] },
+    });
+    state.rows.set(await assetsTable(), []);
+    // Deliberately unmappable: an explicit region must not consult profiles.
+    state.rows.set(await usersTable(), []);
+    state.execute = async () => ({ rows: [{ user_id: 1, samples: 500 }] });
+
+    const { buildFleetSites } = await import('./services/price-signal');
+    const result = await buildFleetSites({ ...baseInput, region: 'NG-LAGOS', userIds: [1, 2] });
+
+    expect(result.sites.map(site => site.siteRef)).toEqual(['user-1']);
+    expect(result.excluded[0]).toMatchObject({ siteRef: 'user-2', userId: 2 });
+  });
 });
 
 async function assetsTable() {
   const schema = await import('../drizzle/schema');
   return schema.assets;
+}
+
+async function usersTable() {
+  const schema = await import('../drizzle/schema');
+  return schema.users;
 }
 
 describe('coordinateFleetSignal', () => {

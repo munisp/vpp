@@ -101,10 +101,14 @@ export async function getEnergyFlowData(
       gte(telemetry.timestamp, startDate),
       lte(telemetry.timestamp, endDate),
     ];
+    if (userId != null) {
+      conditions.push(eq(assets.userId, userId));
+    }
 
-    // Note: Telemetry is linked to assets, not directly to users
-    // To filter by user, we would need to join with assets table
-    // For now, we'll aggregate all telemetry data
+    // Telemetry is linked to assets; when a userId is given the query is
+    // scoped to that user's assets so a user-scoped request never aggregates
+    // other users' telemetry. Callers passing null get the global aggregate
+    // and must be admin-gated (see routers/analytics.ts).
 
     const timeFormat = interval === 'hour' 
       ? sql`to_char(${telemetry.timestamp}, 'YYYY-MM-DD HH24:00:00')`
@@ -120,6 +124,7 @@ export async function getEnergyFlowData(
         gridImport: sql<number>`SUM(CASE WHEN ${telemetry.power} < 0 THEN ABS(${telemetry.power}) ELSE 0 END)`,
       })
       .from(telemetry)
+      .innerJoin(assets, eq(telemetry.assetId, assets.id))
       .where(and(...conditions))
       .groupBy(timeFormat)
       .orderBy(timeFormat);

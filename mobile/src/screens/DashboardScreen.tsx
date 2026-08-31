@@ -225,6 +225,54 @@ export default function DashboardScreen({ navigation }: any) {
         onNavigate={screen => navigation.navigate(screen)}
       />
 
+      {/* Programs & Tools: new innovation screens, kept as a local grid because
+          the shared mobile-nav registry is owned by another workstream. */}
+      <View style={styles.actionsCard}>
+        <Text style={styles.sectionTitle}>Programs & Tools</Text>
+        <View style={styles.actionsGrid}>
+          <ActionButton
+            icon="🎯"
+            label="Budget"
+            onPress={() => navigation.navigate('BudgetPlanner')}
+          />
+          <ActionButton
+            icon="🚗"
+            label="EV Charging"
+            onPress={() => navigation.navigate('EvCharging')}
+          />
+          <ActionButton
+            icon="⚠️"
+            label="Outage Risk"
+            onPress={() => navigation.navigate('OutageRisk')}
+          />
+          <ActionButton
+            icon="🏷️"
+            label="Tariffs"
+            onPress={() => navigation.navigate('TariffAdvisor')}
+          />
+          <ActionButton
+            icon="🏅"
+            label="Challenges"
+            onPress={() => navigation.navigate('Challenges')}
+          />
+          <ActionButton
+            icon="📬"
+            label="Digest"
+            onPress={() => navigation.navigate('DigestSettings')}
+          />
+          <ActionButton
+            icon="🏘️"
+            label="Portfolio"
+            onPress={() => navigation.navigate('Portfolio')}
+          />
+          <ActionButton
+            icon="🔧"
+            label="Work Orders"
+            onPress={() => navigation.navigate('WorkOrders')}
+          />
+        </View>
+      </View>
+
       {/* Recent Activity (real payments and trades) */}
       <View style={styles.activityCard}>
         <Text style={styles.sectionTitle}>Recent Activity</Text>

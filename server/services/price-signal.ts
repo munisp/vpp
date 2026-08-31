@@ -20,7 +20,8 @@
 import { and, eq, inArray, sql } from 'drizzle-orm';
 
 import { getDb } from '../db';
-import { assets } from '../../drizzle/schema';
+import { assets, users } from '../../drizzle/schema';
+import { COUNTRY_TO_REGION } from './regions';
 import {
   priceSignalIntervals,
   priceSignalSites,
@@ -151,8 +152,30 @@ export async function buildFleetSites(
   }
 
   const horizonHours = (input.horizon * input.intervalMinutes) / 60;
+  // Region is never assumed. Use the caller's region, else derive it from the
+  // participating users' real profile countries — a fleet priced against a
+  // region it is not in would produce silently wrong money prices.
+  let region = input.region ?? null;
+  if (!region) {
+    const countryRows = await db
+      .select({ country: users.country })
+      .from(users)
+      .where(inArray(users.id, input.userIds))
+      .groupBy(users.country);
+    const regions = new Set(
+      countryRows.map(row => COUNTRY_TO_REGION[row.country]).filter((r): r is string => !!r)
+    );
+    if (regions.size !== 1) {
+      throw new PriceSignalError(
+        `no_region: cannot determine a single pricing region for this fleet ` +
+          `(${regions.size === 0 ? 'no participating user has a mappable profile country' : `participants span multiple regions: ${[...regions].join(', ')}`}); ` +
+          'pass an explicit region'
+      );
+    }
+    region = [...regions][0];
+  }
   const priceForecast = await probabilisticForecasting.forecastPrice(
-    input.region ?? 'NG-LAGOS',
+    region,
     horizonHours,
     input.intervalMinutes
   );

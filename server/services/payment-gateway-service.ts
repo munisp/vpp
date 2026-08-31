@@ -1,19 +1,22 @@
 /**
  * Unified Payment Gateway Service
  * 
- * Handles payments across multiple gateways: M-Pesa, Airtel Money, Tigo Pesa
+ * Handles payments across multiple gateways: M-Pesa, Airtel Money, Tigo Pesa,
+ * Paystack, Flutterwave
  */
 
 import axios from 'axios';
 import { mpesaService } from './mpesa-service';
 import { airtelMoneyService } from './airtel-money-service';
 import { tigoPesaService } from './tigo-pesa-service';
+import { paystackService } from './paystack-service';
+import { flutterwaveService } from './flutterwave-service';
 import { getDb } from '../db';
 import { payments, paymentCredentials } from '../../drizzle/schema';
 import { eq } from 'drizzle-orm';
 import { observing, requireCapability } from './degraded-operation';
 
-export type PaymentGateway = 'mpesa' | 'airtel_money' | 'tigo_pesa';
+export type PaymentGateway = 'mpesa' | 'airtel_money' | 'tigo_pesa' | 'paystack' | 'flutterwave';
 
 /** The fields of a Daraja reversal response this service reads. */
 interface MpesaReversalResponse {
@@ -34,6 +37,10 @@ export interface PaymentRequest {
   userId: number;
   paymentType: 'invoice' | 'token_purchase' | 'monthly_fee';
   billingId?: number;
+  /** Customer email — required by Paystack and Flutterwave transaction initialization. */
+  email?: string;
+  /** Redirect/callback URL for hosted-checkout gateways (Paystack, Flutterwave). */
+  callbackUrl?: string;
 }
 
 export interface PaymentResponse {
@@ -201,6 +208,102 @@ class PaymentGatewayService {
             };
           }
 
+        case 'paystack':
+          // Amount conversion: the platform stores amounts in minor units
+          // ("cents"); for NGN the minor unit IS the kobo (1 NGN = 100 kobo),
+          // which is exactly what Paystack's /transaction/initialize expects.
+          // The value is therefore passed unscaled — unlike the mobile-money
+          // branches above, do NOT divide by 100 here.
+          gatewayResponse = await paystackService.initiatePayment({
+            email: request.email || '',
+            amount: request.amount, // platform cents == kobo for NGN
+            reference: request.accountReference,
+            callbackUrl: request.callbackUrl,
+            currency: request.currency,
+          });
+
+          if (gatewayResponse.success && gatewayResponse.reference) {
+            await db
+              .update(payments)
+              .set({
+                transactionId: gatewayResponse.reference,
+                metadata: JSON.stringify({
+                  accountReference: request.accountReference,
+                  transactionDesc: request.transactionDesc,
+                  paystackReference: gatewayResponse.reference,
+                  authorizationUrl: gatewayResponse.authorizationUrl,
+                }),
+              })
+              .where(eq(payments.id, paymentId));
+
+            return {
+              success: true,
+              paymentId,
+              transactionId: gatewayResponse.reference,
+              message: gatewayResponse.message,
+            };
+          } else {
+            await db
+              .update(payments)
+              .set({ status: 'failed' })
+              .where(eq(payments.id, paymentId));
+
+            return {
+              success: false,
+              paymentId,
+              error: gatewayResponse.error,
+            };
+          }
+
+        case 'flutterwave':
+          // Amount conversion: the platform stores amounts in minor units
+          // ("cents", i.e. kobo for NGN), while Flutterwave v3 expects MAJOR
+          // units (naira). Divide by 100 to convert kobo -> naira.
+          gatewayResponse = await flutterwaveService.initiatePayment({
+            txRef: request.accountReference,
+            amount: request.amount / 100, // kobo -> naira
+            currency: request.currency,
+            customer: {
+              email: request.email || '',
+              phonenumber: request.phoneNumber,
+              name: request.accountReference,
+            },
+            redirectUrl: request.callbackUrl,
+          });
+
+          if (gatewayResponse.success && gatewayResponse.txRef) {
+            await db
+              .update(payments)
+              .set({
+                transactionId: gatewayResponse.txRef,
+                metadata: JSON.stringify({
+                  accountReference: request.accountReference,
+                  transactionDesc: request.transactionDesc,
+                  flutterwaveTxRef: gatewayResponse.txRef,
+                  paymentLink: gatewayResponse.paymentLink,
+                }),
+              })
+              .where(eq(payments.id, paymentId));
+
+            return {
+              success: true,
+              paymentId,
+              transactionId: gatewayResponse.txRef,
+              message: gatewayResponse.message,
+            };
+          } else {
+            await db
+              .update(payments)
+              .set({ status: 'failed' })
+              .where(eq(payments.id, paymentId));
+
+            return {
+              success: false,
+              paymentId,
+              error: gatewayResponse.error,
+            };
+          }
+
         default:
           throw new Error(`Unsupported payment gateway: ${request.gateway}`);
       }
@@ -335,6 +438,72 @@ class PaymentGatewayService {
               };
             }
             break;
+
+          case 'paystack':
+            const paystackStatus = await paystackService.queryPaymentStatus(payment.transactionId);
+
+            if (paystackStatus.success && paystackStatus.status === 'completed') {
+              await db
+                .update(payments)
+                .set({ status: 'completed' })
+                .where(eq(payments.id, paymentId));
+
+              return {
+                success: true,
+                status: 'completed',
+                amount: payment.amount,
+                transactionId: payment.transactionId,
+              };
+            } else if (paystackStatus.status === 'failed') {
+              await db
+                .update(payments)
+                .set({ status: 'failed' })
+                .where(eq(payments.id, paymentId));
+
+              return {
+                success: false,
+                status: 'failed',
+                error: paystackStatus.resultDesc || paystackStatus.error,
+              };
+            }
+            break;
+
+          case 'flutterwave':
+            const flutterwaveStatus = await flutterwaveService.queryPaymentStatus(payment.transactionId);
+
+            if (flutterwaveStatus.success && flutterwaveStatus.status === 'completed') {
+              // Persist Flutterwave's numeric transaction id (learned here,
+              // after the hosted checkout completes) so refunds can target it.
+              await db
+                .update(payments)
+                .set({
+                  status: 'completed',
+                  metadata: JSON.stringify({
+                    ...JSON.parse(payment.metadata || '{}'),
+                    flutterwaveTransactionId: flutterwaveStatus.transactionId,
+                  }),
+                })
+                .where(eq(payments.id, paymentId));
+
+              return {
+                success: true,
+                status: 'completed',
+                amount: payment.amount,
+                transactionId: payment.transactionId,
+              };
+            } else if (flutterwaveStatus.status === 'failed') {
+              await db
+                .update(payments)
+                .set({ status: 'failed' })
+                .where(eq(payments.id, paymentId));
+
+              return {
+                success: false,
+                status: 'failed',
+                error: flutterwaveStatus.resultDesc || flutterwaveStatus.error,
+              };
+            }
+            break;
         }
       }
 
@@ -413,6 +582,41 @@ class PaymentGatewayService {
           console.warn(`[PaymentGateway] ${payment.paymentMethod} does not support automated refunds - flagging for manual review`);
           refundResult = { success: false, error: 'refund_not_supported' };
           break;
+
+        case 'paystack':
+          // Paystack refunds target the transaction reference stored at
+          // initiation time.
+          if (!payment.transactionId) {
+            refundResult = {
+              success: false,
+              error: 'refund_not_supported: original Paystack transaction reference not recorded for this payment',
+            };
+          } else {
+            refundResult = await paystackService.processRefund(payment.transactionId, reason);
+          }
+          break;
+
+        case 'flutterwave': {
+          // Flutterwave refunds target Flutterwave's numeric transaction id,
+          // which is only known after the hosted checkout completes and is
+          // persisted to payment metadata by queryPaymentStatus/webhooks.
+          const flutterwaveTransactionId = existingMetadata.flutterwaveTransactionId;
+          if (!flutterwaveTransactionId) {
+            refundResult = {
+              success: false,
+              error: 'refund_not_supported: original Flutterwave transaction ID not recorded for this payment',
+            };
+          } else {
+            // payment.amount is in minor units (kobo); the refund endpoint
+            // expects major units (naira).
+            refundResult = await flutterwaveService.processRefund(
+              String(flutterwaveTransactionId),
+              payment.amount / 100,
+              reason
+            );
+          }
+          break;
+        }
 
         default:
           return { success: false, error: `Unsupported payment method for refund: ${payment.paymentMethod}` };

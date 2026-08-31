@@ -176,6 +176,13 @@
       "when": 1788184432052,
       "tag": "0025_telemetry_asset_ts_idx",
       "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "7",
+      "when": 1788196930105,
+      "tag": "0026_nigerian_gateways_enum",
+      "breakpoints": true
     }
   ]
 }

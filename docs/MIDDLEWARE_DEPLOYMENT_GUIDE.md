@@ -286,12 +286,12 @@ KEYCLOAK_CLIENT_SECRET=<your-client-secret>
 
 ### Integration
 
-The Keycloak client is available at `server/integration/keycloak-client.ts`.
+The Keycloak client is available at ~~`server/integration/keycloak-client.ts`~~ (removed — dead code; auth is `server/integration/keycloak-auth.ts`).
 
 **Example usage:**
 
 ```typescript
-import { keycloakClient } from './integration/keycloak-client';
+import { keycloakClient } from './integration/keycloak-auth';
 
 // Authenticate user
 const token = await keycloakClient.authenticateUser('username', 'password');

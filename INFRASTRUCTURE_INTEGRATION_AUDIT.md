@@ -123,7 +123,7 @@ not read `X-Forwarded-For` for its own limiter, and duplicates auth internally. 
 only thing enforcing a limit or a JWT audience, direct pod access bypasses it entirely.
 
 ### 7. Keycloak — client_implemented, not used
-`keycloak-client.ts` (admin API, users, roles) and `keycloak-auth.ts` (`keycloakProtect` middleware)
+~~`keycloak-client.ts`~~ (removed as dead code) and `keycloak-auth.ts` (`keycloakProtect` middleware)
 are real, but **no route mounts them**; authentication is the platform's own `app_session_id` JWT.
 Two defects that would ship the moment it is wired:
 - ~~`verifyToken` caches for a fixed 300 s ignoring `exp`~~ **Fixed.** The cache TTL is the shorter of

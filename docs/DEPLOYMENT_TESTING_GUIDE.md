@@ -121,7 +121,7 @@ curl http://localhost:8080/realms/vpp-platform
 
 ```typescript
 // Run in Node.js console
-const { keycloakClient } = require('./server/integration/keycloak-client');
+const { keycloakClient } = require('./server/integration/keycloak-auth');
 
 const health = await keycloakClient.healthCheck();
 console.log(health);

@@ -237,7 +237,7 @@ KEYCLOAK_TLS_ENABLED=true
 ### Test with Keycloak Client
 
 ```typescript
-import { keycloakClient } from './server/integration/keycloak-client';
+import { keycloakClient } from './server/integration/keycloak-auth';
 
 // Test health check
 const health = await keycloakClient.healthCheck();
@@ -296,7 +296,7 @@ curl http://localhost:8080/realms/vpp-platform/protocol/openid-connect/userinfo 
 Update `server/_core/auth.ts` to use Keycloak instead of Manus OAuth:
 
 ```typescript
-import { keycloakClient } from '../integration/keycloak-client';
+import { keycloakClient } from '../integration/keycloak-auth';
 
 // Replace Manus OAuth callback with Keycloak
 router.get('/oauth/callback', async (req, res) => {
@@ -499,4 +499,4 @@ For issues or questions:
 - **Keycloak Admin Console**: http://localhost:8080
 - **Keycloak Documentation**: https://www.keycloak.org/documentation
 - **Integration Guide**: `docs/MIDDLEWARE_DEPLOYMENT_GUIDE.md`
-- **Client Implementation**: `server/integration/keycloak-client.ts`
+- **Client Implementation**: ~~`server/integration/keycloak-client.ts`~~ (removed — dead code; auth is `server/integration/keycloak-auth.ts`)

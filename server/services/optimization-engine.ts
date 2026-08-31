@@ -683,6 +683,12 @@ export class OptimizationEngine {
       for (const asset of assets) {
         if (!asset.eligibility.eligible) continue;
 
+        // Never dispatch a battery without a measured SoC: the SoC reserve
+        // guards and tracking would silently fabricate state. getAssetsForOptimization
+        // already excludes null-SoC batteries with a loud warning; this guard
+        // keeps the heuristic fallback honest too.
+        if (asset.assetType === 'battery' && !batterySoc.has(asset.assetId)) continue;
+
         const setpoint = this.optimizeAssetInterval(
           request.objective,
           asset,
@@ -697,12 +703,13 @@ export class OptimizationEngine {
         if (setpoint) {
           setpoints.push(setpoint);
 
-          // Update battery SoC tracking
+          // Update battery SoC tracking (guaranteed present — null-SoC
+          // batteries are excluded above, so no fabricated state here).
+          // `assets.capacity` is already watt-hours for batteries (drizzle/schema.ts).
           if (asset.assetType === 'battery') {
-            const currentSoc = batterySoc.get(asset.assetId) || 50;
+            const currentSoc = batterySoc.get(asset.assetId)!;
             const energyWh = (setpoint.targetPowerWatts * intervalMinutes) / 60;
-            const capacityWh = asset.capacity * 2; // Assume 2-hour battery
-            const socChange = (energyWh / capacityWh) * 100;
+            const socChange = (energyWh / asset.capacity) * 100;
             batterySoc.set(asset.assetId, Math.max(10, Math.min(90, currentSoc - socChange)));
           }
         }

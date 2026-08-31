@@ -105,7 +105,7 @@ This document describes the complete middleware integration stack for the VPP Co
 **Purpose:** Enterprise SSO and role-based access control (RBAC).
 
 **Implementation:**
-- **Location:** `server/integration/keycloak-client.ts`
+- **Location:** ~~`server/integration/keycloak-client.ts`~~ (removed — dead code; auth is `server/integration/keycloak-auth.ts`)
 - **Server:** `localhost:8080` (NextGen VPP Platform)
 - **Realm:** `vpp-platform`
 - **Client ID:** `vpp-consumer-platform`
@@ -410,7 +410,7 @@ const keycloakHealth = await keycloakClient.healthCheck();
 - **Integration Overview:** `docs/MIDDLEWARE_INTEGRATION_V18.md`
 - **Kafka Integration:** `server/integration/kafka-publisher.ts`
 - **Redis Caching:** `server/integration/redis-cache.ts`
-- **Keycloak Bridge:** `server/integration/keycloak-client.ts`
+- **Keycloak Bridge:** ~~`server/integration/keycloak-client.ts`~~ (removed — dead code; auth is `server/integration/keycloak-auth.ts`)
 - **Lakehouse ETL:** `server/integration/lakehouse-etl.py`
 
 ## Version History

@@ -35,8 +35,30 @@ export default function Billing() {
   const [selectedInvoiceId, setSelectedInvoiceId] = useState<number | null>(null);
   const [isDialogOpen, setIsDialogOpen] = useState(false);
 
-  const { data: billingsData, isLoading } = trpc.billing.list.useQuery({ limit: 50 });
+  const { data: billingsData, isLoading, isError, error: billingsError, refetch } = trpc.billing.list.useQuery({ limit: 50 });
   const billings = billingsData?.billings || [];
+
+  // Real export path: the server's export router generates a PDF revenue
+  // report (from recorded payment data) for the invoice's billing period.
+  const exportPdfMutation = trpc.export.revenuePDF.useMutation({
+    onSuccess: (data) => {
+      const blob = new Blob(
+        [Uint8Array.from(atob(data.content), (c) => c.charCodeAt(0))],
+        { type: "application/pdf" }
+      );
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = data.filename;
+      a.click();
+      URL.revokeObjectURL(url);
+      toast.success("Report downloaded");
+      setIsDialogOpen(false);
+    },
+    onError: (error) => {
+      toast.error(`Export failed: ${error.message}`);
+    },
+  });
 
   const { data: invoiceDetails } = trpc.billing.getById.useQuery(
     { billingId: selectedInvoiceId! },
@@ -70,8 +92,11 @@ export default function Billing() {
   };
 
   const handleDownload = () => {
-    toast.info("Download feature coming soon");
-    setIsDialogOpen(false);
+    if (!invoiceDetails) return;
+    exportPdfMutation.mutate({
+      startDate: new Date(invoiceDetails.periodStart).toISOString(),
+      endDate: new Date(invoiceDetails.periodEnd).toISOString(),
+    });
   };
 
   return (
@@ -107,6 +132,8 @@ export default function Billing() {
             <CardContent>
               {isLoading ? (
                 <Skeleton className="h-8 w-24" />
+              ) : isError ? (
+                <div className="text-2xl font-bold">—</div>
               ) : (
                 <>
                   <div className="text-2xl font-bold">{totalBilled.toFixed(2)} TZS</div>
@@ -124,6 +151,8 @@ export default function Billing() {
             <CardContent>
               {isLoading ? (
                 <Skeleton className="h-8 w-24" />
+              ) : isError ? (
+                <div className="text-2xl font-bold">—</div>
               ) : (
                 <>
                   <div className="text-2xl font-bold text-green-600">{totalPaid.toFixed(2)} TZS</div>
@@ -141,6 +170,8 @@ export default function Billing() {
             <CardContent>
               {isLoading ? (
                 <Skeleton className="h-8 w-24" />
+              ) : isError ? (
+                <div className="text-2xl font-bold">—</div>
               ) : (
                 <>
                   <div className="text-2xl font-bold text-red-600">{outstandingBalance.toFixed(2)} TZS</div>
@@ -165,6 +196,17 @@ export default function Billing() {
                 {[1, 2, 3].map((i) => (
                   <Skeleton key={i} className="h-16 w-full" />
                 ))}
+              </div>
+            ) : isError ? (
+              <div className="text-center py-12">
+                <CreditCard className="h-12 w-12 text-red-400 mx-auto mb-4" />
+                <h3 className="text-lg font-semibold mb-2">Invoices unavailable</h3>
+                <p className="text-sm text-red-600 mb-4">
+                  {billingsError?.message || "Failed to load invoices."}
+                </p>
+                <Button variant="outline" size="sm" onClick={() => refetch()}>
+                  Retry
+                </Button>
               </div>
             ) : filteredBillings.length === 0 ? (
               <div className="text-center py-12">
@@ -266,9 +308,13 @@ export default function Billing() {
                     </p>
                   </div>
                 </div>
-                <Button onClick={handleDownload} className="w-full">
+                <Button
+                  onClick={handleDownload}
+                  className="w-full"
+                  disabled={exportPdfMutation.isPending}
+                >
                   <Download className="mr-2 h-4 w-4" />
-                  Download Invoice
+                  {exportPdfMutation.isPending ? "Generating…" : "Download Revenue Report (PDF)"}
                 </Button>
               </div>
             )}

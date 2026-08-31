@@ -13,6 +13,8 @@ import { initializeWebSocket } from "./websocket";
 import { initScheduledReports } from "./scheduler";
 import { startStatusUpdateJob } from "./qrStatusUpdater";
 import { initScheduledReportJobs } from "./scheduledReports";
+import { startAutomationScheduler } from "../dr-automation";
+import { ensureSchedules } from "../integration/temporal-client";
 import { handleMpesaCallback, handleAirtelCallback, handleTigoCallback } from "../webhooks/payment-callbacks";
 import { verifyWebhookSignature } from "../webhooks/verify-signature";
 import { smsInboundRouter } from "../webhooks/sms-inbound";
@@ -208,6 +210,18 @@ async function startServer() {
   
   // Initialize QR transaction status updater
   startStatusUpdateJob();
+
+  // DR automation loop: evaluate rules and start/end scheduled DR events every
+  // minute. Without this the DR automation feature only runs when an operator
+  // triggers it by hand — events would never start or stop on their own.
+  startAutomationScheduler();
+
+  // Temporal schedules (daily prepaid consumption sweep). Temporal is optional
+  // in some deployments, so a failure here must not prevent boot — the warning
+  // is the loud signal that sweeps are not running.
+  ensureSchedules().catch(err =>
+    console.warn('[Temporal] ensureSchedules failed:', err?.message ?? err)
+  );
   
   // Initialize scheduled report jobs
   initScheduledReportJobs();

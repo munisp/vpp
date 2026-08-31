@@ -31,6 +31,7 @@ import {
 } from 'lucide-react';
 import { format, subDays } from 'date-fns';
 import { toast } from 'sonner';
+import { convertToCSV, downloadCSV } from '@/lib/exportUtils';
 
 export default function ReconciliationDashboard() {
   const [selectedReconciliation, setSelectedReconciliation] = useState<any>(null);
@@ -39,17 +40,24 @@ export default function ReconciliationDashboard() {
 
   const utils = trpc.useUtils();
 
-  const { data: discrepancies, isLoading: discrepanciesLoading } =
-    trpc.reconciliation.getUnresolvedDiscrepancies.useQuery();
+  const discrepanciesQuery = trpc.reconciliation.getUnresolvedDiscrepancies.useQuery();
+  const { data: discrepancies, isLoading: discrepanciesLoading } = discrepanciesQuery;
 
-  const { data: statistics } = trpc.reconciliation.getStatistics.useQuery({
+  const statisticsQuery = trpc.reconciliation.getStatistics.useQuery({
     startDate: subDays(new Date(), 30),
     endDate: new Date(),
   });
+  const { data: statistics } = statisticsQuery;
 
-  const { data: reports } = trpc.reconciliation.getReports.useQuery({
+  const reportsQuery = trpc.reconciliation.getReports.useQuery({
     limit: 10,
   });
+  const { data: reports } = reportsQuery;
+
+  const discrepanciesFailed = discrepanciesQuery.isError;
+  const statisticsFailed = statisticsQuery.isError;
+  const reportsFailed = reportsQuery.isError;
+  const anyFailed = discrepanciesFailed || statisticsFailed || reportsFailed;
 
   const resolveDiscrepancyMutation = trpc.reconciliation.resolveDiscrepancy.useMutation({
     onSuccess: () => {
@@ -85,6 +93,43 @@ export default function ReconciliationDashboard() {
       notes: resolutionNotes,
       newStatus: resolutionStatus,
     });
+  };
+
+  // No server-side reconciliation-report export exists; download the real
+  // report row already on screen as CSV.
+  const handleDownloadReport = (report: {
+    reportDate: string | Date;
+    reportType: string;
+    totalPayments: number;
+    matchedPayments: number;
+    discrepancies: number;
+  }) => {
+    try {
+      const matchRate =
+        report.totalPayments > 0
+          ? ((report.matchedPayments / report.totalPayments) * 100).toFixed(1)
+          : '0';
+      const csv = convertToCSV({
+        headers: ['Date', 'Type', 'Total Payments', 'Matched', 'Discrepancies', 'Match Rate %'],
+        rows: [
+          [
+            format(new Date(report.reportDate), 'yyyy-MM-dd'),
+            report.reportType,
+            report.totalPayments,
+            report.matchedPayments,
+            report.discrepancies,
+            matchRate,
+          ],
+        ],
+      });
+      downloadCSV(
+        `reconciliation-report-${format(new Date(report.reportDate), 'yyyy-MM-dd')}.csv`,
+        csv
+      );
+      toast.success('Report downloaded');
+    } catch (e: any) {
+      toast.error(e?.message || 'Failed to download report');
+    }
   };
 
   const getStatusBadge = (status: string) => {
@@ -140,6 +185,34 @@ export default function ReconciliationDashboard() {
         </Button>
       </div>
 
+      {anyFailed && (
+        <Card className="border-red-200 bg-red-50">
+          <CardContent className="flex items-center justify-between gap-3 py-4">
+            <div className="flex items-center gap-3">
+              <AlertCircle className="h-5 w-5 text-red-600" />
+              <p className="text-sm text-red-800">
+                {[
+                  discrepanciesFailed && `discrepancies: ${(discrepanciesQuery.error as any)?.message || 'failed'}`,
+                  statisticsFailed && `statistics: ${(statisticsQuery.error as any)?.message || 'failed'}`,
+                  reportsFailed && `reports: ${(reportsQuery.error as any)?.message || 'failed'}`,
+                ].filter(Boolean).join(' · ')}
+              </p>
+            </div>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                discrepanciesQuery.refetch();
+                statisticsQuery.refetch();
+                reportsQuery.refetch();
+              }}
+            >
+              Retry
+            </Button>
+          </CardContent>
+        </Card>
+      )}
+
       {/* Statistics Cards */}
       <div className="grid gap-4 md:grid-cols-4">
         <Card>
@@ -148,8 +221,8 @@ export default function ReconciliationDashboard() {
             <CheckCircle className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold">{statistics?.total || 0}</div>
-            <p className="text-xs text-muted-foreground">Last 30 days</p>
+            <div className="text-2xl font-bold">{statisticsFailed ? "—" : statistics?.total || 0}</div>
+            <p className="text-xs text-muted-foreground">{statisticsFailed ? "Statistics unavailable" : "Last 30 days"}</p>
           </CardContent>
         </Card>
 
@@ -160,10 +233,10 @@ export default function ReconciliationDashboard() {
           </CardHeader>
           <CardContent>
             <div className="text-2xl font-bold">
-              {(statistics?.matchRate || 0).toFixed(1)}%
+              {statisticsFailed ? "—" : `${(statistics?.matchRate || 0).toFixed(1)}%`}
             </div>
             <p className="text-xs text-muted-foreground">
-              {statistics?.matched || 0} matched
+              {statisticsFailed ? "Statistics unavailable" : `${statistics?.matched || 0} matched`}
             </p>
           </CardContent>
         </Card>
@@ -174,8 +247,8 @@ export default function ReconciliationDashboard() {
             <AlertCircle className="h-4 w-4 text-red-600" />
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold">{statistics?.discrepancies || 0}</div>
-            <p className="text-xs text-muted-foreground">Requires attention</p>
+            <div className="text-2xl font-bold">{statisticsFailed ? "—" : statistics?.discrepancies || 0}</div>
+            <p className="text-xs text-muted-foreground">{statisticsFailed ? "Statistics unavailable" : "Requires attention"}</p>
           </CardContent>
         </Card>
 
@@ -186,9 +259,9 @@ export default function ReconciliationDashboard() {
           </CardHeader>
           <CardContent>
             <div className="text-2xl font-bold">
-              {((statistics?.totalAmountDiscrepancy || 0) / 100).toFixed(0)} TZS
+              {statisticsFailed ? "—" : `${((statistics?.totalAmountDiscrepancy || 0) / 100).toFixed(0)} TZS`}
             </div>
-            <p className="text-xs text-muted-foreground">Total discrepancy</p>
+            <p className="text-xs text-muted-foreground">{statisticsFailed ? "Statistics unavailable" : "Total discrepancy"}</p>
           </CardContent>
         </Card>
       </div>
@@ -197,7 +270,7 @@ export default function ReconciliationDashboard() {
       <Tabs defaultValue="discrepancies" className="space-y-4">
         <TabsList>
           <TabsTrigger value="discrepancies">
-            Unresolved Discrepancies ({discrepancies?.length || 0})
+            Unresolved Discrepancies ({discrepanciesFailed ? "—" : discrepancies?.length || 0})
           </TabsTrigger>
           <TabsTrigger value="reports">Reports</TabsTrigger>
         </TabsList>
@@ -214,6 +287,10 @@ export default function ReconciliationDashboard() {
             <CardContent>
               {discrepanciesLoading ? (
                 <div className="text-center py-8">Loading...</div>
+              ) : discrepanciesFailed ? (
+                <div className="text-center py-8 text-red-600">
+                  Discrepancies unavailable: {(discrepanciesQuery.error as any)?.message || 'failed to load'}
+                </div>
               ) : !discrepancies || discrepancies.length === 0 ? (
                 <div className="text-center py-8 text-muted-foreground">
                   <CheckCircle className="mx-auto h-12 w-12 mb-4 text-green-500" />
@@ -296,7 +373,11 @@ export default function ReconciliationDashboard() {
               <CardDescription>Daily reconciliation summaries</CardDescription>
             </CardHeader>
             <CardContent>
-              {!reports || reports.length === 0 ? (
+              {reportsFailed ? (
+                <div className="text-center py-8 text-red-600">
+                  Reports unavailable: {(reportsQuery.error as any)?.message || 'failed to load'}
+                </div>
+              ) : !reports || reports.length === 0 ? (
                 <div className="text-center py-8 text-muted-foreground">
                   No reports available
                 </div>
@@ -334,7 +415,12 @@ export default function ReconciliationDashboard() {
                           %
                         </TableCell>
                         <TableCell>
-                          <Button size="sm" variant="ghost">
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            title="Download report as CSV"
+                            onClick={() => handleDownloadReport(report)}
+                          >
                             <Download className="h-4 w-4" />
                           </Button>
                         </TableCell>

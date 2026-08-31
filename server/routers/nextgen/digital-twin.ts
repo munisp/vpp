@@ -4,7 +4,12 @@ import { TRPCError } from '@trpc/server';
 import { adminProcedure, protectedProcedure, router } from '../../_core/trpc';
 import { DigitalTwinError, getDigitalTwin } from '../../services/digital-twin';
 
-function toTRPCError(error: unknown): never {
+/**
+ * A twin that cannot be built is an outage (the database is down or the
+ * registry is corrupt), so it maps to SERVICE_UNAVAILABLE — never to an empty
+ * or partially fabricated graph.
+ */
+export function toTRPCError(error: unknown): never {
   if (error instanceof DigitalTwinError) {
     throw new TRPCError({ code: 'SERVICE_UNAVAILABLE', message: error.message });
   }

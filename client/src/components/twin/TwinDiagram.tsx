@@ -122,6 +122,8 @@ function NodeBox({ placement }: { placement: ReturnType<typeof layoutTwin>['node
   const tone = EVIDENCE_TONE[node.evidence];
   const power = formatWatts(node.powerWatts) ?? formatWatts(node.lastPowerWatts);
   const age = formatAge(node.ageSeconds);
+  // A pending asset is drawn dashed: its place in the plant is unconfirmed.
+  const pending = node.approvalStatus === 'pending';
 
   const width = 176;
   const height = 62;
@@ -139,7 +141,7 @@ function NodeBox({ placement }: { placement: ReturnType<typeof layoutTwin>['node
           tone === 'warning' && 'fill-amber-50 stroke-amber-500 dark:fill-amber-950/50',
           tone === 'neutral' && 'fill-muted stroke-border'
         )}
-        strokeDasharray={node.evidence === 'never' ? '5 4' : undefined}
+        strokeDasharray={node.evidence === 'never' || pending ? '5 4' : undefined}
       />
       {node.evidence === 'stale' && (
         <rect width={width} height={height} rx={10} className="ops-stale" fill="none" />
@@ -156,7 +158,14 @@ function NodeBox({ placement }: { placement: ReturnType<typeof layoutTwin>['node
             aria-hidden
           />
           <div className="min-w-0 flex-1">
-            <p className="truncate text-[11px] font-semibold leading-tight">{node.label}</p>
+            <p className="truncate text-[11px] font-semibold leading-tight">
+              {node.label}
+              {pending && (
+                <span className="ml-1 rounded border border-dashed border-amber-500 px-1 text-[9px] font-medium uppercase tracking-wide text-amber-600 dark:text-amber-300">
+                  not yet approved
+                </span>
+              )}
+            </p>
             <p className="truncate text-[11px] leading-tight tabular-nums text-muted-foreground">
               {node.evidence === 'never'
                 ? 'never reported'

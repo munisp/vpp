@@ -10,9 +10,15 @@ export default function DRAutomation() {
   const { user } = useAuth();
   const utils = trpc.useUtils();
 
-  const { data: rules, isLoading } = trpc.drAutomation.getRules.useQuery(undefined, {
+  const { data: rules, isLoading, isError, error: rulesError, refetch } = trpc.drAutomation.getRules.useQuery(undefined, {
     enabled: user?.role === 'admin',
   });
+
+  // Real measured health signal (5-minute window) for the status card.
+  const healthQuery = trpc.performance.getHealth.useQuery(undefined, {
+    enabled: user?.role === 'admin',
+  });
+  const health = healthQuery.data;
 
   const updateRuleMutation = trpc.drAutomation.updateRule.useMutation({
     onSuccess: () => {
@@ -62,6 +68,26 @@ export default function DRAutomation() {
         <div className="flex items-center justify-center py-12">
           <Loader2 className="h-8 w-8 animate-spin text-primary" />
         </div>
+      </div>
+    );
+  }
+
+  if (isError) {
+    return (
+      <div className="container py-8">
+        <Card className="border-red-200 bg-red-50">
+          <CardContent className="flex items-center justify-between gap-3 py-6">
+            <div className="flex items-center gap-3">
+              <AlertTriangle className="h-5 w-5 text-red-600" />
+              <p className="text-sm text-red-800">
+                Failed to load automation rules: {rulesError?.message || 'Unknown error'}
+              </p>
+            </div>
+            <Button variant="outline" size="sm" onClick={() => refetch()}>
+              Retry
+            </Button>
+          </CardContent>
+        </Card>
       </div>
     );
   }
@@ -137,8 +163,23 @@ export default function DRAutomation() {
             <Activity className="h-4 w-4 text-purple-500" />
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold">Operational</div>
-            <p className="text-xs text-muted-foreground">All systems running</p>
+            {healthQuery.isLoading ? (
+              <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+            ) : healthQuery.isError ? (
+              <>
+                <div className="text-2xl font-bold">Unknown</div>
+                <p className="text-xs text-red-600">
+                  {(healthQuery.error as any)?.message || 'Health check failed'}
+                </p>
+              </>
+            ) : (
+              <>
+                <div className="text-2xl font-bold capitalize">{health?.status ?? 'Unknown'}</div>
+                <p className="text-xs text-muted-foreground">
+                  {health?.message || 'Measured over the last 5 minutes'}
+                </p>
+              </>
+            )}
           </CardContent>
         </Card>
       </div>

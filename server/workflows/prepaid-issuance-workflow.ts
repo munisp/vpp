@@ -16,8 +16,12 @@
 import { proxyActivities, sleep } from '@temporalio/workflow';
 import type * as activities from './prepaid-issuance-activities';
 
-const { issuePrepaidTokenActivity, deliverPrepaidTokenActivity, accountConsumptionActivity } =
-  proxyActivities<typeof activities>({
+const {
+  issuePrepaidTokenActivity,
+  deliverPrepaidTokenActivity,
+  accountConsumptionActivity,
+  listPrepaidAccountIdsActivity,
+} = proxyActivities<typeof activities>({
     startToCloseTimeout: '2 minutes',
     retry: {
       initialInterval: '2s',
@@ -145,11 +149,17 @@ export interface PrepaidConsumptionSweepResult {
 export async function prepaidConsumptionSweepWorkflow(
   input: PrepaidConsumptionSweepInput
 ): Promise<PrepaidConsumptionSweepResult> {
+  // An empty accountIds list means "sweep every prepaid account" — the daily
+  // schedule uses this so accounts opened after the schedule was created are
+  // included without anyone re-registering the schedule.
+  const accountIds =
+    input.accountIds.length > 0 ? input.accountIds : await listPrepaidAccountIdsActivity();
+
   let segmentsRecorded = 0;
   let energyWh = 0;
   let accountsWithoutMeter = 0;
 
-  for (const accountId of input.accountIds) {
+  for (const accountId of accountIds) {
     const result = await accountConsumptionActivity({ accountId });
     segmentsRecorded += result.segmentsRecorded;
     energyWh += result.energyWh;
@@ -159,7 +169,7 @@ export async function prepaidConsumptionSweepWorkflow(
   }
 
   return {
-    accountsProcessed: input.accountIds.length,
+    accountsProcessed: accountIds.length,
     segmentsRecorded,
     energyWh,
     accountsWithoutMeter,

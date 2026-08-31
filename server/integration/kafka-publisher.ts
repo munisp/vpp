@@ -16,35 +16,9 @@ const kafkaPublishDuration = new Histogram({
   buckets: [0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1]
 });
 
-// Event interfaces
-export interface TelemetryEvent {
-  deviceId: string;
-  userId: string;
-  assetId: string;
-  timestamp: Date;
-  metrics: Record<string, number>;
-}
-
-export interface TradeEvent {
-  tradeId: string;
-  userId: string;
-  type: 'buy' | 'sell';
-  quantity: number;
-  price: number;
-  timestamp: Date;
-  status?: string;
-}
-
-export interface PaymentEvent {
-  paymentId: string;
-  userId: string;
-  amount: number;
-  currency: string;
-  gateway: string;
-  timestamp: Date;
-  metadata?: Record<string, any>;
-}
-
+// Event interfaces (only those with a live publisher remain; the interfaces
+// and 35 publish methods with zero callers were removed — every live call
+// site is listed in git history and in the callers of the methods below).
 export interface DREvent {
   eventId: string;
   type: string;
@@ -53,24 +27,6 @@ export interface DREvent {
   targetReduction: number;
   compensationRate: number;
   status?: string;
-}
-
-export interface DRResponseEvent {
-  responseId: string;
-  eventId: string;
-  userId: string;
-  participated: boolean;
-  actualReduction?: number;
-  timestamp: Date;
-}
-
-export interface NotificationEvent {
-  userId: string;
-  type: string;
-  title: string;
-  message: string;
-  timestamp: Date;
-  metadata?: Record<string, any>;
 }
 
 export class KafkaEventPublisher {
@@ -173,151 +129,10 @@ export class KafkaEventPublisher {
     await this.publish(topic, [message]);
   }
 
-  // Telemetry events
-  async publishTelemetry(data: TelemetryEvent): Promise<void> {
-    await this.publish(KAFKA_TOPICS.TELEMETRY_RAW, [{
-      key: data.deviceId,
-      value: data
-    }]);
-  }
-
-  async publishTelemetryBatch(data: TelemetryEvent[]): Promise<void> {
-    await this.publish(KAFKA_TOPICS.TELEMETRY_RAW, 
-      data.map(d => ({ key: d.deviceId, value: d }))
-    );
-  }
-
-  // Trade events
-  async publishTradeCreated(data: TradeEvent): Promise<void> {
-    await this.publish(KAFKA_TOPICS.TRADES_CREATED, [{
-      key: data.tradeId,
-      value: data
-    }]);
-  }
-
-  async publishTradeSettled(data: {
-    tradeId: string;
-    settledAt: Date;
-    finalPrice: number;
-    finalQuantity: number;
-  }): Promise<void> {
-    await this.publish(KAFKA_TOPICS.TRADES_SETTLED, [{
-      key: data.tradeId,
-      value: data
-    }]);
-  }
-
-  // Payment events
-  async publishPaymentInitiated(data: PaymentEvent): Promise<void> {
-    await this.publish(KAFKA_TOPICS.PAYMENTS_INITIATED, [{
-      key: data.paymentId,
-      value: data
-    }]);
-  }
-
-  async publishPaymentCompleted(data: {
-    paymentId: string;
-    completedAt: Date;
-    transactionId: string;
-    amount: number;
-    gateway: string;
-  }): Promise<void> {
-    await this.publish(KAFKA_TOPICS.PAYMENTS_COMPLETED, [{
-      key: data.paymentId,
-      value: data
-    }]);
-  }
-
-  async publishPaymentFailed(data: {
-    paymentId: string;
-    failedAt: Date;
-    reason: string;
-    gateway: string;
-  }): Promise<void> {
-    await this.publish(KAFKA_TOPICS.PAYMENTS_FAILED, [{
-      key: data.paymentId,
-      value: data
-    }]);
-  }
-
   // DR events
   async publishDREventCreated(data: DREvent): Promise<void> {
     await this.publish(KAFKA_TOPICS.DR_EVENTS_CREATED, [{
       key: data.eventId,
-      value: data
-    }]);
-  }
-
-  async publishDREventStarted(data: {
-    eventId: string;
-    startedAt: Date;
-    participantCount: number;
-    targetReduction: number;
-  }): Promise<void> {
-    await this.publish(KAFKA_TOPICS.DR_EVENTS_STARTED, [{
-      key: data.eventId,
-      value: data
-    }]);
-  }
-
-  async publishDREventCompleted(data: {
-    eventId: string;
-    completedAt: Date;
-    actualReduction: number;
-    compensationPaid: number;
-    participantCount: number;
-  }): Promise<void> {
-    await this.publish(KAFKA_TOPICS.DR_EVENTS_COMPLETED, [{
-      key: data.eventId,
-      value: data
-    }]);
-  }
-
-  async publishDRResponse(data: DRResponseEvent): Promise<void> {
-    await this.publish(KAFKA_TOPICS.DR_RESPONSES, [{
-      key: data.responseId,
-      value: data
-    }]);
-  }
-
-  // Notification events
-  async publishNotification(data: NotificationEvent): Promise<void> {
-    await this.publish(KAFKA_TOPICS.NOTIFICATIONS, [{
-      key: data.userId,
-      value: data
-    }]);
-  }
-
-  async publishNotificationBatch(data: NotificationEvent[]): Promise<void> {
-    await this.publish(KAFKA_TOPICS.NOTIFICATIONS,
-      data.map(d => ({ key: d.userId, value: d }))
-    );
-  }
-
-  // User action events
-  async publishUserAction(data: {
-    userId: string;
-    action: string;
-    resource: string;
-    timestamp: Date;
-    metadata?: Record<string, any>;
-  }): Promise<void> {
-    await this.publish(KAFKA_TOPICS.USER_ACTIONS, [{
-      key: data.userId,
-      value: data
-    }]);
-  }
-
-  // System events
-  async publishSystemEvent(data: {
-    eventType: string;
-    severity: 'info' | 'warning' | 'error' | 'critical';
-    message: string;
-    timestamp: Date;
-    metadata?: Record<string, any>;
-  }): Promise<void> {
-    await this.publish(KAFKA_TOPICS.SYSTEM_EVENTS, [{
-      key: data.eventType,
       value: data
     }]);
   }
@@ -356,22 +171,6 @@ export class KafkaEventPublisher {
     }]);
   }
 
-  async publishForecastEvaluated(data: {
-    forecastId: string;
-    targetType: string;
-    mae: number;
-    rmse: number;
-    mape: number;
-    actualValue: number;
-    predictedValue: number;
-    timestamp: Date;
-  }): Promise<void> {
-    await this.publish(KAFKA_TOPICS.FORECASTS_EVALUATED, [{
-      key: data.forecastId,
-      value: { event_id: `eval-${data.forecastId}`, source: 'probabilistic-forecasting', ...data }
-    }]);
-  }
-
   // Optimization Engine events
   async publishOptimizationRun(data: {
     runId: string;
@@ -391,57 +190,6 @@ export class KafkaEventPublisher {
     }]);
   }
 
-  async publishOptimizationSchedule(data: {
-    runId: string;
-    assetId: string;
-    scheduleJson: string;
-    startTime: Date;
-    endTime: Date;
-    timestamp: Date;
-  }): Promise<void> {
-    await this.publish(KAFKA_TOPICS.OPTIMIZATION_SCHEDULES, [{
-      key: `${data.runId}-${data.assetId}`,
-      value: { event_id: `${data.runId}-${data.assetId}`, source: 'optimization-engine', ...data }
-    }]);
-  }
-
-  // Settlement Ledger events
-  async publishSettlementEvent(data: {
-    settlementId: string;
-    eventType: string;
-    periodStart?: Date;
-    periodEnd?: Date;
-    assetId?: string;
-    meterId?: string;
-    quantityKwh?: number;
-    amount?: number;
-    currency?: string;
-    hashPrev?: string;
-    hashCurr: string;
-    timestamp: Date;
-  }): Promise<void> {
-    await this.publish(KAFKA_TOPICS.SETTLEMENT_EVENTS, [{
-      key: data.settlementId,
-      value: { event_id: data.settlementId, source: 'settlement-ledger', ...data }
-    }]);
-  }
-
-  async publishSettlementPeriod(data: {
-    periodId: string;
-    periodStart: Date;
-    periodEnd: Date;
-    totalEvents: number;
-    totalAmount: number;
-    currency: string;
-    merkleRoot: string;
-    timestamp: Date;
-  }): Promise<void> {
-    await this.publish(KAFKA_TOPICS.SETTLEMENT_PERIODS, [{
-      key: data.periodId,
-      value: { event_id: data.periodId, source: 'settlement-ledger', ...data }
-    }]);
-  }
-
   // Edge Orchestration events
   async publishEdgeCommand(data: {
     commandId: string;
@@ -455,35 +203,6 @@ export class KafkaEventPublisher {
     await this.publish(KAFKA_TOPICS.EDGE_COMMANDS, [{
       key: data.commandId,
       value: { event_id: data.commandId, source: 'edge-orchestration', ...data }
-    }]);
-  }
-
-  async publishEdgeResult(data: {
-    commandId: string;
-    gatewayId: string;
-    deviceId?: string;
-    status: string;
-    ackedAt?: Date;
-    offlineExecuted: boolean;
-    signatureValid: boolean;
-    retryCount: number;
-    timestamp: Date;
-  }): Promise<void> {
-    await this.publish(KAFKA_TOPICS.EDGE_RESULTS, [{
-      key: data.commandId,
-      value: { event_id: `result-${data.commandId}`, source: 'edge-orchestration', ...data }
-    }]);
-  }
-
-  async publishEdgeConnectivity(data: {
-    gatewayId: string;
-    status: 'online' | 'offline' | 'degraded';
-    lastHeartbeat: Date;
-    timestamp: Date;
-  }): Promise<void> {
-    await this.publish(KAFKA_TOPICS.EDGE_CONNECTIVITY, [{
-      key: data.gatewayId,
-      value: { event_id: `conn-${data.gatewayId}-${Date.now()}`, source: 'edge-orchestration', ...data }
     }]);
   }
 
@@ -508,36 +227,6 @@ export class KafkaEventPublisher {
     }]);
   }
 
-  async publishEVSchedule(data: {
-    scheduleId: string;
-    chargerId: string;
-    userId: string;
-    scheduleJson: string;
-    departureTime: Date;
-    targetSoc: number;
-    timestamp: Date;
-  }): Promise<void> {
-    await this.publish(KAFKA_TOPICS.EV_SCHEDULES, [{
-      key: data.scheduleId,
-      value: { event_id: data.scheduleId, source: 'ev-charging', ...data }
-    }]);
-  }
-
-  async publishV2GDischarge(data: {
-    sessionId: string;
-    chargerId: string;
-    userId: string;
-    dischargeKwh: number;
-    gridSupportType: string;
-    compensationAmount: number;
-    timestamp: Date;
-  }): Promise<void> {
-    await this.publish(KAFKA_TOPICS.EV_V2G_DISCHARGE, [{
-      key: data.sessionId,
-      value: { event_id: `v2g-${data.sessionId}`, source: 'ev-charging', ...data }
-    }]);
-  }
-
   // Carbon-Aware Dispatch events
   async publishCarbonSignal(data: {
     signalId: string;
@@ -550,33 +239,6 @@ export class KafkaEventPublisher {
     await this.publish(KAFKA_TOPICS.CARBON_SIGNALS, [{
       key: data.signalId,
       value: { event_id: data.signalId, source: 'carbon-aware-dispatch', ...data }
-    }]);
-  }
-
-  async publishCarbonSchedule(data: {
-    scheduleId: string;
-    assetId: string;
-    scheduleJson: string;
-    emissionsAvoided: number;
-    timestamp: Date;
-  }): Promise<void> {
-    await this.publish(KAFKA_TOPICS.CARBON_SCHEDULES, [{
-      key: data.scheduleId,
-      value: { event_id: data.scheduleId, source: 'carbon-aware-dispatch', ...data }
-    }]);
-  }
-
-  async publishRECEvent(data: {
-    recId: string;
-    recAction: 'issued' | 'retired' | 'transferred';
-    recQuantityMwh: number;
-    assetId?: string;
-    userId?: string;
-    timestamp: Date;
-  }): Promise<void> {
-    await this.publish(KAFKA_TOPICS.CARBON_REC_EVENTS, [{
-      key: data.recId,
-      value: { event_id: data.recId, source: 'carbon-aware-dispatch', ...data }
     }]);
   }
 
@@ -595,33 +257,6 @@ export class KafkaEventPublisher {
     }]);
   }
 
-  async publishCommunityBalance(data: {
-    communityId: string;
-    memberId: string;
-    credits: number;
-    debits: number;
-    netBalance: number;
-    timestamp: Date;
-  }): Promise<void> {
-    await this.publish(KAFKA_TOPICS.COMMUNITY_BALANCES, [{
-      key: `${data.communityId}-${data.memberId}`,
-      value: { event_id: `bal-${data.communityId}-${data.memberId}`, source: 'community-energy', ...data }
-    }]);
-  }
-
-  async publishCommunityIslanding(data: {
-    communityId: string;
-    islandingActive: boolean;
-    gridConnected: boolean;
-    reason: string;
-    timestamp: Date;
-  }): Promise<void> {
-    await this.publish(KAFKA_TOPICS.COMMUNITY_ISLANDING, [{
-      key: data.communityId,
-      value: { event_id: `island-${data.communityId}-${Date.now()}`, source: 'community-energy', ...data }
-    }]);
-  }
-
   // MLOps Pipeline events
   async publishMLOpsTrainingRun(data: {
     runId: string;
@@ -635,44 +270,6 @@ export class KafkaEventPublisher {
     await this.publish(KAFKA_TOPICS.MLOPS_TRAINING_RUNS, [{
       key: data.runId,
       value: { event_id: data.runId, source: 'mlops-pipeline', event_type: 'training_run', ...data }
-    }]);
-  }
-
-  async publishMLOpsModelRegistry(data: {
-    modelId: string;
-    modelName: string;
-    modelVersion: string;
-    deploymentState: string;
-    timestamp: Date;
-  }): Promise<void> {
-    await this.publish(KAFKA_TOPICS.MLOPS_MODEL_REGISTRY, [{
-      key: data.modelId,
-      value: { event_id: `reg-${data.modelId}`, source: 'mlops-pipeline', event_type: 'model_registry', ...data }
-    }]);
-  }
-
-  async publishMLOpsDriftEvent(data: {
-    modelId: string;
-    driftScore: number;
-    driftType: string;
-    threshold: number;
-    timestamp: Date;
-  }): Promise<void> {
-    await this.publish(KAFKA_TOPICS.MLOPS_DRIFT_EVENTS, [{
-      key: data.modelId,
-      value: { event_id: `drift-${data.modelId}-${Date.now()}`, source: 'mlops-pipeline', event_type: 'drift_event', ...data }
-    }]);
-  }
-
-  async publishMLOpsDeployment(data: {
-    modelId: string;
-    modelVersion: string;
-    deploymentState: 'deployed' | 'rolled_back' | 'canary';
-    timestamp: Date;
-  }): Promise<void> {
-    await this.publish(KAFKA_TOPICS.MLOPS_DEPLOYMENTS, [{
-      key: data.modelId,
-      value: { event_id: `deploy-${data.modelId}-${Date.now()}`, source: 'mlops-pipeline', event_type: 'deployment', ...data }
     }]);
   }
 
@@ -694,30 +291,6 @@ export class KafkaEventPublisher {
     }]);
   }
 
-  async publishAnomalyScore(data: {
-    assetId: string;
-    score: number;
-    components: Record<string, number>;
-    timestamp: Date;
-  }): Promise<void> {
-    await this.publish(KAFKA_TOPICS.ANOMALIES_SCORES, [{
-      key: data.assetId,
-      value: { event_id: `score-${data.assetId}-${Date.now()}`, source: 'anomaly-detection', ...data }
-    }]);
-  }
-
-  async publishAnomalyFeedback(data: {
-    anomalyId: string;
-    label: 'true_positive' | 'false_positive' | 'unknown';
-    feedbackBy: string;
-    timestamp: Date;
-  }): Promise<void> {
-    await this.publish(KAFKA_TOPICS.ANOMALIES_FEEDBACK, [{
-      key: data.anomalyId,
-      value: { event_id: `fb-${data.anomalyId}`, source: 'anomaly-detection', ...data }
-    }]);
-  }
-
   // Compliance Automation events
   async publishComplianceCheck(data: {
     checkId: string;
@@ -735,33 +308,6 @@ export class KafkaEventPublisher {
     }]);
   }
 
-  async publishComplianceViolation(data: {
-    checkId: string;
-    ruleId: string;
-    jurisdiction: string;
-    subjectId: string;
-    violationDetails: string;
-    severity: string;
-    timestamp: Date;
-  }): Promise<void> {
-    await this.publish(KAFKA_TOPICS.COMPLIANCE_VIOLATIONS, [{
-      key: data.checkId,
-      value: { event_id: `viol-${data.checkId}`, source: 'compliance-automation', ...data }
-    }]);
-  }
-
-  async publishComplianceRemediation(data: {
-    checkId: string;
-    remediationAction: string;
-    status: 'pending' | 'in_progress' | 'completed';
-    timestamp: Date;
-  }): Promise<void> {
-    await this.publish(KAFKA_TOPICS.COMPLIANCE_REMEDIATION, [{
-      key: data.checkId,
-      value: { event_id: `rem-${data.checkId}`, source: 'compliance-automation', ...data }
-    }]);
-  }
-
   // Blockchain Audit events
   async publishBlockchainAnchor(data: {
     anchorId: string;
@@ -775,18 +321,6 @@ export class KafkaEventPublisher {
     await this.publish(KAFKA_TOPICS.BLOCKCHAIN_ANCHORS, [{
       key: data.anchorId,
       value: { event_id: data.anchorId, source: 'blockchain-audit', ...data }
-    }]);
-  }
-
-  async publishBlockchainProof(data: {
-    anchorId: string;
-    proofJson: string;
-    verificationStatus: 'verified' | 'failed' | 'pending';
-    timestamp: Date;
-  }): Promise<void> {
-    await this.publish(KAFKA_TOPICS.BLOCKCHAIN_PROOFS, [{
-      key: data.anchorId,
-      value: { event_id: `proof-${data.anchorId}`, source: 'blockchain-audit', ...data }
     }]);
   }
 
@@ -808,19 +342,6 @@ export class KafkaEventPublisher {
     }]);
   }
 
-  async publishDERAvailabilityChanged(data: {
-    assetId: string;
-    availabilityStart?: Date;
-    availabilityEnd?: Date;
-    available: boolean;
-    reason?: string;
-    timestamp: Date;
-  }): Promise<void> {
-    await this.publish(KAFKA_TOPICS.DER_AVAILABILITY_CHANGED, [{
-      key: data.assetId,
-      value: { event_id: `avail-${data.assetId}-${Date.now()}`, source: 'der-capabilities', ...data }
-    }]);
-  }
 }
 
 // Singleton instance

@@ -1,8 +1,14 @@
 """
-Temporal Payment Worker
+Temporal Payment Worker — RETIRED.
 
-Executes payment processing workflows with retry and compensation logic.
-Calls real payment gateway APIs (M-Pesa, Airtel Money, Tigo Pesa) via HTTP.
+This worker is retired: the TypeScript workers own this queue. The server
+dispatches the workflow type `processPayment` (server/integration/
+temporal-client.ts) on the `payment-processing` task queue, and that queue is
+served by server/workflows/worker.ts (deployed as `payment-worker` in
+docker-compose.prod.yml). This module registers a *different* workflow type
+(`PaymentProcessingWorkflow`) on the same queue, so running it alongside the
+TS worker would fail every dispatched task. It is no longer launched by any
+compose file and is kept for reference only.
 """
 
 import asyncio
@@ -738,6 +744,12 @@ def validate_gateway_config():
 
 async def main():
     """Start the payment worker."""
+    logger.warning(
+        "[Payment Worker] RETIRED: TS workers own this queue "
+        "(server/workflows/worker.ts serves 'processPayment' on "
+        "'payment-processing'; this module registers the mismatched "
+        "'PaymentProcessingWorkflow'). Do not run in production."
+    )
     validate_gateway_config()
     temporal_address = os.getenv('TEMPORAL_ADDRESS', 'localhost:7233')
     client = await Client.connect(temporal_address)

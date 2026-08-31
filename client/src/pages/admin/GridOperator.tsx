@@ -8,11 +8,29 @@ import { Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis, CartesianG
 export default function GridOperator() {
   const [region] = useState<string | undefined>(undefined);
 
-  const { data: gridStatus, isLoading: statusLoading } = trpc.gridOperator.adminGetStatus.useQuery({ region });
-  const { data: pricing } = trpc.gridOperator.adminGetPricing.useQuery({ region });
-  const { data: forecast } = trpc.gridOperator.adminGetForecast.useQuery({ hoursAhead: 24, region });
-  const { data: vppCapacity } = trpc.gridOperator.getVPPCapacity.useQuery({ region });
-  const { data: vppPerformance } = trpc.gridOperator.getVPPPerformance.useQuery({ timeWindow: 24 });
+  const statusQuery = trpc.gridOperator.adminGetStatus.useQuery({ region });
+  const pricingQuery = trpc.gridOperator.adminGetPricing.useQuery({ region });
+  const forecastQuery = trpc.gridOperator.adminGetForecast.useQuery({ hoursAhead: 24, region });
+  const capacityQuery = trpc.gridOperator.getVPPCapacity.useQuery({ region });
+  const performanceQuery = trpc.gridOperator.getVPPPerformance.useQuery({ timeWindow: 24 });
+
+  const gridStatus = statusQuery.data;
+  const pricing = pricingQuery.data;
+  const forecastResult = forecastQuery.data;
+  const vppCapacity = capacityQuery.data;
+  const vppPerformance = performanceQuery.data;
+  const statusLoading = statusQuery.isLoading;
+
+  // Fail-loud contract: the server now returns availability flags instead of
+  // fabricated grid numbers, and throws (no_region / *_unavailable) when it
+  // cannot answer honestly. Surface both.
+  const queryErrors = [
+    ['Grid status', statusQuery.error],
+    ['Pricing', pricingQuery.error],
+    ['Forecast', forecastQuery.error],
+    ['VPP capacity', capacityQuery.error],
+    ['VPP performance', performanceQuery.error],
+  ].filter(([, e]) => e) as Array<[string, { message: string }]>;
 
   const getStatusColor = (status: string) => {
     switch (status) {
@@ -47,8 +65,40 @@ export default function GridOperator() {
         <p className="text-muted-foreground">Monitor grid status and VPP performance</p>
       </div>
 
+      {queryErrors.length > 0 && (
+        <Card className="border-red-300">
+          <CardContent className="pt-6">
+            <div className="flex items-start gap-2">
+              <AlertCircle className="h-5 w-5 text-red-500 mt-0.5" />
+              <div className="space-y-1">
+                {queryErrors.map(([label, e]) => (
+                  <p key={label} className="text-sm text-red-600">
+                    {label}: {e.message}
+                  </p>
+                ))}
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
       {/* Grid Status */}
-      {gridStatus && (
+      {gridStatus && gridStatus.available === false && (
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm font-medium flex items-center gap-2">
+              <AlertCircle className="h-5 w-5 text-gray-500" />
+              Grid Status
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <p className="text-sm text-muted-foreground">
+              Unavailable — {gridStatus.reason ?? 'no grid monitoring data'}.
+            </p>
+          </CardContent>
+        </Card>
+      )}
+      {gridStatus && gridStatus.available !== false && (
         <div className="grid gap-4 md:grid-cols-4">
           <Card>
             <CardHeader className="pb-2">
@@ -77,9 +127,11 @@ export default function GridOperator() {
               </CardTitle>
             </CardHeader>
             <CardContent>
-              <div className="text-2xl font-bold">{gridStatus.load.toFixed(1)} MW</div>
+              <div className="text-2xl font-bold">
+                {gridStatus.load != null ? `${gridStatus.load.toFixed(1)} MW` : '—'}
+              </div>
               <p className="text-xs text-muted-foreground mt-2">
-                Capacity: {gridStatus.capacity} MW
+                Capacity: {gridStatus.capacity != null ? `${gridStatus.capacity} MW` : 'unmeasured'}
               </p>
             </CardContent>
           </Card>
@@ -93,10 +145,14 @@ export default function GridOperator() {
             </CardHeader>
             <CardContent>
               <div className={`text-2xl font-bold ${getStatusColor(gridStatus.status)}`}>
-                {gridStatus.utilization.toFixed(1)}%
+                {gridStatus.utilization != null ? `${gridStatus.utilization.toFixed(1)}%` : '—'}
               </div>
               <p className="text-xs text-muted-foreground mt-2">
-                {gridStatus.utilization > 80 ? 'High load' : 'Normal operation'}
+                {gridStatus.utilization == null
+                  ? 'Utilization unmeasured'
+                  : gridStatus.utilization > 80
+                    ? 'High load'
+                    : 'Normal operation'}
               </p>
             </CardContent>
           </Card>
@@ -109,9 +165,11 @@ export default function GridOperator() {
               </CardTitle>
             </CardHeader>
             <CardContent>
-              <div className="text-2xl font-bold">{gridStatus.frequency.toFixed(2)} Hz</div>
+              <div className="text-2xl font-bold">
+                {gridStatus.frequency != null ? `${gridStatus.frequency.toFixed(2)} Hz` : '—'}
+              </div>
               <p className="text-xs text-muted-foreground mt-2">
-                Voltage: {gridStatus.voltage.toFixed(1)} V
+                Voltage: {gridStatus.voltage != null ? `${gridStatus.voltage.toFixed(1)} V` : '—'}
               </p>
             </CardContent>
           </Card>
@@ -123,29 +181,51 @@ export default function GridOperator() {
         <Card>
           <CardHeader>
             <CardTitle>Current Pricing Signal</CardTitle>
-            <CardDescription>Real-time electricity pricing</CardDescription>
+            <CardDescription>Most recent real market price row — never a synthesized figure</CardDescription>
           </CardHeader>
           <CardContent>
-            <div className="grid gap-4 md:grid-cols-3">
-              <div>
-                <div className="text-sm font-medium text-muted-foreground">Current Price</div>
-                <div className="text-3xl font-bold mt-1">{pricing.price} ¢/kWh</div>
+            {pricing.available === false || pricing.price == null ? (
+              <p className="text-sm text-muted-foreground">
+                Unavailable — {pricing.reason ?? 'no current market price'}.
+              </p>
+            ) : (
+              <div className="grid gap-4 md:grid-cols-3">
+                <div>
+                  <div className="text-sm font-medium text-muted-foreground">Current Price</div>
+                  <div className="text-3xl font-bold mt-1">
+                    {pricing.price} {pricing.currency ? `${pricing.currency}/kWh` : '/kWh'}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-sm font-medium text-muted-foreground">Price Type</div>
+                  <div className="text-lg font-medium mt-1 capitalize">{pricing.priceType.replace('_', ' ')}</div>
+                </div>
+                <div>
+                  <div className="text-sm font-medium text-muted-foreground">Valid Until</div>
+                  <div className="text-lg font-medium mt-1">
+                    {pricing.validUntil ? new Date(pricing.validUntil).toLocaleTimeString() : '—'}
+                  </div>
+                </div>
               </div>
-              <div>
-                <div className="text-sm font-medium text-muted-foreground">Price Type</div>
-                <div className="text-lg font-medium mt-1 capitalize">{pricing.priceType.replace('_', ' ')}</div>
-              </div>
-              <div>
-                <div className="text-sm font-medium text-muted-foreground">Valid Until</div>
-                <div className="text-lg font-medium mt-1">{new Date(pricing.validUntil).toLocaleTimeString()}</div>
-              </div>
-            </div>
+            )}
           </CardContent>
         </Card>
       )}
 
       {/* Load Forecast */}
-      {forecast && forecast.length > 0 && (
+      {forecastResult && forecastResult.insufficientHistory && (
+        <Card>
+          <CardHeader>
+            <CardTitle>24-Hour Load Forecast</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <p className="text-sm text-muted-foreground">
+              Unavailable — {forecastResult.reason ?? 'insufficient real grid history'}.
+            </p>
+          </CardContent>
+        </Card>
+      )}
+      {forecastResult && !forecastResult.insufficientHistory && forecastResult.forecasts.length > 0 && (
         <Card>
           <CardHeader>
             <CardTitle>24-Hour Load Forecast</CardTitle>
@@ -153,7 +233,7 @@ export default function GridOperator() {
           </CardHeader>
           <CardContent>
             <ResponsiveContainer width="100%" height={300}>
-              <LineChart data={forecast}>
+              <LineChart data={forecastResult.forecasts}>
                 <CartesianGrid strokeDasharray="3 3" />
                 <XAxis
                   dataKey="forecastTime"

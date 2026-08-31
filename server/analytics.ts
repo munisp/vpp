@@ -4,9 +4,32 @@
  * Functions for aggregating and analyzing platform data
  */
 
+import { TRPCError } from '@trpc/server';
 import { getDb } from './db';
 import { trades, payments, telemetry, users, assets } from '../drizzle/schema';
 import { sql, and, gte, lte, eq, desc } from 'drizzle-orm';
+
+/**
+ * Fail-loud helpers: an unavailable database or a failed query must surface
+ * as an error to the client, never as an empty array / all-zero metrics that
+ * the UI renders as real zeros. A successful query with zero rows still
+ * returns [] (or real zero counts) — that is the legitimate "no data" case.
+ */
+function dbUnavailableError(): TRPCError {
+  return new TRPCError({
+    code: 'INTERNAL_SERVER_ERROR',
+    message: 'Analytics database is unavailable; cannot compute real metrics',
+  });
+}
+
+function queryFailedError(what: string, error: unknown): TRPCError {
+  console.error(`[Analytics] Failed to get ${what}:`, error);
+  return new TRPCError({
+    code: 'INTERNAL_SERVER_ERROR',
+    message: `Failed to compute ${what} from real data`,
+    cause: error,
+  });
+}
 
 export interface RevenueData {
   date: string;
@@ -48,7 +71,7 @@ export async function getRevenueData(
   endDate: Date
 ): Promise<RevenueData[]> {
   const db = await getDb();
-  if (!db) return [];
+  if (!db) throw dbUnavailableError();
 
   try {
     // Group payments by date and sum amounts
@@ -79,8 +102,7 @@ export async function getRevenueData(
       transactions: Number(row.transactions),
     }));
   } catch (error) {
-    console.error('[Analytics] Failed to get revenue data:', error);
-    return [];
+    throw queryFailedError('revenue data', error);
   }
 }
 
@@ -94,7 +116,7 @@ export async function getEnergyFlowData(
   interval: 'hour' | 'day' = 'day'
 ): Promise<EnergyFlowData[]> {
   const db = await getDb();
-  if (!db) return [];
+  if (!db) throw dbUnavailableError();
 
   try {
     const conditions = [
@@ -138,8 +160,7 @@ export async function getEnergyFlowData(
       gridImport: Number(row.gridImport) || 0,
     }));
   } catch (error) {
-    console.error('[Analytics] Failed to get energy flow data:', error);
-    return [];
+    throw queryFailedError('energy flow data', error);
   }
 }
 
@@ -148,15 +169,7 @@ export async function getEnergyFlowData(
  */
 export async function getUserEngagementMetrics(): Promise<UserEngagementMetrics> {
   const db = await getDb();
-  if (!db) {
-    return {
-      totalUsers: 0,
-      activeUsers: 0,
-      newUsersThisMonth: 0,
-      averageAssetsPerUser: 0,
-      tradingParticipation: 0,
-    };
-  }
+  if (!db) throw dbUnavailableError();
 
   try {
     const now = new Date();
@@ -205,14 +218,7 @@ export async function getUserEngagementMetrics(): Promise<UserEngagementMetrics>
       tradingParticipation: Math.round(tradingParticipation * 100) / 100,
     };
   } catch (error) {
-    console.error('[Analytics] Failed to get user engagement metrics:', error);
-    return {
-      totalUsers: 0,
-      activeUsers: 0,
-      newUsersThisMonth: 0,
-      averageAssetsPerUser: 0,
-      tradingParticipation: 0,
-    };
+    throw queryFailedError('user engagement metrics', error);
   }
 }
 
@@ -221,15 +227,7 @@ export async function getUserEngagementMetrics(): Promise<UserEngagementMetrics>
  */
 export async function getSystemStatistics(): Promise<SystemStatistics> {
   const db = await getDb();
-  if (!db) {
-    return {
-      totalRevenue: 0,
-      totalEnergyTraded: 0,
-      totalAssets: 0,
-      activeTrades: 0,
-      averagePrice: 0,
-    };
-  }
+  if (!db) throw dbUnavailableError();
 
   try {
     // Total revenue from completed payments
@@ -275,14 +273,7 @@ export async function getSystemStatistics(): Promise<SystemStatistics> {
       averagePrice,
     };
   } catch (error) {
-    console.error('[Analytics] Failed to get system statistics:', error);
-    return {
-      totalRevenue: 0,
-      totalEnergyTraded: 0,
-      totalAssets: 0,
-      activeTrades: 0,
-      averagePrice: 0,
-    };
+    throw queryFailedError('system statistics', error);
   }
 }
 
@@ -295,7 +286,7 @@ export async function getTradingVolumeData(
   endDate: Date
 ): Promise<Array<{ date: string; volume: number; count: number }>> {
   const db = await getDb();
-  if (!db) return [];
+  if (!db) throw dbUnavailableError();
 
   try {
     const conditions = [
@@ -325,7 +316,6 @@ export async function getTradingVolumeData(
       count: Number(row.count) || 0,
     }));
   } catch (error) {
-    console.error('[Analytics] Failed to get trading volume data:', error);
-    return [];
+    throw queryFailedError('trading volume data', error);
   }
 }

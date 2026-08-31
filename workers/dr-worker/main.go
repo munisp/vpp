@@ -538,6 +538,16 @@ func CalculateCompensationActivity(ctx context.Context, input CalculateCompensat
 // ---------------------------------------------------------------------------
 
 func main() {
+	// RETIRED: the TypeScript workers own DR orchestration. The server
+	// dispatches `orchestrateDREvent` on the `dr-orchestration` task queue
+	// (server/integration/temporal-client.ts), served by
+	// server/workflows/dr-worker.ts (deployed as `dr-worker` in
+	// docker-compose.prod.yml). This worker polls `dr-events`, a queue
+	// nothing publishes to, and registers `DREventWorkflow`, a type nothing
+	// dispatches. It is no longer launched by any compose file and is kept
+	// for reference only. Do not run it in production.
+	log.Println("[DR Worker] RETIRED: TS workers own DR orchestration (queue dr-orchestration, workflow orchestrateDREvent); this worker polls dr-events, which nothing publishes to. Do not run in production.")
+
 	if err := initDB(); err != nil {
 		log.Fatal("Failed to initialize database:", err)
 	}

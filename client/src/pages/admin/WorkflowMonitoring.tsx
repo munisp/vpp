@@ -11,7 +11,20 @@ import { Textarea } from '@/components/ui/textarea';
 import { Activity, CheckCircle2, XCircle, Clock, Loader2, Play, Square, AlertTriangle } from 'lucide-react';
 import { toast } from 'sonner';
 
-type WorkflowType = 'DREventWorkflow' | 'AutomatedTradingWorkflow' | 'P2PTradingWorkflow' | 'PaymentProcessingWorkflow' | undefined;
+// Live workflow types dispatched by the server (server/routers/workflows.ts
+// WORKFLOW_TYPES) — the old PascalCase names belonged to retired duplicate
+// workers that nothing dispatches to.
+type WorkflowType =
+  | 'processPayment'
+  | 'refundWorkflow'
+  | 'orchestrateDREvent'
+  | 'cancelDREventWorkflow'
+  | 'executeTrade'
+  | 'automatedTradingWorkflow'
+  | 'p2pTradingWorkflow'
+  | 'prepaidIssuanceWorkflow'
+  | 'prepaidConsumptionSweepWorkflow'
+  | undefined;
 type WorkflowStatus = 'running' | 'completed' | 'failed' | 'cancelled' | 'terminated' | undefined;
 
 export default function WorkflowMonitoring() {
@@ -177,10 +190,15 @@ export default function WorkflowMonitoring() {
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="all">All Types</SelectItem>
-                <SelectItem value="DREventWorkflow">DR Event</SelectItem>
-                <SelectItem value="AutomatedTradingWorkflow">Automated Trading</SelectItem>
-                <SelectItem value="P2PTradingWorkflow">P2P Trading</SelectItem>
-                <SelectItem value="PaymentProcessingWorkflow">Payment Processing</SelectItem>
+                <SelectItem value="processPayment">Payment Processing</SelectItem>
+                <SelectItem value="refundWorkflow">Refund</SelectItem>
+                <SelectItem value="orchestrateDREvent">DR Event</SelectItem>
+                <SelectItem value="cancelDREventWorkflow">DR Event Cancellation</SelectItem>
+                <SelectItem value="executeTrade">Trade Execution</SelectItem>
+                <SelectItem value="automatedTradingWorkflow">Automated Trading</SelectItem>
+                <SelectItem value="p2pTradingWorkflow">P2P Trading</SelectItem>
+                <SelectItem value="prepaidIssuanceWorkflow">Prepaid Issuance</SelectItem>
+                <SelectItem value="prepaidConsumptionSweepWorkflow">Prepaid Consumption Sweep</SelectItem>
               </SelectContent>
             </Select>
           </div>

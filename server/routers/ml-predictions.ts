@@ -3,7 +3,7 @@ import { protectedProcedure, router } from '../_core/trpc';
 import { pricePredictionService } from '../ml/price-prediction';
 import { getDb } from '../db';
 import { assets, marketPrices } from '../../drizzle/schema';
-import { desc, eq } from 'drizzle-orm';
+import { and, desc, eq, gte, sql } from 'drizzle-orm';
 
 export const mlPredictionsRouter = router({
   /**
@@ -194,9 +194,31 @@ export const mlPredictionsRouter = router({
       const latestPriceRows = await db
         .select()
         .from(marketPrices)
+        .where(eq(marketPrices.country, ctx.user.country))
         .orderBy(desc(marketPrices.timestamp))
         .limit(1);
       const currentPrice = latestPriceRows.length > 0 ? latestPriceRows[0].price : null;
+
+      // Real off-peak vs peak price averages from recorded market prices for
+      // the user's own country (never a hardcoded region) over the last 30
+      // days. Either average missing = insufficient real data, and the
+      // off-peak charging action is omitted entirely rather than dressed up
+      // with a fabricated capacity×0.15 "TZS/day" figure.
+      const thirtyDaysAgo = new Date();
+      thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+      const bandAverages = await db
+        .select({
+          priceType: marketPrices.priceType,
+          avgPrice: sql<number>`AVG(${marketPrices.price})`,
+        })
+        .from(marketPrices)
+        .where(and(
+          eq(marketPrices.country, ctx.user.country),
+          gte(marketPrices.timestamp, thirtyDaysAgo),
+        ))
+        .groupBy(marketPrices.priceType);
+      const avgOffPeakPrice = bandAverages.find(r => r.priceType === 'off_peak')?.avgPrice ?? null;
+      const avgPeakPrice = bandAverages.find(r => r.priceType === 'peak')?.avgPrice ?? null;
 
       // Calculate potential revenue (only when a real current price AND a
       // real model peak price exist)
@@ -212,11 +234,16 @@ export const mlPredictionsRouter = router({
               priority: 'high',
             }]
           : []),
-        {
-          type: 'pattern',
-          message: `Best trading days: ${analysis.bestTradingDays.join(', ')}`,
-          priority: 'medium',
-        },
+        // Only surface trading-day patterns when they come from a trained
+        // model — an untrained model's day coefficients are placeholders and
+        // must never reach the user as "Best trading days: ...".
+        ...(analysis.trained && analysis.bestTradingDays.length > 0
+          ? [{
+              type: 'pattern',
+              message: `Best trading days: ${analysis.bestTradingDays.join(', ')}`,
+              priority: 'medium',
+            }]
+          : []),
         // Only report volatility when it was computed from real history.
         ...(analysis.priceVolatility !== null
           ? [{
@@ -234,10 +261,14 @@ export const mlPredictionsRouter = router({
               expectedBenefit: `+${(totalPotentialRevenue * 0.8).toFixed(2)} TZS/day`,
             }]
           : []),
-        {
-          action: 'Charge batteries during off-peak hours (midnight-5 AM)',
-          expectedBenefit: `Save ${(totalCapacity * 0.15).toFixed(2)} TZS/day`,
-        },
+        // Only recommend off-peak charging when real recorded market prices
+        // quantify the off-peak/peak spread; otherwise omit the action.
+        ...(avgOffPeakPrice !== null && avgPeakPrice !== null
+          ? [{
+              action: 'Charge batteries during off-peak hours',
+              expectedBenefit: `Off-peak prices average ${(Number(avgOffPeakPrice)).toFixed(2)}¢/kWh vs ${(Number(avgPeakPrice)).toFixed(2)}¢/kWh peak over the last 30 days`,
+            }]
+          : []),
       ];
 
       return {

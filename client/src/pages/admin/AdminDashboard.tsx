@@ -1,15 +1,20 @@
 import DashboardLayout from "@/components/DashboardLayout";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { trpc } from "@/lib/trpc";
-import { Users, Zap, DollarSign, TrendingUp, Activity, AlertCircle, Gauge, CreditCard, BarChart3, CheckCircle, Brain, Workflow, Grid3x3, Monitor, Cpu, Bell } from "lucide-react";
+import { Users, Zap, DollarSign, TrendingUp, Activity, AlertCircle, Gauge, CreditCard, BarChart3, CheckCircle, Brain, Workflow, Grid3x3, Monitor, Cpu, Bell, RefreshCw } from "lucide-react";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Button } from "@/components/ui/button";
 import { useAuth } from "@/_core/hooks/useAuth";
 import { Redirect, useLocation } from "wouter";
 
 export default function AdminDashboard() {
   const { user, loading } = useAuth();
   const [, setLocation] = useLocation();
-  const { data: stats, isLoading } = trpc.admin.getSystemStats.useQuery();
+  const statsQuery = trpc.admin.getSystemStats.useQuery();
+  const { data: stats, isLoading, isError: statsError, error: statsErrorMsg } = statsQuery;
+  // Real health signal from the performance monitor (5-minute window).
+  const healthQuery = trpc.performance.getHealth.useQuery();
+  const health = healthQuery.data;
 
   // Check if user is admin
   if (!loading && user?.role !== 'admin') {
@@ -51,6 +56,16 @@ export default function AdminDashboard() {
     },
   ];
 
+  // Only signals with a real source are listed. There is no health probe for
+  // the WebSocket server or payment gateways, so those rows do not exist here.
+  const healthRows: Array<{ label: string; ok: boolean }> = health
+    ? [
+        { label: "API Server", ok: health.checks.api },
+        { label: "Database", ok: health.checks.database },
+        { label: "External APIs", ok: health.checks.externalApi },
+      ]
+    : [];
+
   return (
     <DashboardLayout>
       <div className="space-y-6">
@@ -77,6 +92,8 @@ export default function AdminDashboard() {
                     <Skeleton className="h-8 w-24" />
                     <Skeleton className="h-4 w-32" />
                   </div>
+                ) : statsError ? (
+                  <p className="text-sm text-red-600">Unavailable</p>
                 ) : (
                   <>
                     <div className="text-2xl font-bold">{metric.value}</div>
@@ -314,43 +331,69 @@ export default function AdminDashboard() {
           </Card>
         </div>
 
-        {/* System Status */}
+        {/* Error banner for system stats */}
+        {statsError && (
+          <Card className="border-red-200 bg-red-50">
+            <CardContent className="flex items-center justify-between gap-3 py-4">
+              <div className="flex items-center gap-3">
+                <AlertCircle className="h-5 w-5 text-red-600" />
+                <p className="text-sm text-red-800">
+                  System statistics unavailable: {statsErrorMsg?.message || "Unknown error"}
+                </p>
+              </div>
+              <Button variant="outline" size="sm" onClick={() => statsQuery.refetch()}>
+                <RefreshCw className="h-4 w-4 mr-2" />
+                Retry
+              </Button>
+            </CardContent>
+          </Card>
+        )}
+
+        {/* System Status — backed by trpc.performance.getHealth, which derives
+            each check from measured 5-minute p95/success-rate windows. */}
         <Card>
           <CardHeader>
             <CardTitle>System Status</CardTitle>
-            <CardDescription>Real-time system health and performance</CardDescription>
+            <CardDescription>
+              Measured health over the last 5 minutes — a check is shown only when it is really measured
+            </CardDescription>
           </CardHeader>
           <CardContent>
-            <div className="space-y-4">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <div className="h-2 w-2 rounded-full bg-green-500 animate-pulse" />
-                  <span className="text-sm font-medium">API Server</span>
-                </div>
-                <span className="text-sm text-muted-foreground">Operational</span>
+            {healthQuery.isLoading ? (
+              <div className="space-y-2">
+                <Skeleton className="h-6 w-full" />
+                <Skeleton className="h-6 w-full" />
+                <Skeleton className="h-6 w-full" />
               </div>
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <div className="h-2 w-2 rounded-full bg-green-500 animate-pulse" />
-                  <span className="text-sm font-medium">Database</span>
-                </div>
-                <span className="text-sm text-muted-foreground">Operational</span>
+            ) : healthQuery.isError ? (
+              <div className="flex items-center justify-between gap-3">
+                <p className="text-sm text-red-600">
+                  Health check unavailable: {(healthQuery.error as any)?.message || "Unknown error"}
+                </p>
+                <Button variant="outline" size="sm" onClick={() => healthQuery.refetch()}>
+                  <RefreshCw className="h-4 w-4 mr-2" />
+                  Retry
+                </Button>
               </div>
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <div className="h-2 w-2 rounded-full bg-green-500 animate-pulse" />
-                  <span className="text-sm font-medium">WebSocket Server</span>
-                </div>
-                <span className="text-sm text-muted-foreground">Operational</span>
+            ) : (
+              <div className="space-y-4">
+                {healthRows.map((row) => (
+                  <div key={row.label} className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <div className={`h-2 w-2 rounded-full ${row.ok ? "bg-green-500" : "bg-red-500"}`} />
+                      <span className="text-sm font-medium">{row.label}</span>
+                    </div>
+                    <span className="text-sm text-muted-foreground">
+                      {row.ok ? "Healthy" : "Failing checks"}
+                    </span>
+                  </div>
+                ))}
+                <p className="text-xs text-muted-foreground pt-2 border-t">
+                  Overall: <span className="capitalize font-medium">{health?.status}</span>
+                  {health?.message ? ` — ${health.message}` : ""}
+                </p>
               </div>
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <div className="h-2 w-2 rounded-full bg-yellow-500 animate-pulse" />
-                  <span className="text-sm font-medium">Payment Gateway</span>
-                </div>
-                <span className="text-sm text-muted-foreground">Demo Mode</span>
-              </div>
-            </div>
+            )}
           </CardContent>
         </Card>
       </div>

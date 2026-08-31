@@ -1,4 +1,25 @@
-# VPP Platform Orchestrator
+# VPP Platform Orchestrator — EXPERIMENTAL
+
+> **This module is experimental and is not deployed.** It was removed from
+> `docker-compose.prod.yml` because:
+>
+> - It polls the Temporal task queue `vpp-orchestrator`, which **nothing in the
+>   repository publishes to** — no workflow here is ever started.
+> - It cannot boot without a Dapr sidecar
+>   (`orchestrator/services/services.go` fails fast on `dapr.NewClient()`), and
+>   no deployment manifest provides one.
+> - Several workflows call activities that are deliberately **not registered**
+>   (see the "Deliberately NOT registered" list in
+>   `workflows/workflows.go`), e.g. `UserOnboardingWorkflow` needs
+>   `CreateUserActivity`, `SendWelcomeEmailActivity` and
+>   `InitializeWalletActivity`; dispatching it would fail at the first step.
+> - The journeys it does implement fully (e.g. `AutoTradingWorkflow`)
+>   duplicate the live TypeScript chain (`server/workflows/trading-worker.ts`
+>   on `trading-execution`), which is the one the server actually dispatches.
+>
+> Reintroduce this service only together with (a) a real dispatcher in
+> `server/integration/temporal-client.ts`, (b) the missing activities, and
+> (c) its middleware dependencies (Dapr, TigerBeetle) in the deployment.
 
 Temporal-based orchestration layer for 30 user stories/journeys with full middleware integration.
 

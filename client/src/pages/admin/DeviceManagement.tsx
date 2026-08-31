@@ -16,12 +16,17 @@ export default function DeviceManagement() {
   const [showCommandDialog, setShowCommandDialog] = useState(false);
   const [showLogsDialog, setShowLogsDialog] = useState(false);
 
-  const { data: devicesData, isLoading } = trpc.devices.list.useQuery();
-  const { data: stats } = trpc.devices.getStats.useQuery();
-  const { data: logsData } = trpc.devices.getLogs.useQuery(
+  const devicesQuery = trpc.devices.list.useQuery();
+  const { data: devicesData, isLoading } = devicesQuery;
+  const statsQuery = trpc.devices.getStats.useQuery();
+  const { data: stats } = statsQuery;
+  const logsQuery = trpc.devices.getLogs.useQuery(
     { deviceId: selectedDevice! },
     { enabled: !!selectedDevice && showLogsDialog }
   );
+  const { data: logsData } = logsQuery;
+  const devicesFailed = devicesQuery.isError;
+  const statsFailed = statsQuery.isError;
 
   const utils = trpc.useUtils();
 
@@ -93,14 +98,15 @@ export default function DeviceManagement() {
         </Dialog>
       </div>
 
-      {/* Statistics Cards */}
+      {/* Statistics Cards — '—' when the stats query failed; a failed backend
+          is never rendered as zero devices. */}
       <div className="grid grid-cols-1 md:grid-cols-5 gap-4 mb-8">
         <Card>
           <CardHeader className="pb-2">
             <CardTitle className="text-sm font-medium">Total Devices</CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold">{stats?.total || 0}</div>
+            <div className="text-2xl font-bold">{statsFailed ? '—' : stats?.total || 0}</div>
           </CardContent>
         </Card>
         <Card>
@@ -108,7 +114,7 @@ export default function DeviceManagement() {
             <CardTitle className="text-sm font-medium">Online</CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold text-green-600">{stats?.online || 0}</div>
+            <div className="text-2xl font-bold text-green-600">{statsFailed ? '—' : stats?.online || 0}</div>
           </CardContent>
         </Card>
         <Card>
@@ -116,7 +122,7 @@ export default function DeviceManagement() {
             <CardTitle className="text-sm font-medium">Offline</CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold text-gray-400">{stats?.offline || 0}</div>
+            <div className="text-2xl font-bold text-gray-400">{statsFailed ? '—' : stats?.offline || 0}</div>
           </CardContent>
         </Card>
         <Card>
@@ -124,7 +130,7 @@ export default function DeviceManagement() {
             <CardTitle className="text-sm font-medium">Error</CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold text-red-600">{stats?.error || 0}</div>
+            <div className="text-2xl font-bold text-red-600">{statsFailed ? '—' : stats?.error || 0}</div>
           </CardContent>
         </Card>
         <Card>
@@ -132,16 +138,50 @@ export default function DeviceManagement() {
             <CardTitle className="text-sm font-medium">Maintenance</CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold text-yellow-600">{stats?.maintenance || 0}</div>
+            <div className="text-2xl font-bold text-yellow-600">{statsFailed ? '—' : stats?.maintenance || 0}</div>
           </CardContent>
         </Card>
       </div>
+
+      {(devicesFailed || statsFailed) && (
+        <Card className="border-red-200 bg-red-50 mb-8">
+          <CardContent className="flex items-center justify-between gap-3 py-4">
+            <div className="flex items-center gap-3">
+              <AlertCircle className="h-5 w-5 text-red-600" />
+              <p className="text-sm text-red-800">
+                {[
+                  devicesFailed && `devices: ${(devicesQuery.error as any)?.message || 'failed'}`,
+                  statsFailed && `stats: ${(statsQuery.error as any)?.message || 'failed'}`,
+                ].filter(Boolean).join(' · ')}
+              </p>
+            </div>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                devicesQuery.refetch();
+                statsQuery.refetch();
+              }}
+            >
+              Retry
+            </Button>
+          </CardContent>
+        </Card>
+      )}
 
       {/* Devices List */}
       {isLoading ? (
         <div className="flex justify-center items-center py-12">
           <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
         </div>
+      ) : devicesFailed ? (
+        <Card>
+          <CardContent className="py-12 text-center">
+            <p className="text-red-600">
+              Device list unavailable: {(devicesQuery.error as any)?.message || 'failed to load'}
+            </p>
+          </CardContent>
+        </Card>
       ) : (
         <div className="grid grid-cols-1 gap-4">
           {devicesData?.devices.map((device) => (
@@ -260,6 +300,11 @@ export default function DeviceManagement() {
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-2">
+            {logsQuery.isError && (
+              <p className="text-sm text-red-600 py-4 text-center">
+                Logs unavailable: {(logsQuery.error as any)?.message || 'failed to load'}
+              </p>
+            )}
             {logsData?.logs.map((log) => (
               <div key={log.id} className="border-l-4 border-gray-200 pl-4 py-2">
                 <div className="flex justify-between items-start">

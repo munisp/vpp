@@ -15,7 +15,7 @@ import { ownsWorkflow } from "../services/workflows/ownership";
  * server. Registered workflow types live in server/workflows/*.ts:
  *   - payment-processing queue:  processPayment, refundWorkflow
  *   - trading-execution queue:   automatedTradingWorkflow, p2pTradingWorkflow,
- *                                executeTrade, marketMakingWorkflow
+ *                                executeTrade
  *   - dr-orchestration queue:    orchestrateDREvent, cancelDREventWorkflow
  *
  * If dispatch fails, the procedure fails loudly with INTERNAL_SERVER_ERROR;

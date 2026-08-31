@@ -28,6 +28,7 @@ import {
 } from './milp-dispatch';
 import { requireCapability } from './degraded-operation';
 import { resolveRegionForUser } from './regions';
+import { getTwinEvidence } from './digital-twin';
 import type { SqlRow } from '../sql-row';
 import { jsonSetText } from '../sql-json';
 
@@ -113,6 +114,8 @@ interface AssetState {
   eligibility: DispatchEligibility;
   currentPower: number;
   currentSoc: number | null;
+  /** Digital-twin meter evidence for this asset, when a user scope let us resolve it. */
+  evidence?: 'measured' | 'stale' | 'never';
 }
 
 interface IntervalContext {
@@ -160,7 +163,9 @@ export class OptimizationEngine {
     console.log(`[Optimization] Starting ${request.objective} optimization for ${request.horizonHours}h horizon`);
 
     // Get assets to optimize
-    const assets = await this.getAssetsForOptimization(request);
+    const assetScope = await this.getAssetsForOptimization(request);
+    const assets = assetScope.assets;
+    warnings.push(...assetScope.warnings);
     if (assets.length === 0) {
       warnings.push('No eligible assets found for optimization');
       return this.createEmptyResult(scheduleId, optimizationRunId, request, scheduleStart, scheduleEnd, warnings);
@@ -296,6 +301,15 @@ export class OptimizationEngine {
       if (asset.assetType === 'battery') {
         // `assets.capacity` is watt-hours for batteries (see drizzle/schema.ts).
         if (asset.capacity <= 0 || (exportW <= 0 && importW <= 0)) continue;
+        if (asset.currentSoc === null) {
+          // A battery without a measured state of charge cannot be scheduled
+          // honestly — an assumed 50% SoC would produce setpoints the battery
+          // may not be able to follow.
+          warnings.push(
+            `Asset ${asset.assetId} (battery) excluded from MILP: no measured state of charge`
+          );
+          continue;
+        }
         milpAssets.push({
           asset_id: String(asset.assetId),
           asset_type: 'battery',
@@ -303,7 +317,7 @@ export class OptimizationEngine {
             capacity_wh: asset.capacity,
             max_charge_w: Math.max(importW, 1),
             max_discharge_w: Math.max(exportW, 1),
-            initial_soc_percent: asset.currentSoc ?? 50,
+            initial_soc_percent: asset.currentSoc,
             soc_min_percent: request.constraints?.minSocReserve ?? 10,
             soc_max_percent: 95,
           },
@@ -444,9 +458,11 @@ export class OptimizationEngine {
   /**
    * Get assets eligible for optimization
    */
-  private async getAssetsForOptimization(request: OptimizationRequest): Promise<AssetState[]> {
+  private async getAssetsForOptimization(
+    request: OptimizationRequest
+  ): Promise<{ assets: AssetState[]; warnings: string[] }> {
     const db = await getDb();
-    if (!db) return [];
+    if (!db) return { assets: [], warnings: ['Database unavailable: no assets could be loaded'] };
 
     let assetQuery;
     if (request.scope.assetIds && request.scope.assetIds.length > 0) {
@@ -468,15 +484,31 @@ export class OptimizationEngine {
           AND cm.status = 'active' AND a.status = 'active'
       `;
     } else {
-      return [];
+      return { assets: [], warnings: [] };
+    }
+
+    const warnings: string[] = [];
+
+    // Digital-twin evidence: only assets with fresh meter evidence may be
+    // optimized. Optimizing an asset whose state is unknown produces
+    // setpoints built on nothing — exclude it and say so.
+    let twinEvidence: Awaited<ReturnType<typeof getTwinEvidence>> = null;
+    if (request.scope.userId) {
+      twinEvidence = await getTwinEvidence({ userId: request.scope.userId });
+      if (twinEvidence === null) {
+        warnings.push(
+          'Twin evidence unavailable: asset meter freshness could not be verified for this optimization'
+        );
+      }
     }
 
     const assetsResult = await db.execute<SqlRow>(assetQuery);
     const assets: AssetState[] = [];
+    const excludedNoEvidence: number[] = [];
 
     for (const row of assetsResult.rows || []) {
       const eligibility = await derCapabilities.calculateEligibility(row.id);
-      
+
       // Get current telemetry
       const telemetryResult = await db.execute<SqlRow>(sql`
         SELECT power, "stateOfCharge" FROM telemetry
@@ -485,6 +517,12 @@ export class OptimizationEngine {
       `);
       const telemetry = telemetryResult.rows[0];
 
+      const evidence = twinEvidence?.get(row.id)?.evidence;
+      if (evidence === 'stale' || evidence === 'never') {
+        excludedNoEvidence.push(row.id);
+        continue;
+      }
+
       assets.push({
         assetId: row.id,
         assetType: row.assetType,
@@ -492,10 +530,18 @@ export class OptimizationEngine {
         eligibility,
         currentPower: telemetry?.power || 0,
         currentSoc: telemetry?.stateOfCharge ? telemetry.stateOfCharge / 100 : null,
+        evidence,
       });
     }
 
-    return assets;
+    if (excludedNoEvidence.length > 0) {
+      warnings.push(
+        `${excludedNoEvidence.length} asset(s) excluded from optimization: no fresh meter evidence ` +
+          `(ids ${excludedNoEvidence.join(', ')}); a setpoint built on an unknown state would be commanding blind`
+      );
+    }
+
+    return { assets, warnings };
   }
 
   /**

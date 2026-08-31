@@ -44,10 +44,37 @@ services:
       MPESA_WEBHOOK_SECRET: ${MPESA_WEBHOOK_SECRET:?MPESA_WEBHOOK_SECRET is required}
       AIRTEL_WEBHOOK_SECRET: ${AIRTEL_WEBHOOK_SECRET:?AIRTEL_WEBHOOK_SECRET is required}
       TIGO_WEBHOOK_SECRET: ${TIGO_WEBHOOK_SECRET:?TIGO_WEBHOOK_SECRET is required}
+      # Signs/verifies payment QR codes; the server throws without >= 32 chars
+      # (server/_core/qrcode.ts). CHANGE-ME: generate with `openssl rand -hex 32`.
+      QR_SIGNING_SECRET: ${QR_SIGNING_SECRET:?QR_SIGNING_SECRET is required (min 32 chars)}
+      # Hard requirement with NODE_ENV=production: sandbox gateway config is
+      # refused at boot (server/payment-gateways/environment.ts).
+      PAYMENT_GATEWAY_ENVIRONMENT: ${PAYMENT_GATEWAY_ENVIRONMENT:?PAYMENT_GATEWAY_ENVIRONMENT is required (use "production" in prod)}
+      # Dispatch optimizer + network feasibility services (both defined below).
+      # Without OPTIMIZER_SERVICE_URL the server throws on every dispatch
+      # (server/services/milp-dispatch.ts); GRIDMODEL_SERVICE_URL powers the
+      # network feasibility check (server/services/network-feasibility.ts).
+      OPTIMIZER_SERVICE_URL: ${OPTIMIZER_SERVICE_URL:-http://optimizer:8000}
+      OPTIMIZER_AUTH_TOKEN: ${OPTIMIZER_AUTH_TOKEN:?OPTIMIZER_AUTH_TOKEN is required (must match the optimizer service)}
+      GRIDMODEL_SERVICE_URL: ${GRIDMODEL_SERVICE_URL:-http://gridmodel:8000}
+      GRIDMODEL_AUTH_TOKEN: ${GRIDMODEL_AUTH_TOKEN:?GRIDMODEL_AUTH_TOKEN is required (must match the gridmodel service)}
+      # Grid protocol daemon (OCPP/OpenADR/SEP2/Matter), defined below. The
+      # shared secret authenticates both directions (HMAC-SHA256); >= 32 chars.
+      GRID_PROTOCOL_SERVICE_URL: ${GRID_PROTOCOL_SERVICE_URL:-http://grid-protocols:9100}
+      GRID_PROTOCOL_SHARED_SECRET: ${GRID_PROTOCOL_SHARED_SECRET:?GRID_PROTOCOL_SHARED_SECRET is required (min 32 chars)}
+      GRID_PROTOCOL_TIMEOUT_MS: ${GRID_PROTOCOL_TIMEOUT_MS:-20000}
+      # Topics the in-process event consumer reads back into event_inbox
+      # (server/services/events/consumer.ts). These are exactly the topics the
+      # live Kafka publishers write (server/integration/kafka-publisher.ts).
+      # telemetry.raw is deliberately NOT here: the consumer is a landing
+      # table, not a telemetry store, and telemetry volume belongs to Fluvio.
+      EVENT_CONSUMER_TOPICS: ${EVENT_CONSUMER_TOPICS:-dr.events.created,forecasts.generated,optimization.runs,blockchain.anchors,edge.commands,ev.sessions,carbon.signals,community.allocations,mlops.training.runs,anomalies.detected,compliance.checks,der.capabilities.updated}
     depends_on:
       - postgres
       - redis
       - temporal
+      - optimizer
+      - gridmodel
     networks:
       - vpp-network
 
@@ -64,29 +91,102 @@ services:
     networks:
       - vpp-network
 
-  orchestrator:
+  # ==========================================================================
+  # REMOVED: the Go `orchestrator` service. Nothing in the repository publishes
+  # to its Temporal task queue (`vpp-orchestrator`), so it polled a queue with
+  # zero producers. It also cannot boot here: orchestrator/services/services.go
+  # requires a Dapr sidecar at startup and this stack runs none, and its
+  # onboarding workflow calls activities that are deliberately never registered
+  # (see orchestrator/workflows/workflows.go). orchestrator/ is marked
+  # experimental in its README; reintroduce it only together with a real
+  # dispatcher and its middleware dependencies.
+  # ==========================================================================
+
+  # ==========================================================================
+  # Dispatch optimizer (services/optimizer, FastAPI). The server POSTs
+  # /optimize/dispatch, /design/study and /optimize/coordinate to it; without
+  # this service running, MILP dispatch throws in production.
+  # ==========================================================================
+  optimizer:
     build:
-      context: ./orchestrator
-      dockerfile: ../Dockerfile.orchestrator
-    image: vpp/orchestrator:latest
+      context: ./services/optimizer
+      dockerfile: Dockerfile
+    image: vpp/optimizer:latest
     restart: unless-stopped
     environment:
-      TEMPORAL_HOST_PORT: ${TEMPORAL_ADDRESS:-temporal:7233}
-      TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:-default}
-      DB_HOST: postgres
-      DB_PORT: "5432"
-      DB_USER: ${POSTGRES_USER:-vpp}
-      DB_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
-      DB_NAME: ${POSTGRES_DB:-vpp}
-      DB_SSLMODE: ${DB_SSLMODE:-require}
-      REDIS_HOST: redis
-      REDIS_PORT: "6379"
-      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
-      KAFKA_BROKERS: ${KAFKA_BROKERS:-kafka:9092}
+      # Enforced whenever set, and required once OPTIMIZER_ENV=production:
+      # every optimizer call then needs the matching x-optimizer-token header,
+      # which the server sends from the same variable.
+      OPTIMIZER_ENV: production
+      OPTIMIZER_AUTH_TOKEN: ${OPTIMIZER_AUTH_TOKEN:?OPTIMIZER_AUTH_TOKEN is required (shared with vpp-server)}
+      OPTIMIZER_SOLVER: ${OPTIMIZER_SOLVER:-}
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=5)\""]
+      interval: 30s
+      timeout: 10s
+      start_period: 15s
+      retries: 3
+    networks:
+      - vpp-network
+
+  # ==========================================================================
+  # Network feasibility engine (services/gridmodel, pandapower). The server
+  # POSTs /feasibility to it (server/services/network-feasibility.ts).
+  # ==========================================================================
+  gridmodel:
+    build:
+      context: ./services/gridmodel
+      dockerfile: Dockerfile
+    image: vpp/gridmodel:latest
+    restart: unless-stopped
+    environment:
+      GRIDMODEL_ENV: production
+      GRIDMODEL_AUTH_TOKEN: ${GRIDMODEL_AUTH_TOKEN:?GRIDMODEL_AUTH_TOKEN is required (shared with vpp-server)}
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=5)\""]
+      interval: 30s
+      timeout: 10s
+      start_period: 20s
+      retries: 3
+    networks:
+      - vpp-network
+
+  # ==========================================================================
+  # Grid protocol daemon (services/grid-protocols, Go): OCPP 1.6J/2.0.1 central
+  # system, OpenADR 2.0b VEN, IEEE 2030.5 client, Matter controller client. It
+  # POSTs protocol traffic to the server's /api/grid/* endpoints and receives
+  # commands on its own /admin/* endpoints, both HMAC-signed with
+  # GRID_PROTOCOL_SHARED_SECRET.
+  #
+  # It refuses to start without a fully configured protocol, so a deployment
+  # MUST mount a real config at config/config.yaml (see
+  # services/grid-protocols/config.example.yaml): the file enables the
+  # protocols and names the charge points, while the secrets stay in the
+  # environment below.
+  # ==========================================================================
+  grid-protocols:
+    build:
+      context: ./services/grid-protocols
+      dockerfile: Dockerfile
+    image: vpp/grid-protocols:latest
+    restart: unless-stopped
+    command: ["./gridd", "-config", "config/config.yaml"]
+    environment:
+      GRID_PROTOCOLS_LISTEN: ":9100"
+      PLATFORM_BASE_URL: http://vpp-server:3000
+      GRID_PROTOCOL_SHARED_SECRET: ${GRID_PROTOCOL_SHARED_SECRET:?GRID_PROTOCOL_SHARED_SECRET is required (min 32 chars)}
+    volumes:
+      # Required: gridd exits if no protocol is enabled, and protocol
+      # credentials/certificates live in this file, not in the image.
+      - ./services/grid-protocols/config.yaml:/app/config/config.yaml:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9100/health >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      start_period: 10s
+      retries: 3
     depends_on:
-      - temporal
-      - postgres
-      - redis
+      - vpp-server
     networks:
       - vpp-network
 

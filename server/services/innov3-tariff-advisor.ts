@@ -133,7 +133,10 @@ export async function compareTariffs(userId: number, country: 'nigeria' | 'tanza
       .orderBy(asc(telemetry.timestamp))
       .limit(MAX_SAMPLES);
 
-    const powerSamples = samples.filter(s => s.power !== null && new Date(s.timestamp) >= since);
+    const powerSamples = samples.filter(
+      (s): s is { timestamp: Date; power: number } =>
+        s.power !== null && new Date(s.timestamp) >= since
+    );
     const first = powerSamples[0]?.timestamp ?? null;
     const last = powerSamples[powerSamples.length - 1]?.timestamp ?? null;
     const span = first && last ? (new Date(last).getTime() - new Date(first).getTime()) / 86400000 : 0;

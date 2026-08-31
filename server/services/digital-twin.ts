@@ -18,6 +18,10 @@ import { getDb } from '../db';
 import type { SqlRow } from '../sql-row';
 import {
   buildTwinGraph,
+  evidenceOf,
+  stalenessBoundFor,
+  twinAssetRecordSchema,
+  type EvidenceState,
   type TwinAssetRecord,
   type TwinDeviceRecord,
   type TwinGraph,
@@ -86,6 +90,8 @@ export async function loadTwinAssets(scope: TwinScope): Promise<TwinAssetRecord[
       a."assetType" AS asset_type,
       a.capacity,
       a.status,
+      a."approvalStatus" AS approval_status,
+      a.metadata,
       t.timestamp AS observed_at,
       t.power,
       t.energy,
@@ -154,13 +160,15 @@ export async function loadTwinAssets(scope: TwinScope): Promise<TwinAssetRecord[
 
   return assets.map(row => {
     const id = Number(row.id);
-    return {
+    const candidate = {
       id,
       userId: Number(row.user_id),
       name: String(row.name),
       assetType: String(row.asset_type),
       capacity: Number(row.capacity),
       status: String(row.status),
+      approvalStatus: row.approval_status == null ? undefined : String(row.approval_status),
+      metadata: row.metadata == null ? null : String(row.metadata),
       observation: {
         observedAt: dateOrNull(row.observed_at),
         powerWatts: integerOrNull(row.power),
@@ -174,6 +182,20 @@ export async function loadTwinAssets(scope: TwinScope): Promise<TwinAssetRecord[
       },
       devices: devicesByAsset.get(id) ?? [],
     };
+
+    // A registry row that cannot be true (SoC over 100%, zero capacity, a
+    // device reporting every zero seconds) is an operations incident. It is
+    // raised with the asset and the field, never skipped: skipping would draw
+    // the plant smaller than it is and leave the corruption invisible.
+    const parsed = twinAssetRecordSchema.safeParse(candidate);
+    if (!parsed.success) {
+      const issue = parsed.error.issues[0];
+      const field = issue && issue.path.length > 0 ? issue.path.join('.') : 'unknown';
+      throw new DigitalTwinError(
+        `asset ${id} holds a registry row that cannot be true: ${field} (${issue?.message ?? 'invalid'})`
+      );
+    }
+    return parsed.data;
   });
 }
 
@@ -185,4 +207,33 @@ export async function getDigitalTwin(scope: TwinScope, siteLabel: string): Promi
     generatedAt: new Date(),
     stalenessSeconds: DEFAULT_STALENESS_SECONDS,
   });
+}
+
+export interface TwinAssetEvidence {
+  evidence: EvidenceState;
+  ageSeconds: number | null;
+}
+
+/**
+ * Per-asset freshness for the control plane, keyed by `assets.id`.
+ *
+ * Returns `null` when the database is unavailable — and `null` means "the twin
+ * cannot say", never "all clear". Callers deciding whether to command an asset
+ * must treat null as twin-unavailable, not as fresh evidence. A corrupt
+ * registry row still throws: that is an ops incident, not unavailability.
+ */
+export async function getTwinEvidence(
+  scope: TwinScope
+): Promise<Map<number, TwinAssetEvidence> | null> {
+  const db = await getDb();
+  if (!db) return null;
+
+  const assets = await loadTwinAssets(scope);
+  const now = new Date();
+  const map = new Map<number, TwinAssetEvidence>();
+  for (const asset of assets) {
+    const bound = stalenessBoundFor(asset, DEFAULT_STALENESS_SECONDS);
+    map.set(asset.id, evidenceOf(asset.observation.observedAt, bound, now));
+  }
+  return map;
 }

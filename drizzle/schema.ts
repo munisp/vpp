@@ -1,6 +1,7 @@
 import {
   boolean,
   decimal,
+  index,
   integer as int,
   pgEnum,
   pgTable,
@@ -149,20 +150,29 @@ export type InsertAsset = typeof assets.$inferInsert;
 /**
  * Telemetry table - stores real-time and historical data from assets
  */
-export const telemetry = pgTable("telemetry", {
-  id: serial("id").primaryKey(),
-  assetId: int("assetId").notNull(),
-  timestamp: timestamp("timestamp").notNull(),
-  power: int("power"), // current power in watts
-  energy: int("energy"), // cumulative energy in watt-hours
-  voltage: int("voltage"), // in millivolts
-  current: int("current"), // in milliamps
-  frequency: int("frequency"), // in millihertz
-  stateOfCharge: int("stateOfCharge"), // battery SoC in percentage * 100
-  temperature: int("temperature"), // in celsius * 100
-  metadata: text("metadata"), // JSON string for additional metrics
-  createdAt: timestamp("createdAt").defaultNow().notNull(),
-});
+export const telemetry = pgTable(
+  "telemetry",
+  {
+    id: serial("id").primaryKey(),
+    assetId: int("assetId").notNull(),
+    timestamp: timestamp("timestamp").notNull(),
+    power: int("power"), // current power in watts
+    energy: int("energy"), // cumulative energy in watt-hours
+    voltage: int("voltage"), // in millivolts
+    current: int("current"), // in milliamps
+    frequency: int("frequency"), // in millihertz
+    stateOfCharge: int("stateOfCharge"), // battery SoC in percentage * 100
+    temperature: int("temperature"), // in celsius * 100
+    metadata: text("metadata"), // JSON string for additional metrics
+    createdAt: timestamp("createdAt").defaultNow().notNull(),
+  },
+  (table) => [
+    // Latest-row-per-asset lookups (digital twin, dashboards, dispatch
+    // evidence) all scan telemetry by asset ordered by time; without this
+    // index the twin's LATERAL join seq-scans the table per asset per poll.
+    index("telemetry_asset_ts_idx").on(table.assetId, table.timestamp),
+  ]
+);
 
 export type Telemetry = typeof telemetry.$inferSelect;
 export type InsertTelemetry = typeof telemetry.$inferInsert;
@@ -781,3 +791,37 @@ export * from './innov3-planning-schema';
 export * from './innov3-fieldops-schema';
 export * from './innov3-market-schema';
 export * from './innov3-control-schema';
+
+// Satellite schema barrels — every pgTable is reachable from this single
+// entry point so services never bypass it with ad-hoc deep imports.
+// (devices-schema, dr-forecasting-schema and payment-credentials-schema are
+// intentionally absent: they are unmigrated dead duplicates of tables
+// defined directly in this file.)
+export * from './achievements-schema';
+export * from './audit-logs-schema';
+export * from './biometric-credentials-schema';
+export * from './conformance-schema';
+export * from './control-schema';
+export * from './degraded-schema';
+export * from './design-study-schema';
+export * from './diagnostics-schema';
+export * from './dr-segmentation-schema';
+export * from './event-stream-schema';
+export * from './fleet-telemetry-schema';
+export * from './forecast-accuracy-schema';
+export * from './lakehouse-schema';
+export * from './ledger-schema';
+export * from './locational-flexibility-schema';
+export * from './matter-schema';
+export * from './ml-training-schema';
+export * from './network-model-schema';
+export * from './notification-preferences-schema';
+export * from './prepaid-schema';
+export * from './price-alerts-schema';
+export * from './price-signal-schema';
+export * from './push-subscriptions-schema';
+export * from './reconciliation-schema';
+export * from './referrals-schema';
+export * from './resilience-schema';
+export * from './strategy-templates-schema';
+export * from './trading-strategies-schema';

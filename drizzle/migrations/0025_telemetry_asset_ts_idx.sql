@@ -1,0 +1,1 @@
+CREATE INDEX "telemetry_asset_ts_idx" ON "telemetry" USING btree ("assetId","timestamp");

@@ -26,6 +26,7 @@ import {
   type InsertControlAssignment,
 } from '../../drizzle/control-schema';
 import { controlProtocolProof } from './protocol-conformance';
+import { DigitalTwinError, getTwinEvidence, type TwinAssetEvidence } from './digital-twin';
 
 export type ControlProtocol = 'ocpp16' | 'sep2' | 'openadr' | 'modbus' | 'mqtt';
 /**
@@ -212,6 +213,45 @@ export async function recordControlAssignment(
 
   const subTargetRef = input.subTargetRef ?? 0;
 
+  // A setpoint to an asset the platform cannot see is commanding blind: when
+  // the twin says the target has no fresh meter evidence, an in-force dispatch
+  // is refused rather than recorded as authoritative. Refused and unconfirmed
+  // deliveries are exempt — they did not command anything, and their audit
+  // record must still be written. When the twin itself cannot be read, the
+  // dispatch proceeds (the window and fallback still bound it) but the record
+  // says the evidence check did not happen.
+  let deliveryDetail = input.deliveryDetail;
+  if (input.assetId !== undefined && isInForce(input.delivery)) {
+    let twinEvidence: Map<number, TwinAssetEvidence> | null;
+    try {
+      twinEvidence = await getTwinEvidence({ userId: input.userId });
+    } catch (error) {
+      // A corrupt registry row (DigitalTwinError) is an ops incident and stays
+      // loud; any other failure to read the twin means the evidence check
+      // could not run, which the audit record below must say.
+      if (error instanceof DigitalTwinError) throw error;
+      console.error('[ControlValidity] twin evidence check failed:', error);
+      twinEvidence = null;
+    }
+    if (twinEvidence === null) {
+      deliveryDetail = [
+        deliveryDetail,
+        'twin evidence unavailable: meter freshness of the dispatch target could not be verified',
+      ]
+        .filter(part => part !== undefined && part !== '')
+        .join('; ');
+    } else {
+      const target = twinEvidence.get(input.assetId);
+      if (target?.evidence === 'stale' || target?.evidence === 'never') {
+        throw new ControlValidityError(
+          target.evidence === 'never'
+            ? `dispatch to asset ${input.assetId} refused: the platform has never received telemetry from it, so a setpoint would be commanding blind`
+            : `dispatch to asset ${input.assetId} refused: its last telemetry is ${Math.round(target.ageSeconds ?? 0)}s old, past its freshness bound, so a setpoint would be commanding blind`
+        );
+      }
+    }
+  }
+
   // Stamped at issue time. A control that went out over an adapter with no
   // passing conformance run is still issued — commissioning has to start
   // somewhere — but the record says so, so an incident review can tell an
@@ -243,7 +283,7 @@ export async function recordControlAssignment(
     fallbackPolicy: input.fallbackPolicy,
     fallbackLimitWatts: input.fallbackLimitWatts,
     delivery: input.delivery,
-    deliveryDetail: input.deliveryDetail,
+    deliveryDetail: deliveryDetail?.slice(0, 2000),
     protocolProof: protocolProof?.state,
     protocolProofRunId: protocolProof?.conformanceRunId ?? undefined,
   };

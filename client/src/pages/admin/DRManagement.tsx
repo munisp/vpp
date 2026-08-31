@@ -50,9 +50,19 @@ export default function DRManagement() {
   const utils = trpc.useUtils();
   
   // Queries
-  const { data: allEvents = [], isLoading: eventsLoading } = trpc.demandResponse.getAllEvents.useQuery({});
-  const { data: participants = [], isLoading: participantsLoading } = trpc.demandResponse.getAllParticipants.useQuery();
-  const { data: analytics } = trpc.demandResponse.getSystemAnalytics.useQuery();
+  const eventsQuery = trpc.demandResponse.getAllEvents.useQuery({});
+  const participantsQuery = trpc.demandResponse.getAllParticipants.useQuery();
+  const analyticsQuery = trpc.demandResponse.getSystemAnalytics.useQuery();
+  const { data: allEventsData, isLoading: eventsLoading } = eventsQuery;
+  const { data: participantsData, isLoading: participantsLoading } = participantsQuery;
+  const { data: analytics } = analyticsQuery;
+  // Failed queries stay undefined — never default to an empty list/zero that
+  // would present a backend failure as "no events".
+  const allEvents = allEventsData ?? [];
+  const participants = participantsData ?? [];
+  const eventsFailed = eventsQuery.isError;
+  const participantsFailed = participantsQuery.isError;
+  const analyticsFailed = analyticsQuery.isError;
 
   // Mutations
   const createEventMutation = trpc.demandResponse.createEvent.useMutation({
@@ -115,6 +125,34 @@ export default function DRManagement() {
         </Button>
       </div>
 
+      {(eventsFailed || participantsFailed || analyticsFailed) && (
+        <Card className="border-red-200 bg-red-50 mb-8">
+          <CardContent className="flex items-center justify-between gap-3 py-4">
+            <div className="flex items-center gap-3">
+              <AlertCircle className="h-5 w-5 text-red-600" />
+              <p className="text-sm text-red-800">
+                {[
+                  eventsFailed && `events: ${(eventsQuery.error as any)?.message || 'failed'}`,
+                  participantsFailed && `participants: ${(participantsQuery.error as any)?.message || 'failed'}`,
+                  analyticsFailed && `analytics: ${(analyticsQuery.error as any)?.message || 'failed'}`,
+                ].filter(Boolean).join(' · ')}
+              </p>
+            </div>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                eventsQuery.refetch();
+                participantsQuery.refetch();
+                analyticsQuery.refetch();
+              }}
+            >
+              Retry
+            </Button>
+          </CardContent>
+        </Card>
+      )}
+
       {/* Stats */}
       <div className="grid gap-6 md:grid-cols-4 mb-8">
         <Card>
@@ -123,9 +161,9 @@ export default function DRManagement() {
             <Zap className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold">{activeEvents.length}</div>
+            <div className="text-2xl font-bold">{eventsFailed ? "—" : activeEvents.length}</div>
             <p className="text-xs text-muted-foreground">
-              {upcomingEvents.length} upcoming
+              {eventsFailed ? "Events unavailable" : `${upcomingEvents.length} upcoming`}
             </p>
           </CardContent>
         </Card>
@@ -136,9 +174,9 @@ export default function DRManagement() {
             <Users className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold">{activeParticipants}</div>
+            <div className="text-2xl font-bold">{participantsFailed ? "—" : activeParticipants}</div>
             <p className="text-xs text-muted-foreground">
-              Out of {totalParticipants} enrolled
+              {participantsFailed ? "Participants unavailable" : `Out of ${totalParticipants} enrolled`}
             </p>
           </CardContent>
         </Card>
@@ -150,9 +188,9 @@ export default function DRManagement() {
           </CardHeader>
           <CardContent>
             <div className="text-2xl font-bold">
-              {(analytics?.averageReduction || 0).toFixed(1)} kW
+              {analyticsFailed ? "—" : `${(analytics?.averageReduction || 0).toFixed(1)} kW`}
             </div>
-            <p className="text-xs text-muted-foreground">This month</p>
+            <p className="text-xs text-muted-foreground">{analyticsFailed ? "Analytics unavailable" : "This month"}</p>
           </CardContent>
         </Card>
 
@@ -163,9 +201,9 @@ export default function DRManagement() {
           </CardHeader>
           <CardContent>
             <div className="text-2xl font-bold">
-              ${((analytics?.totalCompensation || 0) / 100).toFixed(2)}
+              {analyticsFailed ? "—" : `$${((analytics?.totalCompensation || 0) / 100).toFixed(2)}`}
             </div>
-            <p className="text-xs text-muted-foreground">This month</p>
+            <p className="text-xs text-muted-foreground">{analyticsFailed ? "Analytics unavailable" : "This month"}</p>
           </CardContent>
         </Card>
       </div>
@@ -179,6 +217,10 @@ export default function DRManagement() {
         <CardContent>
           {eventsLoading ? (
             <Skeleton className="h-32" />
+          ) : eventsFailed ? (
+            <p className="text-center text-red-600 py-8">
+              Events unavailable: {(eventsQuery.error as any)?.message || "failed to load"}
+            </p>
           ) : activeEvents.length === 0 ? (
             <p className="text-center text-muted-foreground py-8">
               No active events
@@ -235,7 +277,13 @@ export default function DRManagement() {
           <CardDescription>Scheduled demand response events</CardDescription>
         </CardHeader>
         <CardContent>
-          {upcomingEvents.length === 0 ? (
+          {eventsLoading ? (
+            <Skeleton className="h-32" />
+          ) : eventsFailed ? (
+            <p className="text-center text-red-600 py-8">
+              Events unavailable: {(eventsQuery.error as any)?.message || "failed to load"}
+            </p>
+          ) : upcomingEvents.length === 0 ? (
             <p className="text-center text-muted-foreground py-8">
               No upcoming events
             </p>
@@ -289,6 +337,10 @@ export default function DRManagement() {
         <CardContent>
           {participantsLoading ? (
             <Skeleton className="h-32" />
+          ) : participantsFailed ? (
+            <p className="text-center text-red-600 py-8">
+              Participants unavailable: {(participantsQuery.error as any)?.message || "failed to load"}
+            </p>
           ) : (
             <div className="space-y-3">
               {participants.slice(0, 10).map((participant: any) => (

@@ -66,21 +66,12 @@ const COPY_TONE: Record<CopyTone, StateTone> = {
   neutral: 'neutral',
 };
 
-/** A day-ahead shape a planner can start from, then replace with real data. */
-function defaultProfileText(): string {
-  const hours = Array.from({ length: 24 }, (_, hour) =>
-    hour >= 7 && hour <= 19 ? 8000 : 3000
-  );
-  return hours.join(', ');
-}
-
-function defaultSolarText(): string {
-  return Array.from({ length: 24 }, (_, hour) => {
-    if (hour < 6 || hour > 18) return '0';
-    return Math.sin(((hour - 6) / 12) * Math.PI).toFixed(2);
-  }).join(', ');
-}
-
+/**
+ * The form starts empty on purpose: a design study is only as honest as its
+ * inputs, so no synthetic load profile or sine-curve solar shape is prefilled.
+ * The planner pastes a surveyed/declared series (or reads the meter via the
+ * 'metered' source) before a study can run.
+ */
 function parseSeries(text: string): number[] {
   return text
     .split(/[,\s]+/)
@@ -113,10 +104,10 @@ export default function DesignStudy() {
   const [siteName, setSiteName] = useState('');
   const [nodeId, setNodeId] = useState<number | null>(null);
   const [loadSource, setLoadSource] = useState<ProfileSource>('declared');
-  const [loadText, setLoadText] = useState(defaultProfileText());
+  const [loadText, setLoadText] = useState('');
   const [loadReference, setLoadReference] = useState('');
   const [meterDays, setMeterDays] = useState('');
-  const [solarText, setSolarText] = useState(defaultSolarText());
+  const [solarText, setSolarText] = useState('');
   const [dieselCents, setDieselCents] = useState('80');
   const [tariffCents, setTariffCents] = useState('60');
   const [pvSweep, setPvSweep] = useState('0, 10, 20, 30');
@@ -176,6 +167,13 @@ export default function DesignStudy() {
     const solar = parseSeries(solarText);
     if (loadSource !== 'metered' && (load.length < 24 || load.some(Number.isNaN))) {
       toast.error('The load profile needs at least 24 comma-separated numbers in watts');
+      return;
+    }
+    if (
+      solar.length < 24 ||
+      solar.some(v => Number.isNaN(v) || v < 0 || v > 1)
+    ) {
+      toast.error('The solar capacity factor needs at least 24 comma-separated numbers between 0 and 1');
       return;
     }
     const peakW = backupPeakW(load);
@@ -439,6 +437,7 @@ export default function DesignStudy() {
               <Textarea
                 id="ds-load"
                 rows={3}
+                placeholder="Paste the surveyed or declared 24-hour series, e.g. 1200, 1100, 1000, …"
                 value={loadText}
                 onChange={event => setLoadText(event.target.value)}
               />
@@ -449,6 +448,7 @@ export default function DesignStudy() {
             <Textarea
               id="ds-solar"
               rows={3}
+              placeholder="Paste the measured or sourced 24-hour capacity factors, e.g. 0, 0, 0, …"
               value={solarText}
               onChange={event => setSolarText(event.target.value)}
             />

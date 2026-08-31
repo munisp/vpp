@@ -107,6 +107,12 @@ export default function BudgetPlanner() {
 
   const selectedBudget = budgets.data?.budgets?.find((b: any) => b.id === selectedBudgetId) ?? null;
   const latestCp = checkpoints.data?.checkpoints?.[0] ?? null;
+  // basis_json is an untyped json column; the shape written by
+  // server/services/innov3-budget-planner.ts (ConsumptionBasis) is:
+  const latestBasis = (latestCp?.basisJson ?? null) as {
+    source?: "telemetry" | "billing" | null;
+    lowerBound?: boolean;
+  } | null;
 
   // Progress toward the kWh target, from the latest checkpoint's real consumption.
   const kwhPct =
@@ -260,15 +266,15 @@ export default function BudgetPlanner() {
                         Consumption is unknown — no usable meter readings or billing rows for this month.
                       </p>
                     )}
-                    {latestCp.basisJson?.lowerBound === true && latestCp.consumedWh !== null && (
+                    {latestBasis?.lowerBound === true && latestCp.consumedWh !== null && (
                       <p className="text-xs text-muted-foreground">
                         Lower bound: at least one meter has insufficient readings, so its consumption is
                         unknown rather than zero.
                       </p>
                     )}
-                    {latestCp.basisJson?.source && (
+                    {latestBasis?.source && (
                       <p className="text-xs text-muted-foreground">
-                        Consumption measured from {latestCp.basisJson.source === "telemetry" ? "meter register deltas" : "billing rows"}.
+                        Consumption measured from {latestBasis.source === "telemetry" ? "meter register deltas" : "billing rows"}.
                       </p>
                     )}
                   </div>

@@ -1,24 +1,39 @@
 import DashboardLayout from "@/components/DashboardLayout";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { trpc } from "@/lib/trpc";
-import { Activity, Battery, DollarSign, TrendingUp, Zap, AlertCircle, Wifi } from "lucide-react";
+import { Activity, Battery, DollarSign, RefreshCw, TrendingUp, Zap, AlertCircle, Wifi } from "lucide-react";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Button } from "@/components/ui/button";
 import { useWebSocket } from "@/hooks/useWebSocket";
 import { Badge } from "@/components/ui/badge";
-import PowerFlowWidget from "@/components/PowerFlowWidget";
-import BatteryStatusWidget from "@/components/BatteryStatusWidget";
 import OnboardingWizard from "@/components/OnboardingWizard";
 import { useState } from "react";
+
+// Telemetry column units (drizzle/schema.ts): power W, energy cumulative Wh,
+// voltage mV, current mA, stateOfCharge %×100, temperature °C×100.
+// Every field is nullable — a missing reading is rendered as '—', never a default.
+const NO_READING = "—";
+
+function TelemetryField({ label, value, unit }: { label: string; value: number | null | undefined; unit: string }) {
+  return (
+    <div className="flex items-center justify-between">
+      <span className="text-sm text-muted-foreground">{label}</span>
+      <span className="text-lg font-semibold">
+        {value === null || value === undefined ? NO_READING : `${value} ${unit}`}
+      </span>
+    </div>
+  );
+}
 
 export default function Home() {
   const [onboardingCompleted, setOnboardingCompleted] = useState(false);
   const { telemetry: realtimeTelemetry, connected } = useWebSocket();
   const { data: onboardingStatus, isLoading: onboardingLoading } = trpc.onboarding.getStatus.useQuery();
-  const { data: assetsData, isLoading: assetsLoading } = trpc.assets.list.useQuery();
+  const { data: assetsData, isLoading: assetsLoading, isError: assetsError, error: assetsErrorMsg, refetch: refetchAssets } = trpc.assets.list.useQuery();
   const assets = assetsData?.assets || [];
-  
+
   // Always call all hooks before any conditional returns
-  const { data: latestTelemetry, isLoading: telemetryLoading } = trpc.telemetry.getLatest.useQuery(
+  const { data: latestTelemetry, isLoading: telemetryLoading, isError: telemetryError, error: telemetryErrorMsg, refetch: refetchTelemetry } = trpc.telemetry.getLatest.useQuery(
     { assetId: assets[0]?.id || 0 },
     { enabled: assets.length > 0 }
   );
@@ -34,47 +49,50 @@ export default function Home() {
   const displayTelemetry = (connected && realtimeTelemetry) ? realtimeTelemetry : latestTelemetry;
 
   const isLoading = assetsLoading || telemetryLoading;
+  const hasError = assetsError || telemetryError;
 
-  // Calculate summary metrics from real-time or latest data
-  const totalGeneration = displayTelemetry?.power || 0;
-  const totalConsumption = displayTelemetry?.energy || 0;
-  const batteryLevel = displayTelemetry?.stateOfCharge ? displayTelemetry.stateOfCharge / 100 : 0;
-  const gridExport = displayTelemetry?.power && displayTelemetry.power > 0 ? displayTelemetry.power : 0;
-  const gridImport = displayTelemetry?.power && displayTelemetry.power < 0 ? Math.abs(displayTelemetry.power) : 0;
-  const netFlow = gridExport - gridImport;
+  // Summary metrics from real readings only. A null field is '—', never a
+  // substituted default. `energy` is cumulative watt-hours metered, not an
+  // instantaneous consumption reading, and there is no grid-flow field in
+  // telemetry, so no import/export direction is ever inferred.
+  const powerW = displayTelemetry?.power ?? null;
+  const meteredEnergyWh = displayTelemetry?.energy ?? null;
+  const socPercent = displayTelemetry?.stateOfCharge != null
+    ? displayTelemetry.stateOfCharge / 100
+    : null;
 
   const stats = [
     {
-      title: "Total Generation",
-      value: `${totalGeneration.toFixed(2)} kWh`,
-      description: "Current power generation",
+      title: "Power",
+      value: powerW !== null ? `${(powerW / 1000).toFixed(2)} kW` : NO_READING,
+      description: powerW !== null ? "Latest power reading" : "No power reading",
       icon: Zap,
       color: "text-green-600",
       bgColor: "bg-green-50",
     },
     {
-      title: "Total Consumption",
-      value: `${totalConsumption.toFixed(2)} kWh`,
-      description: "Current power usage",
+      title: "Metered Energy",
+      value: meteredEnergyWh !== null ? `${(meteredEnergyWh / 1000).toFixed(2)} kWh` : NO_READING,
+      description: meteredEnergyWh !== null ? "Cumulative energy metered" : "No energy reading",
       icon: Activity,
       color: "text-blue-600",
       bgColor: "bg-blue-50",
     },
     {
       title: "Battery Status",
-      value: `${batteryLevel.toFixed(0)}%`,
-      description: "Current battery level",
+      value: socPercent !== null ? `${socPercent.toFixed(0)}%` : NO_READING,
+      description: socPercent !== null ? "Current battery level" : "No battery reading",
       icon: Battery,
       color: "text-amber-600",
       bgColor: "bg-amber-50",
     },
     {
       title: "Grid Flow",
-      value: `${netFlow.toFixed(2)} kWh`,
-      description: netFlow >= 0 ? "Exporting to grid" : "Importing from grid",
+      value: NO_READING,
+      description: "No grid import/export reading available",
       icon: TrendingUp,
-      color: netFlow >= 0 ? "text-green-600" : "text-red-600",
-      bgColor: netFlow >= 0 ? "bg-green-50" : "bg-red-50",
+      color: "text-gray-400",
+      bgColor: "bg-gray-50",
     },
   ];
 
@@ -127,26 +145,102 @@ export default function Home() {
           ))}
         </div>
 
-        {/* Real-time Widgets */}
-        {!isLoading && displayTelemetry && (
-          <div className="grid gap-4 md:grid-cols-2">
-            <PowerFlowWidget
-              data={{
-                generation: displayTelemetry.power || 0,
-                consumption: displayTelemetry.energy || 0,
-                batteryPower: (displayTelemetry.stateOfCharge || 50) > 50 ? 500 : -500,
-                batteryLevel: displayTelemetry.stateOfCharge || 0,
-                gridPower: (displayTelemetry.power || 0) - (displayTelemetry.energy || 0),
-              }}
-            />
-            <BatteryStatusWidget
-              level={displayTelemetry.stateOfCharge || 0}
-              power={(displayTelemetry.stateOfCharge || 50) > 50 ? 500 : -500}
-              voltage={displayTelemetry.voltage || 0}
-              current={displayTelemetry.current || 0}
-              temperature={25}
-            />
-          </div>
+        {/* Live telemetry — every field is rendered only when a real reading
+            exists. Consumption power, battery charge/discharge power and grid
+            flow are not present in telemetry, so they are not shown. */}
+        {hasError ? (
+          <Card className="border-red-200 bg-red-50">
+            <CardContent className="flex items-center justify-between gap-3 py-4">
+              <div className="flex items-center gap-3">
+                <AlertCircle className="h-5 w-5 text-red-600" />
+                <p className="text-sm text-red-800">
+                  {(assetsErrorMsg || telemetryErrorMsg)?.message || "Failed to load dashboard data."}
+                </p>
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  refetchAssets();
+                  if (assets.length > 0) refetchTelemetry();
+                }}
+              >
+                <RefreshCw className="h-4 w-4 mr-2" />
+                Retry
+              </Button>
+            </CardContent>
+          </Card>
+        ) : !isLoading && (
+          displayTelemetry ? (
+            <div className="grid gap-4 md:grid-cols-2">
+              <Card>
+                <CardHeader>
+                  <CardTitle className="flex items-center gap-2">
+                    <Zap className="h-5 w-5 text-green-600" />
+                    Live Power
+                  </CardTitle>
+                  <CardDescription>
+                    Latest reading {displayTelemetry.timestamp ? `at ${new Date(displayTelemetry.timestamp).toLocaleString()}` : ""}
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  <TelemetryField
+                    label="Power"
+                    value={powerW !== null ? Number((powerW / 1000).toFixed(2)) : null}
+                    unit="kW"
+                  />
+                  <TelemetryField
+                    label="Metered energy (cumulative)"
+                    value={meteredEnergyWh !== null ? Number((meteredEnergyWh / 1000).toFixed(2)) : null}
+                    unit="kWh"
+                  />
+                  <TelemetryField
+                    label="Frequency"
+                    value={displayTelemetry.frequency != null ? Number((displayTelemetry.frequency / 1000).toFixed(2)) : null}
+                    unit="Hz"
+                  />
+                </CardContent>
+              </Card>
+              <Card>
+                <CardHeader>
+                  <CardTitle className="flex items-center gap-2">
+                    <Battery className="h-5 w-5 text-amber-600" />
+                    Battery & Electrical
+                  </CardTitle>
+                  <CardDescription>Only readings reported by the device are shown</CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  <TelemetryField
+                    label="State of charge"
+                    value={socPercent !== null ? Number(socPercent.toFixed(1)) : null}
+                    unit="%"
+                  />
+                  <TelemetryField
+                    label="Voltage"
+                    value={displayTelemetry.voltage != null ? Number((displayTelemetry.voltage / 1000).toFixed(1)) : null}
+                    unit="V"
+                  />
+                  <TelemetryField
+                    label="Current"
+                    value={displayTelemetry.current != null ? Number((displayTelemetry.current / 1000).toFixed(2)) : null}
+                    unit="A"
+                  />
+                  <TelemetryField
+                    label="Temperature"
+                    value={displayTelemetry.temperature != null ? Number((displayTelemetry.temperature / 100).toFixed(1)) : null}
+                    unit="°C"
+                  />
+                </CardContent>
+              </Card>
+            </div>
+          ) : assets.length > 0 ? (
+            <Card>
+              <CardContent className="flex items-center gap-3 py-6 text-muted-foreground">
+                <AlertCircle className="h-5 w-5" />
+                <p className="text-sm">No telemetry reading available for this asset yet.</p>
+              </CardContent>
+            </Card>
+          ) : null
         )}
 
         {/* Quick Actions */}

@@ -233,7 +233,23 @@ export default function MLPredictions() {
       )}
 
       {/* Price Patterns Analysis */}
-      {patterns && (
+      {patterns && patterns.trained === false && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Price Pattern Analysis (30 Days)</CardTitle>
+            <CardDescription>Historical trends and optimal trading patterns</CardDescription>
+          </CardHeader>
+          <CardContent>
+            {/* The model has never been trained: the server reports
+                trained:false with empty arrays and null metrics rather than
+                fabricating plausible-looking patterns. */}
+            <p className="text-sm text-muted-foreground">
+              {patterns.reason ?? "The price model has not been trained yet — no pattern analysis is available."}
+            </p>
+          </CardContent>
+        </Card>
+      )}
+      {patterns && patterns.trained !== false && (
         <Card>
           <CardHeader>
             <CardTitle>Price Pattern Analysis (30 Days)</CardTitle>
@@ -281,12 +297,16 @@ export default function MLPredictions() {
             <div className="mt-6 grid gap-4 md:grid-cols-2">
               <div className="p-4 bg-muted rounded-lg">
                 <div className="text-sm font-medium text-muted-foreground">Average Price</div>
-                <div className="text-2xl font-bold mt-1">{patterns.averagePrice}¢/kWh</div>
+                <div className="text-2xl font-bold mt-1">
+                  {patterns.averagePrice != null ? `${patterns.averagePrice}¢/kWh` : "—"}
+                </div>
               </div>
 
               <div className="p-4 bg-muted rounded-lg">
                 <div className="text-sm font-medium text-muted-foreground">Price Volatility</div>
-                <div className="text-2xl font-bold mt-1">{patterns.priceVolatility}%</div>
+                <div className="text-2xl font-bold mt-1">
+                  {patterns.priceVolatility != null ? `${patterns.priceVolatility}%` : "—"}
+                </div>
               </div>
             </div>
           </CardContent>

@@ -41,6 +41,17 @@ services:
     environment:
       - MQTT_BROKER_URL=ssl://mosquitto:8883
       - FLUVIO_ENDPOINT=fluvio:9003
+      # The bridge config (mqtt-fluvio-bridge/config/config.yaml) defaults
+      # stream.transport to kafka, but the consumers in this same compose file
+      # (database-consumer, analytics-consumer) read the Fluvio topic
+      # `telemetry` — with kafka transport the chain is broken by default.
+      # Fluvio transport produces `telemetry` (from vpp/telemetry/+) and
+      # `device-status` (from vpp/devices/+/status); `device-status` currently
+      # has no consumer in this stack — the mapping is kept so edge status is
+      # recorded for a future consumer rather than dropped.
+      # NOTE: the fluvio transport shells out to the `fluvio` CLI, which must
+      # be present in the bridge image (mqtt-fluvio-bridge/Dockerfile).
+      - STREAM_TRANSPORT=fluvio
     volumes:
       - ./mqtt-fluvio-bridge/config:/root/config
       - ../mqtt/certs:/root/certs

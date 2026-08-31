@@ -20,7 +20,21 @@ import {
 import { sendSMS } from '../_core/notifications';
 import { getDb } from '../db';
 import { payments } from '../../drizzle/schema';
+import { prepaidAccounts } from '../../drizzle/prepaid-schema';
 import { eq } from 'drizzle-orm';
+
+/**
+ * Every prepaid account is swept: accounts carry no active/inactive status —
+ * a credited account is owed a truthful balance whether or not it consumed
+ * recently. Accounts without meter integration surface through
+ * accountsWithoutMeter in the sweep result, not by silent exclusion.
+ */
+export async function listPrepaidAccountIdsActivity(): Promise<number[]> {
+  const db = await getDb();
+  if (!db) throw new Error('database unavailable');
+  const rows = await db.select({ id: prepaidAccounts.id }).from(prepaidAccounts);
+  return rows.map(row => row.id);
+}
 
 export interface IssueTokenActivityInput {
   paymentId: number;

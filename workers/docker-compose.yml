@@ -25,53 +25,27 @@ services:
     networks:
       - temporal-network
 
-  # DR Event Worker (Go)
-  dr-worker:
-    build:
-      context: ./dr-worker
-      dockerfile: Dockerfile
-    environment:
-      - DATABASE_URL=${DATABASE_URL}
-      - TEMPORAL_ADDRESS=temporal:7233
-    depends_on:
-      - temporal
-    networks:
-      - temporal-network
-    restart: unless-stopped
-
-  # Trading Worker (Python)
-  trading-worker:
-    build:
-      context: ./trading-worker
-      dockerfile: Dockerfile
-    environment:
-      - DB_HOST=${DB_HOST}
-      - DB_NAME=${DB_NAME}
-      - DB_USER=${DB_USER}
-      - DB_PASSWORD=${DB_PASSWORD}
-      - TEMPORAL_ADDRESS=temporal:7233
-    depends_on:
-      - temporal
-    networks:
-      - temporal-network
-    restart: unless-stopped
-
-  # Payment Worker (Python)
-  payment-worker:
-    build:
-      context: ./payment-worker
-      dockerfile: Dockerfile
-    environment:
-      - DB_HOST=${DB_HOST}
-      - DB_NAME=${DB_NAME}
-      - DB_USER=${DB_USER}
-      - DB_PASSWORD=${DB_PASSWORD}
-      - TEMPORAL_ADDRESS=temporal:7233
-    depends_on:
-      - temporal
-    networks:
-      - temporal-network
-    restart: unless-stopped
+  # ------------------------------------------------------------------
+  # RETIRED duplicate workers — do not re-add.
+  #
+  # The dr-worker (Go), trading-worker (Python) and payment-worker (Python)
+  # services that used to be defined here polled the same Temporal task
+  # queues the TypeScript workers own (payment-processing, trading-execution)
+  # or a queue nothing publishes to (dr-events), and registered workflow
+  # type names that do not match what the server dispatches (e.g.
+  # `PaymentProcessingWorkflow` vs the dispatched `processPayment`,
+  # `AutomatedTradingWorkflow` vs `automatedTradingWorkflow`). Running them
+  # alongside the TS workers failed tasks non-deterministically.
+  #
+  # The live workers are the TypeScript ones:
+  #   server/workflows/worker.ts          -> payment-processing
+  #   server/workflows/dr-worker.ts       -> dr-orchestration
+  #   server/workflows/trading-worker.ts  -> trading-execution
+  #   server/workflows/prepaid-worker.ts  -> prepaid-issuance
+  # deployed in docker-compose.prod.yml. The Python/Go entrypoints under
+  # payment-worker/, trading-worker/ and dr-worker/ are kept for reference
+  # only and log a retirement warning at boot.
+  # ------------------------------------------------------------------
 
 networks:
   temporal-network:

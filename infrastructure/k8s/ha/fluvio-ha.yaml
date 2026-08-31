@@ -325,28 +325,30 @@ metadata:
   name: fluvio-topics
   namespace: fluvio
 data:
+  # Topic names must match what the mqtt-fluvio-bridge actually produces
+  # (services/mqtt-fluvio-bridge/config/config.yaml, `fluvio.topics`) and what
+  # the consumers read (services/docker-compose.yml FLUVIO_TOPIC=telemetry for
+  # database-consumer and analytics-consumer). The previous names
+  # (vpp-telemetry-raw / vpp-telemetry-processed) matched neither, so the
+  # bridge could not produce and the consumers had nothing to read.
   topics.yaml: |
     topics:
-      - name: vpp-telemetry-raw
+      # Device telemetry from MQTT topic vpp/telemetry/+ (bridge), consumed by
+      # database-consumer and analytics-consumer.
+      - name: telemetry
         partitions: 6
         replication: 3
         retention_time: 604800000  # 7 days
-      - name: vpp-telemetry-processed
-        partitions: 6
-        replication: 3
-        retention_time: 2592000000  # 30 days
-      - name: vpp-trading-events
+      # Device status from MQTT topic vpp/devices/+/status (bridge). No
+      # consumer in this stack yet; retained so edge status is on the record
+      # for a future consumer.
+      - name: device-status
         partitions: 3
         replication: 3
-        retention_time: 2592000000
-      - name: vpp-dr-events
-        partitions: 3
-        replication: 3
-        retention_time: 2592000000
-      - name: vpp-alerts
-        partitions: 3
-        replication: 3
-        retention_time: 604800000
+        retention_time: 604800000  # 7 days
+      # NOTE: vpp-trading-events / vpp-dr-events / vpp-alerts previously
+      # declared here have no producer anywhere in the repository and were
+      # removed rather than created empty.
 ---
 # Horizontal Pod Autoscaler for SPUs
 apiVersion: autoscaling/v2

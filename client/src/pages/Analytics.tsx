@@ -49,38 +49,59 @@ export default function Analytics() {
     return { startDate: start, endDate: end };
   }, [dateRange]);
 
-  const { data: revenueData, isLoading: revenueLoading } = trpc.analytics.getRevenue.useQuery({
+  // The analytics getters throw on failure; each query's error state is
+  // rendered explicitly ('—' / message + retry) instead of zeros.
+  const revenueQuery = trpc.analytics.getRevenue.useQuery({
     startDate,
     endDate,
   });
+  const { data: revenueData, isLoading: revenueLoading } = revenueQuery;
 
-  const { data: energyFlowData, isLoading: energyLoading } = trpc.analytics.getEnergyFlow.useQuery({
+  const energyFlowQuery = trpc.analytics.getEnergyFlow.useQuery({
     startDate,
     endDate,
     interval: "day",
   });
+  const { data: energyFlowData, isLoading: energyLoading } = energyFlowQuery;
 
-  const { data: tradingData, isLoading: tradingLoading } = trpc.analytics.getTradingVolume.useQuery({
+  const tradingQuery = trpc.analytics.getTradingVolume.useQuery({
     startDate,
     endDate,
   });
+  const { data: tradingData, isLoading: tradingLoading } = tradingQuery;
 
-  // Calculate summary statistics
+  const revenueFailed = revenueQuery.isError;
+  const energyFailed = energyFlowQuery.isError;
+  const tradingFailed = tradingQuery.isError;
+  const anyFailed = revenueFailed || energyFailed || tradingFailed;
+
+  // Calculate summary statistics — null when the underlying query failed, so
+  // a failed backend renders as '—', not 0.00.
   const summaryStats = useMemo(() => {
-    const totalRevenue = revenueData?.data.reduce((sum, d) => sum + d.revenue, 0) || 0;
-    const totalTransactions = revenueData?.data.reduce((sum, d) => sum + d.transactions, 0) || 0;
-    const totalEnergyTraded = tradingData?.data.reduce((sum, d) => sum + d.volume, 0) || 0;
-    const avgEnergyPerDay = energyFlowData?.data.length 
-      ? energyFlowData.data.reduce((sum, d) => sum + d.generation, 0) / energyFlowData.data.length
-      : 0;
+    const totalRevenue = revenueFailed
+      ? null
+      : revenueData?.data.reduce((sum, d) => sum + d.revenue, 0) ?? null;
+    const totalTransactions = revenueFailed
+      ? null
+      : revenueData?.data.reduce((sum, d) => sum + d.transactions, 0) ?? null;
+    const totalEnergyTraded = tradingFailed
+      ? null
+      : tradingData
+        ? tradingData.data.reduce((sum, d) => sum + d.volume, 0) / 1000 // Wh to kWh
+        : null;
+    const avgEnergyPerDay = energyFailed
+      ? null
+      : energyFlowData?.data.length
+        ? energyFlowData.data.reduce((sum, d) => sum + d.generation, 0) / energyFlowData.data.length / 1000 // W to kW
+        : null;
 
     return {
       totalRevenue,
       totalTransactions,
-      totalEnergyTraded: totalEnergyTraded / 1000, // Convert Wh to kWh
-      avgEnergyPerDay: avgEnergyPerDay / 1000, // Convert W to kW
+      totalEnergyTraded,
+      avgEnergyPerDay,
     };
-  }, [revenueData, tradingData, energyFlowData]);
+  }, [revenueData, tradingData, energyFlowData, revenueFailed, tradingFailed, energyFailed]);
 
   const exportRevenueMutation = trpc.export.revenuePDF.useMutation({
     onSuccess: (data) => {
@@ -153,6 +174,31 @@ export default function Analytics() {
           </div>
         </div>
 
+        {anyFailed && (
+          <Card className="border-red-200 bg-red-50">
+            <CardContent className="flex items-center justify-between gap-3 py-4">
+              <p className="text-sm text-red-800">
+                {[
+                  revenueFailed && `revenue: ${(revenueQuery.error as any)?.message || 'failed'}`,
+                  energyFailed && `energy flow: ${(energyFlowQuery.error as any)?.message || 'failed'}`,
+                  tradingFailed && `trading volume: ${(tradingQuery.error as any)?.message || 'failed'}`,
+                ].filter(Boolean).join(' · ')}
+              </p>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  revenueQuery.refetch();
+                  energyFlowQuery.refetch();
+                  tradingQuery.refetch();
+                }}
+              >
+                Retry
+              </Button>
+            </CardContent>
+          </Card>
+        )}
+
         {/* Summary Cards */}
         <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
           <Card>
@@ -161,9 +207,13 @@ export default function Analytics() {
               <DollarSign className="h-4 w-4 text-muted-foreground" />
             </CardHeader>
             <CardContent>
-              <div className="text-2xl font-bold">TZS {summaryStats.totalRevenue.toFixed(2)}</div>
+              <div className="text-2xl font-bold">
+                {summaryStats.totalRevenue !== null ? `TZS ${summaryStats.totalRevenue.toFixed(2)}` : "—"}
+              </div>
               <p className="text-xs text-muted-foreground">
-                From {summaryStats.totalTransactions} transactions
+                {summaryStats.totalTransactions !== null
+                  ? `From ${summaryStats.totalTransactions} transactions`
+                  : "Revenue data unavailable"}
               </p>
             </CardContent>
           </Card>
@@ -174,9 +224,11 @@ export default function Analytics() {
               <TrendingUp className="h-4 w-4 text-muted-foreground" />
             </CardHeader>
             <CardContent>
-              <div className="text-2xl font-bold">{summaryStats.totalEnergyTraded.toFixed(2)} kWh</div>
+              <div className="text-2xl font-bold">
+                {summaryStats.totalEnergyTraded !== null ? `${summaryStats.totalEnergyTraded.toFixed(2)} kWh` : "—"}
+              </div>
               <p className="text-xs text-muted-foreground">
-                Total energy traded in period
+                {summaryStats.totalEnergyTraded !== null ? "Total energy traded in period" : "Trading data unavailable"}
               </p>
             </CardContent>
           </Card>
@@ -187,9 +239,11 @@ export default function Analytics() {
               <Zap className="h-4 w-4 text-muted-foreground" />
             </CardHeader>
             <CardContent>
-              <div className="text-2xl font-bold">{summaryStats.avgEnergyPerDay.toFixed(2)} kW</div>
+              <div className="text-2xl font-bold">
+                {summaryStats.avgEnergyPerDay !== null ? `${summaryStats.avgEnergyPerDay.toFixed(2)} kW` : "—"}
+              </div>
               <p className="text-xs text-muted-foreground">
-                Average daily generation
+                {summaryStats.avgEnergyPerDay !== null ? "Average daily generation" : "Energy data unavailable"}
               </p>
             </CardContent>
           </Card>
@@ -200,9 +254,11 @@ export default function Analytics() {
               <TrendingUp className="h-4 w-4 text-muted-foreground" />
             </CardHeader>
             <CardContent>
-              <div className="text-2xl font-bold">{summaryStats.totalTransactions}</div>
+              <div className="text-2xl font-bold">
+                {summaryStats.totalTransactions !== null ? summaryStats.totalTransactions : "—"}
+              </div>
               <p className="text-xs text-muted-foreground">
-                Total payment transactions
+                {summaryStats.totalTransactions !== null ? "Total payment transactions" : "Revenue data unavailable"}
               </p>
             </CardContent>
           </Card>
@@ -218,6 +274,12 @@ export default function Analytics() {
             {revenueLoading ? (
               <div className="h-[300px] flex items-center justify-center">
                 <p className="text-muted-foreground">Loading chart...</p>
+              </div>
+            ) : revenueFailed ? (
+              <div className="h-[300px] flex items-center justify-center">
+                <p className="text-red-600">
+                  Chart unavailable: {(revenueQuery.error as any)?.message || "failed to load revenue data"}
+                </p>
               </div>
             ) : !revenueData?.data.length ? (
               <div className="h-[300px] flex items-center justify-center">
@@ -255,6 +317,12 @@ export default function Analytics() {
             {energyLoading ? (
               <div className="h-[300px] flex items-center justify-center">
                 <p className="text-muted-foreground">Loading chart...</p>
+              </div>
+            ) : energyFailed ? (
+              <div className="h-[300px] flex items-center justify-center">
+                <p className="text-red-600">
+                  Chart unavailable: {(energyFlowQuery.error as any)?.message || "failed to load energy data"}
+                </p>
               </div>
             ) : !energyFlowData?.data.length ? (
               <div className="h-[300px] flex items-center justify-center">
@@ -302,6 +370,12 @@ export default function Analytics() {
             {tradingLoading ? (
               <div className="h-[300px] flex items-center justify-center">
                 <p className="text-muted-foreground">Loading chart...</p>
+              </div>
+            ) : tradingFailed ? (
+              <div className="h-[300px] flex items-center justify-center">
+                <p className="text-red-600">
+                  Chart unavailable: {(tradingQuery.error as any)?.message || "failed to load trading data"}
+                </p>
               </div>
             ) : !tradingData?.data.length ? (
               <div className="h-[300px] flex items-center justify-center">

@@ -2,23 +2,24 @@ import { useAuth } from "@/_core/hooks/useAuth";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { trpc } from "@/lib/trpc";
-import { AlertCircle, Battery, Cloud, DollarSign, Loader2, Sun, TrendingUp, Zap } from "lucide-react";
+import { AlertCircle, Battery, DollarSign, Loader2, Sun, TrendingUp, Zap } from "lucide-react";
 import { useState } from "react";
-import { Area, AreaChart, Bar, BarChart, CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import { Bar, BarChart, CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { toast } from "sonner";
 
 export default function EnergyInsights() {
   const { user } = useAuth();
   const [timeRange, setTimeRange] = useState<'24h' | '7d' | '30d'>('24h');
 
-  // Fetch ML predictions
-  const { data: predictions, isLoading: loadingPredictions, refetch: refetchPredictions } = trpc.mlPredictions.getPricePredictions.useQuery(
-    { hoursAhead: timeRange === '24h' ? 24 : timeRange === '7d' ? 168 : 720 },
+  // Fetch ML predictions (server returns an empty array when the model is
+  // untrained; hoursAhead is capped at the server's 168-hour maximum).
+  const { data: predictions, isLoading: loadingPredictions, isError: predictionsError, error: predictionsErrorMsg, refetch: refetchPredictions } = trpc.mlPredictions.getPricePredictions.useQuery(
+    { hoursAhead: timeRange === '24h' ? 24 : 168 },
     { enabled: !!user }
   );
 
   // Fetch optimal trading times
-  const { data: tradingTimes, isLoading: loadingRecommendations } = trpc.mlPredictions.getOptimalTradingTimes.useQuery(
+  const { data: tradingTimes, isLoading: loadingRecommendations, isError: tradingTimesError, error: tradingTimesErrorMsg, refetch: refetchTradingTimes } = trpc.mlPredictions.getOptimalTradingTimes.useQuery(
     undefined,
     { enabled: !!user }
   );
@@ -26,57 +27,69 @@ export default function EnergyInsights() {
   // Fetch user assets for solar capacity
   const { data: assets } = trpc.assets.list.useQuery(undefined, { enabled: !!user });
 
-  const solarCapacity = assets?.assets?.filter((a: any) => a.assetType === 'solar_panel')
-    .reduce((sum: number, a: any) => sum + (a.capacity || 0), 0) || 0;
+  const solarAssets = (assets?.assets || []).filter((a: any) => a.assetType === 'solar');
+  // Asset capacity is stored in watts.
+  const solarCapacityKw = solarAssets.reduce((sum: number, a: any) => sum + (a.capacity || 0), 0) / 1000;
+  const firstSolarAssetId: number | null = solarAssets[0]?.id ?? null;
 
-  // Calculate solar generation forecast
-  const solarForecast = predictions?.map((p: any) => {
-    // Estimate generation based on time of day and price (inverse correlation)
-    const hour = new Date(p.timestamp).getHours();
-    const isDaytime = hour >= 6 && hour <= 18;
-    const hoursFromNoon = Math.abs(12 - hour);
-    const generationFactor = isDaytime ? Math.cos((hoursFromNoon / 6) * (Math.PI / 2)) : 0;
-    const generationKWh = solarCapacity * generationFactor * 0.8; // 80% efficiency
-    
-    return {
-      time: new Date(p.timestamp).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
-      generation: Math.round(generationKWh * 100) / 100,
-      price: p.predictedPrice,
-      confidence: p.confidence,
-    };
-  }) || [];
+  // Real weather-aware solar yield forecast for the first solar asset.
+  // The service returns { forecastAvailable: false, reason } when the weather
+  // service has no forecast — never synthesized numbers.
+  const yieldForecast = trpc.solarYield.getYieldForecast.useQuery(
+    { assetId: firstSolarAssetId! },
+    { enabled: !!user && firstSolarAssetId !== null }
+  );
 
-  // Calculate revenue optimization from trading times
-  const revenueOpportunities = tradingTimes ? [
+  // Price forecast series straight from the ML service (no derived quantities).
+  const priceForecast = (predictions || []).map((p: any) => ({
+    time: new Date(p.timestamp).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
+    price: p.predictedPrice,
+    confidence: p.confidence,
+  }));
+
+  // Trading opportunities from the ML service. No revenue is estimated here:
+  // revenue needs a metered or forecast energy quantity, which we do not
+  // fabricate.
+  const tradingOpportunities = tradingTimes ? [
     ...(tradingTimes.bestBuyTimes || []).map((t: any) => ({
       time: new Date(t.time).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
-      action: 'BUY',
-      expectedRevenue: 0,
+      action: 'BUY' as const,
+      price: t.price,
       confidence: t.confidence,
     })),
     ...(tradingTimes.bestSellTimes || []).map((t: any) => ({
       time: new Date(t.time).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
-      action: 'SELL',
-      expectedRevenue: t.price * solarCapacity * 0.5, // Estimate
+      action: 'SELL' as const,
+      price: t.price,
       confidence: t.confidence,
     }))
   ] : [];
 
-  // Calculate total potential revenue
-  const totalPotentialRevenue = revenueOpportunities
-    .reduce((sum: number, r: any) => sum + r.expectedRevenue, 0);
+  const forecast = yieldForecast.data;
+  const forecastDays = forecast?.forecastAvailable
+    ? forecast.days.map((d: any) => ({
+        date: d.date,
+        peakSunHours: d.peakSunHours,
+        expectedYieldKwh: d.expectedYieldWh !== null ? d.expectedYieldWh / 1000 : null,
+      }))
+    : [];
+  const totalExpectedYieldKwh = forecast?.forecastAvailable
+    ? forecast.days.reduce((sum: number, d: any) => sum + (d.expectedYieldWh ?? 0), 0) / 1000
+    : null;
+  const anyYieldUnknown = forecast?.forecastAvailable
+    && forecast.days.some((d: any) => d.expectedYieldWh === null);
 
-  // Weather impact analysis
-  const weatherImpact = solarForecast.slice(0, 24).map((f: any, i: number) => ({
-    hour: f.time,
-    generation: f.generation,
-    price: f.price,
-    revenue: f.generation * f.price,
-  }));
+  const hasError = predictionsError || tradingTimesError || yieldForecast.isError;
+  const errorMessage =
+    predictionsErrorMsg?.message || tradingTimesErrorMsg?.message || (yieldForecast.error as any)?.message;
 
   const handleRefresh = async () => {
     try {
-      await refetchPredictions();
+      await Promise.all([
+        refetchPredictions(),
+        refetchTradingTimes(),
+        firstSolarAssetId !== null ? yieldForecast.refetch() : Promise.resolve(),
+      ]);
       toast.success('Insights refreshed');
     } catch (error) {
       toast.error('Failed to refresh insights');
@@ -107,6 +120,17 @@ export default function EnergyInsights() {
 
   return (
     <div className="container py-8 space-y-6">
+      {hasError && (
+        <Card className="border-red-200 bg-red-50">
+          <CardContent className="flex items-center gap-3 py-4">
+            <AlertCircle className="h-5 w-5 text-red-600" />
+            <div>
+              <p className="text-sm font-medium text-red-800">Some insights failed to load</p>
+              <p className="text-sm text-red-700">{errorMessage || 'Unknown error'}</p>
+            </div>
+          </CardContent>
+        </Card>
+      )}
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
@@ -153,21 +177,33 @@ export default function EnergyInsights() {
             <Sun className="h-4 w-4 text-yellow-500" />
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold">{solarCapacity.toFixed(1)} kW</div>
-            <p className="text-xs text-muted-foreground">Installed capacity</p>
+            <div className="text-2xl font-bold">{solarCapacityKw.toFixed(1)} kW</div>
+            <p className="text-xs text-muted-foreground">
+              {solarAssets.length > 0 ? `Across ${solarAssets.length} solar asset(s)` : 'No solar asset registered'}
+            </p>
           </CardContent>
         </Card>
 
         <Card>
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Potential Revenue</CardTitle>
+            <CardTitle className="text-sm font-medium">Expected Solar Yield</CardTitle>
             <DollarSign className="h-4 w-4 text-green-500" />
           </CardHeader>
           <CardContent>
             <div className="text-2xl font-bold">
-              {totalPotentialRevenue.toFixed(2)} TZS
+              {totalExpectedYieldKwh !== null && !anyYieldUnknown
+                ? `${totalExpectedYieldKwh.toFixed(1)} kWh`
+                : '—'}
             </div>
-            <p className="text-xs text-muted-foreground">Next 24 hours</p>
+            <p className="text-xs text-muted-foreground">
+              {firstSolarAssetId === null
+                ? 'No solar asset registered'
+                : forecast?.forecastAvailable
+                  ? anyYieldUnknown
+                    ? 'Yield unknown — no learned performance ratio yet'
+                  : 'Next 3 days (weather-adjusted)'
+                  : forecast?.reason || 'Forecast unavailable'}
+            </p>
           </CardContent>
         </Card>
 
@@ -180,7 +216,7 @@ export default function EnergyInsights() {
             <div className="text-2xl font-bold">
               {tradingTimes?.bestSellTimes?.[0]?.time 
                 ? new Date(tradingTimes.bestSellTimes[0].time).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })
-                : 'N/A'}
+                : '—'}
             </div>
             <p className="text-xs text-muted-foreground">Peak price period</p>
           </CardContent>
@@ -193,66 +229,95 @@ export default function EnergyInsights() {
           </CardHeader>
           <CardContent>
             <div className="text-2xl font-bold">
-              {predictions && predictions.length > 0 ? Math.round((predictions.reduce((sum: number, p: any) => sum + p.confidence, 0) / predictions.length)) : 0}%
+              {predictions && predictions.length > 0 ? `${Math.round((predictions.reduce((sum: number, p: any) => sum + p.confidence, 0) / predictions.length))}%` : '—'}
             </div>
-            <p className="text-xs text-muted-foreground">Prediction accuracy</p>
+            <p className="text-xs text-muted-foreground">
+              {predictions && predictions.length > 0 ? 'Prediction confidence' : 'No predictions yet'}
+            </p>
           </CardContent>
         </Card>
       </div>
 
-      {/* Solar Generation Forecast */}
+      {/* Solar Yield Forecast — from the weather-aware solar-yield service */}
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
             <Sun className="h-5 w-5 text-yellow-500" />
-            Solar Generation Forecast
+            Solar Yield Forecast
           </CardTitle>
           <CardDescription>
-            Predicted solar energy generation based on weather forecasts
+            Weather-adjusted expected yield for your solar asset over the next 3 days
           </CardDescription>
         </CardHeader>
         <CardContent>
-          <ResponsiveContainer width="100%" height={300}>
-            <AreaChart data={solarForecast.slice(0, 24)}>
-              <defs>
-                <linearGradient id="colorGeneration" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%" stopColor="#eab308" stopOpacity={0.8}/>
-                  <stop offset="95%" stopColor="#eab308" stopOpacity={0}/>
-                </linearGradient>
-              </defs>
-              <CartesianGrid strokeDasharray="3 3" />
-              <XAxis dataKey="time" />
-              <YAxis />
-              <Tooltip />
-              <Legend />
-              <Area 
-                type="monotone" 
-                dataKey="generation" 
-                stroke="#eab308" 
-                fillOpacity={1} 
-                fill="url(#colorGeneration)"
-                name="Generation (kWh)"
-              />
-            </AreaChart>
-          </ResponsiveContainer>
+          {firstSolarAssetId === null ? (
+            <p className="text-sm text-muted-foreground py-8 text-center">
+              Register a solar asset to see a yield forecast.
+            </p>
+          ) : yieldForecast.isLoading ? (
+            <div className="flex items-center justify-center py-12">
+              <Loader2 className="h-6 w-6 animate-spin text-primary" />
+            </div>
+          ) : yieldForecast.isError ? (
+            <p className="text-sm text-red-600">{(yieldForecast.error as any)?.message || 'Failed to load yield forecast'}</p>
+          ) : !forecast?.forecastAvailable ? (
+            <div className="flex items-start gap-3 rounded-md border border-amber-200 bg-amber-50 p-4 text-sm">
+              <AlertCircle className="h-4 w-4 mt-0.5 text-amber-600" />
+              <div>
+                <p className="font-medium text-amber-800">Forecast unavailable</p>
+                <p className="text-amber-700">{forecast?.reason || 'The weather service returned no forecast.'}</p>
+              </div>
+            </div>
+          ) : (
+            <>
+              {forecast.mockData && (
+                <p className="text-xs text-amber-700 mb-2">
+                  Note: the weather service is returning opted-in mock data for this location.
+                </p>
+              )}
+              <ResponsiveContainer width="100%" height={300}>
+                <BarChart data={forecastDays}>
+                  <CartesianGrid strokeDasharray="3 3" />
+                  <XAxis dataKey="date" />
+                  <YAxis />
+                  <Tooltip />
+                  <Legend />
+                  <Bar dataKey="peakSunHours" fill="#eab308" name="Peak sun hours" />
+                  {!anyYieldUnknown && (
+                    <Bar dataKey="expectedYieldKwh" fill="#16a34a" name="Expected yield (kWh)" />
+                  )}
+                </BarChart>
+              </ResponsiveContainer>
+              {anyYieldUnknown && (
+                <p className="text-xs text-muted-foreground mt-2">
+                  Expected yield in kWh is not shown: no performance ratio has been learned from
+                  this asset's metered history yet. Peak sun hours above are from the weather forecast.
+                </p>
+              )}
+            </>
+          )}
         </CardContent>
       </Card>
 
-      {/* Price Forecast & Revenue Optimization */}
-      <div className="grid gap-4 md:grid-cols-2">
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <TrendingUp className="h-5 w-5 text-blue-500" />
-              Price Forecast
-            </CardTitle>
-            <CardDescription>
-              Predicted electricity prices for optimal trading
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
+      {/* Price Forecast */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <TrendingUp className="h-5 w-5 text-blue-500" />
+            Price Forecast
+          </CardTitle>
+          <CardDescription>
+            Predicted electricity prices for optimal trading
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          {priceForecast.length === 0 ? (
+            <p className="text-sm text-muted-foreground py-8 text-center">
+              No price predictions available — the forecasting model has not been trained on enough data yet.
+            </p>
+          ) : (
             <ResponsiveContainer width="100%" height={250}>
-              <LineChart data={solarForecast.slice(0, 24)}>
+              <LineChart data={priceForecast}>
                 <CartesianGrid strokeDasharray="3 3" />
                 <XAxis dataKey="time" />
                 <YAxis />
@@ -268,33 +333,9 @@ export default function EnergyInsights() {
                 />
               </LineChart>
             </ResponsiveContainer>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <DollarSign className="h-5 w-5 text-green-500" />
-              Revenue Optimization
-            </CardTitle>
-            <CardDescription>
-              Expected revenue from weather-optimized trading
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <ResponsiveContainer width="100%" height={250}>
-              <BarChart data={weatherImpact}>
-                <CartesianGrid strokeDasharray="3 3" />
-                <XAxis dataKey="hour" />
-                <YAxis />
-                <Tooltip />
-                <Legend />
-                <Bar dataKey="revenue" fill="#10b981" name="Revenue (TZS)" />
-              </BarChart>
-            </ResponsiveContainer>
-          </CardContent>
-        </Card>
-      </div>
+          )}
+        </CardContent>
+      </Card>
 
       {/* Trading Recommendations */}
       <Card>
@@ -304,84 +345,54 @@ export default function EnergyInsights() {
             AI Trading Recommendations
           </CardTitle>
           <CardDescription>
-            Optimal buy/sell actions based on price predictions and your solar capacity
+            Optimal buy/sell windows from the price-forecast model. No revenue is
+            estimated — that would require a metered energy quantity.
           </CardDescription>
         </CardHeader>
         <CardContent>
-          <div className="space-y-3">
-            {revenueOpportunities.slice(0, 10).map((opp: any, i: number) => (
-              <div 
-                key={i}
-                className="flex items-center justify-between p-3 rounded-lg border bg-card hover:bg-accent/50 transition-colors"
-              >
-                <div className="flex items-center gap-3">
-                  <div className={`p-2 rounded-full ${
-                    opp.action === 'SELL' ? 'bg-green-100 text-green-700' :
-                    opp.action === 'BUY' ? 'bg-blue-100 text-blue-700' :
-                    'bg-gray-100 text-gray-700'
-                  }`}>
-                    {opp.action === 'SELL' ? <TrendingUp className="h-4 w-4" /> :
-                     opp.action === 'BUY' ? <Battery className="h-4 w-4" /> :
-                     <AlertCircle className="h-4 w-4" />}
+          {tradingOpportunities.length === 0 ? (
+            <p className="text-sm text-muted-foreground py-4 text-center">
+              No trading recommendations available yet.
+            </p>
+          ) : (
+            <div className="space-y-3">
+              {tradingOpportunities.slice(0, 10).map((opp: any, i: number) => (
+                <div 
+                  key={i}
+                  className="flex items-center justify-between p-3 rounded-lg border bg-card hover:bg-accent/50 transition-colors"
+                >
+                  <div className="flex items-center gap-3">
+                    <div className={`p-2 rounded-full ${
+                      opp.action === 'SELL' ? 'bg-green-100 text-green-700' :
+                      opp.action === 'BUY' ? 'bg-blue-100 text-blue-700' :
+                      'bg-gray-100 text-gray-700'
+                    }`}>
+                      {opp.action === 'SELL' ? <TrendingUp className="h-4 w-4" /> :
+                       opp.action === 'BUY' ? <Battery className="h-4 w-4" /> :
+                       <AlertCircle className="h-4 w-4" />}
+                    </div>
+                    <div>
+                      <p className="font-medium">{opp.action} at {opp.time}</p>
+                      <p className="text-sm text-muted-foreground">
+                        {opp.price !== null && opp.price !== undefined
+                          ? `Predicted price: ${Number(opp.price).toFixed(2)} TZS/kWh`
+                          : 'Predicted price: —'}
+                      </p>
+                    </div>
                   </div>
-                  <div>
-                    <p className="font-medium">{opp.action} at {opp.time}</p>
-                    <p className="text-sm text-muted-foreground">
-                      Expected revenue: {opp.expectedRevenue.toFixed(2)} TZS
-                    </p>
+                  <div className="text-right">
+                    <p className="text-sm font-medium">{opp.confidence}% confidence</p>
+                    <div className="w-24 h-2 bg-gray-200 rounded-full mt-1">
+                      <div 
+                        className="h-full bg-green-500 rounded-full"
+                        style={{ width: `${opp.confidence}%` }}
+                      />
+                    </div>
                   </div>
                 </div>
-                <div className="text-right">
-                  <p className="text-sm font-medium">{opp.confidence}% confidence</p>
-                  <div className="w-24 h-2 bg-gray-200 rounded-full mt-1">
-                    <div 
-                      className="h-full bg-green-500 rounded-full"
-                      style={{ width: `${opp.confidence}%` }}
-                    />
-                  </div>
-                </div>
-              </div>
-            ))}
-          </div>
-        </CardContent>
-      </Card>
-
-      {/* Weather Impact Analysis */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <Cloud className="h-5 w-5 text-gray-500" />
-            Weather Impact Analysis
-          </CardTitle>
-          <CardDescription>
-            How weather conditions affect your solar generation and revenue
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div className="space-y-4">
-            <div className="grid gap-4 md:grid-cols-3">
-              <div className="p-4 rounded-lg border bg-card">
-                <p className="text-sm text-muted-foreground">Peak Generation Hour</p>
-                <p className="text-2xl font-bold mt-1">
-                  {weatherImpact.reduce((max: any, curr: any) => 
-                    curr.generation > max.generation ? curr : max, weatherImpact[0]
-                  )?.hour || 'N/A'}
-                </p>
-              </div>
-              <div className="p-4 rounded-lg border bg-card">
-                <p className="text-sm text-muted-foreground">Total Generation (24h)</p>
-                <p className="text-2xl font-bold mt-1">
-                  {weatherImpact.reduce((sum: number, w: any) => sum + w.generation, 0).toFixed(1)} kWh
-                </p>
-              </div>
-              <div className="p-4 rounded-lg border bg-card">
-                <p className="text-sm text-muted-foreground">Total Revenue (24h)</p>
-                <p className="text-2xl font-bold mt-1">
-                  {weatherImpact.reduce((sum: number, w: any) => sum + w.revenue, 0).toFixed(2)} TZS
-                </p>
-              </div>
+              ))}
             </div>
-          </div>
+          )}
         </CardContent>
       </Card>
     </div>

@@ -24,9 +24,29 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
+import type { TwinNode } from '@shared/digital-twin';
 import { useWebSocket } from '@/hooks/useWebSocket';
 import { trpc } from '@/lib/trpc';
 import type { StateTone } from '@/lib/tone';
+
+/**
+ * The measured companions of a power reading, joined for one table cell. The
+ * server nulls every one of these unless the node is currently measured, so a
+ * null here is an absent measurement — rendered as '—', never as a zero.
+ */
+function formatEnergy(wh: number): string {
+  if (Math.abs(wh) >= 1000) return `${(wh / 1000).toFixed(1)} kWh`;
+  return `${Math.round(wh)} Wh`;
+}
+
+function formatReadings(node: TwinNode): string | null {
+  const parts: string[] = [];
+  if (node.voltageVolts != null) parts.push(`${node.voltageVolts.toFixed(1)} V`);
+  if (node.frequencyHz != null) parts.push(`${node.frequencyHz.toFixed(2)} Hz`);
+  if (node.temperatureCelsius != null) parts.push(`${node.temperatureCelsius.toFixed(1)} °C`);
+  if (node.energyWh != null) parts.push(formatEnergy(node.energyWh));
+  return parts.length === 0 ? null : parts.join(' · ');
+}
 
 const EVIDENCE_LABEL = {
   measured: 'reporting',
@@ -134,7 +154,10 @@ export default function DigitalTwin() {
                     'Generation, load and storage that is currently reporting, summed. Meters are excluded because a meter measures the boundary, not another load behind it. Silent equipment is left out rather than counted as zero, so this figure is a floor when coverage is partial.',
                 }}
                 evidence={
-                  <FreshnessBadge asOf={graph.generatedAt} stalenessSeconds={60} />
+                  <FreshnessBadge
+                    asOf={graph.generatedAt}
+                    stalenessSeconds={graph.stalenessSeconds}
+                  />
                 }
               />
               <MetricTile
@@ -211,6 +234,7 @@ export default function DigitalTwin() {
                     <TableHead>Evidence</TableHead>
                     <TableHead className="text-right">Power</TableHead>
                     <TableHead className="text-right">Age</TableHead>
+                    <TableHead className="text-right">Measured</TableHead>
                     <TableHead className="text-right">Rated</TableHead>
                     <TableHead>Devices</TableHead>
                   </TableRow>
@@ -221,7 +245,14 @@ export default function DigitalTwin() {
                     const last = formatWatts(node.lastPowerWatts);
                     return (
                       <TableRow key={node.id}>
-                        <TableCell className="font-medium">{node.label}</TableCell>
+                        <TableCell className="font-medium">
+                          {node.label}
+                          {node.approvalStatus === 'pending' && (
+                            <span className="ml-2 inline-block rounded-full border border-dashed border-amber-500 px-2 py-0.5 align-middle text-[10px] font-medium uppercase tracking-wide text-amber-600 dark:text-amber-300">
+                              not yet approved
+                            </span>
+                          )}
+                        </TableCell>
                         <TableCell>
                           <ToneBadge
                             label={EVIDENCE_LABEL[node.evidence]}
@@ -242,6 +273,9 @@ export default function DigitalTwin() {
                           )}
                         </TableCell>
                         <TableCell className="text-right tabular-nums">
+                          {formatReadings(node) ?? <span className="text-muted-foreground">—</span>}
+                        </TableCell>
+                        <TableCell className="text-right tabular-nums">
                           {formatWatts(node.capacity) ?? '—'}
                         </TableCell>
                         <TableCell className="text-xs text-muted-foreground">
@@ -259,7 +293,7 @@ export default function DigitalTwin() {
                   })}
                   {rows.length === 0 && (
                     <TableRow>
-                      <TableCell colSpan={6} className="text-sm text-muted-foreground">
+                      <TableCell colSpan={7} className="text-sm text-muted-foreground">
                         No equipment is registered against your account.
                       </TableCell>
                     </TableRow>

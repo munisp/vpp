@@ -22,8 +22,13 @@
  * component means the same thing wherever it is rendered.
  */
 
+import { z } from 'zod';
+
 /** Freshness of the evidence behind a node, an edge or a figure. */
 export type EvidenceState = 'measured' | 'stale' | 'never';
+
+/** The approval lifecycle `assets.approvalStatus` carries. */
+export type TwinApprovalStatus = 'pending' | 'approved' | 'rejected';
 
 export type TwinNodeKind =
   | 'grid'
@@ -89,9 +94,65 @@ export interface TwinAssetRecord {
   /** Watts for generation, watt-hours for storage, as `assets.capacity` is. */
   capacity: number;
   status: string;
+  /**
+   * `assets.approvalStatus` as stored. `rejected` rows are not equipment and
+   * never reach the graph; `pending` rows are drawn but labelled as not yet
+   * approved. Absent only for records built outside the loader.
+   */
+  approvalStatus?: TwinApprovalStatus;
+  /** `assets.metadata` (a JSON string) as stored, when the loader read it. */
+  metadata?: string | null;
   observation: TwinObservation;
   devices: TwinDeviceRecord[];
 }
+
+/**
+ * The shape a registry row must have before it is allowed into the graph.
+ *
+ * The bounds are physical, not cosmetic: a state of charge above 100% or a
+ * zero capacity means the registry row is corrupt, and a corrupt registry row
+ * is an operations incident. Loaders must reject the row (naming it), never
+ * skip it — skipping would draw the plant smaller than it is.
+ */
+export const twinObservationSchema = z.object({
+  observedAt: z.date().nullable(),
+  powerWatts: z.number().nullable(),
+  /** Cumulative energy is never negative. */
+  energyWh: z.number().nonnegative().nullable(),
+  stateOfChargePercent: z.number().min(0).max(100).nullable(),
+  voltageVolts: z.number().nullable(),
+  frequencyHz: z.number().nullable(),
+  temperatureCelsius: z.number().nullable(),
+  samples: z.number().int().nonnegative(),
+});
+
+export const twinDeviceRecordSchema = z.object({
+  id: z.number().int(),
+  deviceId: z.string(),
+  deviceType: z.string(),
+  manufacturer: z.string().nullable(),
+  model: z.string().nullable(),
+  firmwareVersion: z.string().nullable(),
+  status: z.string(),
+  lastSeen: z.date().nullable(),
+  enabled: z.boolean(),
+  /** A device that claims to report every zero seconds is a corrupt row. */
+  telemetryIntervalSeconds: z.number().positive(),
+});
+
+export const twinAssetRecordSchema = z.object({
+  id: z.number().int(),
+  userId: z.number().int(),
+  name: z.string(),
+  assetType: z.string(),
+  /** Nameplate rating; zero or negative means the registry row is corrupt. */
+  capacity: z.number().positive(),
+  status: z.string(),
+  approvalStatus: z.enum(['pending', 'approved', 'rejected']).optional(),
+  metadata: z.string().nullable().optional(),
+  observation: twinObservationSchema,
+  devices: z.array(twinDeviceRecordSchema),
+});
 
 export interface TwinInput {
   /** A stable label for the bus these assets sit behind. */
@@ -120,7 +181,16 @@ export interface TwinNode {
   /** Last reading even when stale, so operators can see what it was. */
   lastPowerWatts: number | null;
   stateOfChargePercent: number | null;
+  /** The measured companions of the power reading; null unless measured. */
+  energyWh?: number | null;
+  voltageVolts?: number | null;
+  frequencyHz?: number | null;
+  temperatureCelsius?: number | null;
   capacity: number;
+  /** Present on equipment nodes; `pending` means not yet approved. */
+  approvalStatus?: TwinApprovalStatus;
+  /** The freshness bound this node's evidence was judged against. */
+  stalenessBoundSeconds?: number;
   /** Registry rows for the hardware behind this node. */
   devices: TwinDeviceRecord[];
   /** One sentence an operator can act on. Never implies more than is known. */
@@ -155,6 +225,12 @@ export interface TwinGraph {
   nodes: TwinNode[];
   edges: TwinEdge[];
   coverage: TwinCoverage;
+  /**
+   * The deployment's staleness floor the graph was built with. Per-node bounds
+   * can be tighter (a fast reporter is judged against its own interval); each
+   * node carries its effective bound as `stalenessBoundSeconds`.
+   */
+  stalenessSeconds: number;
   /**
    * Net watts across the measured equipment *behind* the meter, and nothing
    * else. A silent asset is left out rather than counted as zero, which is why
@@ -196,10 +272,11 @@ export function nodeKindOf(assetType: string): TwinNodeKind {
 const CONSUMING_KINDS: ReadonlySet<TwinNodeKind> = new Set<TwinNodeKind>(['load', 'ev_charger']);
 
 /**
- * The freshness bound for one asset: its device's reporting interval, with
+ * The freshness bound for one asset: its fastest reporter's interval, with
  * generous headroom for a single missed report, floored at the deployment's
- * bound. A device configured to report every five seconds is stale long before
- * one polled every fifteen minutes is.
+ * bound. An asset is as stale as its fastest expected reporter — a dead
+ * five-second sensor must not be masked by a fifteen-minute device on the
+ * same asset, so the tightest interval sets the bound, not the loosest.
  */
 export function stalenessBoundFor(asset: TwinAssetRecord, floorSeconds: number): number {
   const intervals = asset.devices
@@ -208,7 +285,7 @@ export function stalenessBoundFor(asset: TwinAssetRecord, floorSeconds: number):
     .filter(seconds => Number.isFinite(seconds) && seconds > 0);
 
   if (intervals.length === 0) return floorSeconds;
-  return Math.max(floorSeconds, Math.max(...intervals) * 3);
+  return Math.max(floorSeconds, Math.min(...intervals) * 3);
 }
 
 export function evidenceOf(
@@ -243,6 +320,13 @@ function formatWatts(watts: number): string {
   return `${Math.round(watts)} W`;
 }
 
+/** An asset still awaiting approval is drawn, but its detail says so. */
+function pendingNote(asset: TwinAssetRecord): string {
+  return asset.approvalStatus === 'pending'
+    ? ' This asset is not yet approved, so its place in the plant is unconfirmed.'
+    : '';
+}
+
 function nodeDetail(
   kind: TwinNodeKind,
   evidence: EvidenceState,
@@ -251,20 +335,22 @@ function nodeDetail(
   asset: TwinAssetRecord
 ): string {
   if (evidence === 'never') {
-    return asset.devices.length === 0
-      ? 'No device is registered against this asset and nothing has ever been reported for it, so nothing is known about it.'
-      : 'A device is registered but has never reported, so nothing is known about this equipment.';
+    const base =
+      asset.devices.length === 0
+        ? 'No device is registered against this asset and nothing has ever been reported for it, so nothing is known about it.'
+        : 'A device is registered but has never reported, so nothing is known about this equipment.';
+    return base + pendingNote(asset);
   }
 
   const measurement = power === null ? 'no power value' : formatWatts(power);
   if (evidence === 'stale') {
-    return `Last reported ${describeAge(ageSeconds)} at ${measurement}. That is the last thing measured, not what is happening now.`;
+    return `Last reported ${describeAge(ageSeconds)} at ${measurement}. That is the last thing measured, not what is happening now.${pendingNote(asset)}`;
   }
 
   if (power === null) {
-    return `Reporting as of ${describeAge(ageSeconds)}, but with no power value, so the flow through this ${kind} is unknown.`;
+    return `Reporting as of ${describeAge(ageSeconds)}, but with no power value, so the flow through this ${kind} is unknown.${pendingNote(asset)}`;
   }
-  return `Measured ${measurement} as of ${describeAge(ageSeconds)}.`;
+  return `Measured ${measurement} as of ${describeAge(ageSeconds)}.${pendingNote(asset)}`;
 }
 
 /**
@@ -314,14 +400,62 @@ function edgeDetail(
 }
 
 /**
+ * Reads the boundary marker off a meter's `assets.metadata` JSON, when one is
+ * set. The registry has no boundary column, so the marker is a convention:
+ * `"boundary": true` or `"role": "boundary"` in the metadata object.
+ */
+function isBoundaryMarked(asset: TwinAssetRecord): boolean {
+  if (!asset.metadata) return false;
+  try {
+    const parsed: unknown = JSON.parse(asset.metadata);
+    if (typeof parsed !== 'object' || parsed === null) return false;
+    const meta = parsed as Record<string, unknown>;
+    return meta.boundary === true || meta.role === 'boundary';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Which meter measures the grid boundary, when several are registered.
+ *
+ * Summing every meter into the grid-exchange figure would double count: two
+ * meters on the same boundary each see the same exchange. Exactly one meter is
+ * therefore the boundary meter — one explicitly marked in metadata, or, absent
+ * a marker, the meter with the largest rated capacity (the boundary meter
+ * carries the whole site's exchange, so it is rated highest); ties break on
+ * the lowest id so the choice is deterministic. Every other meter is demoted
+ * to a regular node: drawn with its own evidence, but feeding no grid figure.
+ */
+export function boundaryMeterId(assets: TwinAssetRecord[]): number | null {
+  const meters = assets.filter(asset => nodeKindOf(asset.assetType) === 'meter');
+  if (meters.length === 0) return null;
+
+  const marked = meters.filter(isBoundaryMarked);
+  if (marked.length > 0) {
+    return marked.sort((a, b) => a.id - b.id)[0].id;
+  }
+  return meters
+    .slice()
+    .sort((a, b) => b.capacity - a.capacity || a.id - b.id)[0].id;
+}
+
+/**
  * Assemble the graph. Everything derives from the records passed in; nothing is
  * inferred to fill a gap, and no node is created for equipment that is not in
- * the input.
+ * the input. Rejected assets are not equipment at all and never reach the
+ * graph; pending assets are drawn but labelled as not yet approved.
  */
 export function buildTwinGraph(input: TwinInput): TwinGraph {
   const now = input.generatedAt;
   const nodes: TwinNode[] = [];
   const edges: TwinEdge[] = [];
+  const assets = input.assets.filter(asset => asset.approvalStatus !== 'rejected');
+  const boundaryId = boundaryMeterId(assets);
+  /** Meters that are not the boundary, so the caveat can name the exclusion. */
+  const demotedMeters = assets.filter(
+    asset => nodeKindOf(asset.assetType) === 'meter' && asset.id !== boundaryId
+  );
 
   let measured = 0;
   let stale = 0;
@@ -338,25 +472,30 @@ export function buildTwinGraph(input: TwinInput): TwinGraph {
   let gridEvidence: EvidenceState = 'never';
   let gridAgeSeconds: number | null = null;
 
-  for (const asset of input.assets) {
+  for (const asset of assets) {
     const kind = nodeKindOf(asset.assetType);
     const bound = stalenessBoundFor(asset, input.stalenessSeconds);
     const { evidence, ageSeconds } = evidenceOf(asset.observation.observedAt, bound, now);
     const lastPower = asset.observation.powerWatts;
     const power = evidence === 'measured' ? lastPower : null;
+    const measuredNow = evidence === 'measured';
+    /** Only the designated boundary meter measures the grid exchange. */
+    const isBoundaryMeter = kind === 'meter' && asset.id === boundaryId;
 
     if (kind !== 'meter') {
       assetsBehindMeter += 1;
       if (evidence === 'stale') staleBehindMeter += 1;
     }
 
-    if (evidence === 'measured') {
+    if (measuredNow) {
       measured += 1;
       if (power !== null) {
-        // A meter is the boundary measurement, not one more thing behind it.
-        if (kind === 'meter') {
-          meteredGridPowerWatts = (meteredGridPowerWatts ?? 0) + power;
-        } else {
+        // The boundary meter is the boundary measurement, not one more thing
+        // behind it; demoted meters measure a sub-circuit already contained in
+        // the equipment behind the bus, so they feed no sum either.
+        if (isBoundaryMeter) {
+          meteredGridPowerWatts = power;
+        } else if (kind !== 'meter') {
           measuredNetPowerWatts += power;
           measuredBehindMeter += 1;
         }
@@ -382,18 +521,23 @@ export function buildTwinGraph(input: TwinInput): TwinGraph {
       ageSeconds,
       powerWatts: power,
       lastPowerWatts: lastPower,
-      stateOfChargePercent:
-        evidence === 'measured' ? asset.observation.stateOfChargePercent : null,
+      stateOfChargePercent: measuredNow ? asset.observation.stateOfChargePercent : null,
+      energyWh: measuredNow ? asset.observation.energyWh : null,
+      voltageVolts: measuredNow ? asset.observation.voltageVolts : null,
+      frequencyHz: measuredNow ? asset.observation.frequencyHz : null,
+      temperatureCelsius: measuredNow ? asset.observation.temperatureCelsius : null,
       capacity: asset.capacity,
+      approvalStatus: asset.approvalStatus,
+      stalenessBoundSeconds: bound,
       devices: asset.devices,
-      detail: nodeDetail(kind, evidence, ageSeconds, evidence === 'measured' ? power : lastPower, asset),
+      detail: nodeDetail(kind, evidence, ageSeconds, measuredNow ? power : lastPower, asset),
     });
 
     const flow = flowOf(kind, power, evidence);
-    // A meter measures the grid boundary, so its edge is the grid's edge; every
-    // other asset sits behind the site bus.
-    const isMeter = kind === 'meter';
-    if (isMeter && (evidence === 'measured' || gridEvidence === 'never')) {
+    // The boundary meter measures the grid boundary, so its edge is the grid's
+    // edge; every other asset — including demoted meters — sits behind the
+    // site bus.
+    if (isBoundaryMeter && (evidence === 'measured' || gridEvidence === 'never')) {
       gridEvidence = evidence;
       gridAgeSeconds = ageSeconds;
     }
@@ -409,7 +553,7 @@ export function buildTwinGraph(input: TwinInput): TwinGraph {
       detail: edgeDetail(asset.name, flow.direction, flow.flowWatts, ageSeconds, evidence),
     });
 
-    if (isMeter) {
+    if (isBoundaryMeter) {
       edges.push({
         id: `edge:grid:${asset.id}`,
         from: flow.direction === 'out' ? SITE_NODE : GRID_NODE,
@@ -430,7 +574,7 @@ export function buildTwinGraph(input: TwinInput): TwinGraph {
   }
 
   const coverage: TwinCoverage = {
-    assets: input.assets.length,
+    assets: assets.length,
     measured,
     stale,
     neverObserved,
@@ -453,7 +597,8 @@ export function buildTwinGraph(input: TwinInput): TwinGraph {
     powerWatts: measuredBehindMeter > 0 ? measuredNetPowerWatts : null,
     lastPowerWatts: measuredBehindMeter > 0 ? measuredNetPowerWatts : null,
     stateOfChargePercent: null,
-    capacity: input.assets.reduce((total, asset) => total + asset.capacity, 0),
+    capacity: assets.reduce((total, asset) => total + asset.capacity, 0),
+    stalenessBoundSeconds: input.stalenessSeconds,
     devices: [],
     detail:
       measuredBehindMeter > 0
@@ -462,6 +607,16 @@ export function buildTwinGraph(input: TwinInput): TwinGraph {
           ? 'Only a meter is registered here, so nothing is known about the equipment behind the bus.'
           : 'No asset behind this bus is currently reporting, so the net flow is unknown rather than zero.',
   });
+
+  const boundaryMeter = assets.find(asset => asset.id === boundaryId);
+  const demotedNote =
+    demotedMeters.length > 0
+      ? ` The other meter${demotedMeters.length === 1 ? '' : 's'} (${demotedMeters
+          .map(meter => meter.name)
+          .join(', ')}) measure${demotedMeters.length === 1 ? 's' : ''} sub-circuits and ${
+          demotedMeters.length === 1 ? 'is' : 'are'
+        } not summed into the grid exchange.`
+      : '';
 
   nodes.push({
     id: GRID_NODE,
@@ -476,10 +631,12 @@ export function buildTwinGraph(input: TwinInput): TwinGraph {
     devices: [],
     detail:
       gridEvidence === 'measured'
-        ? 'Exchange with the grid is measured at the meter.'
+        ? `Exchange with the grid is measured at the boundary meter ${boundaryMeter?.name ?? 'unknown'}.${demotedNote}`
         : gridEvidence === 'stale'
-          ? `The meter last reported ${describeAge(gridAgeSeconds)}; the present exchange with the grid is unknown.`
-          : 'No meter is reporting, so the exchange with the grid is not measured. Import and export cannot be shown.',
+          ? `The boundary meter ${boundaryMeter?.name ?? ''} last reported ${describeAge(gridAgeSeconds)}; the present exchange with the grid is unknown.${demotedNote}`
+          : boundaryMeter
+            ? `The boundary meter ${boundaryMeter.name} has never reported, so the exchange with the grid is not measured. Import and export cannot be shown.`
+            : 'No meter is reporting, so the exchange with the grid is not measured. Import and export cannot be shown.',
   });
 
   return {
@@ -488,6 +645,7 @@ export function buildTwinGraph(input: TwinInput): TwinGraph {
     nodes,
     edges,
     coverage,
+    stalenessSeconds: input.stalenessSeconds,
     measuredNetPowerWatts,
     measuredBehindMeter,
     meteredGridPowerWatts,

@@ -1,7 +1,16 @@
 """
-Temporal Trading Worker
+Temporal Trading Worker — RETIRED.
 
-Executes automated trading and P2P trading workflows
+This worker is retired: the TypeScript workers own this queue. The server
+dispatches `executeTrade`, `automatedTradingWorkflow` and
+`p2pTradingWorkflow` on the `trading-execution` task queue
+(server/integration/temporal-client.ts, server/routers/orchestrator.ts), and
+that queue is served by server/workflows/trading-worker.ts (deployed as
+`trading-worker` in docker-compose.prod.yml). This module registers the
+PascalCase workflow types `AutomatedTradingWorkflow`/`P2PTradingWorkflow`,
+which match nothing the server dispatches, so running it alongside the TS
+worker would fail tasks. It is no longer launched by any compose file and is
+kept for reference only.
 """
 
 import asyncio
@@ -805,6 +814,14 @@ class P2PTradingWorkflow:
 
 async def main():
     """Start the trading worker"""
+    logger.warning(
+        "[Trading Worker] RETIRED: TS workers own this queue "
+        "(server/workflows/trading-worker.ts serves 'executeTrade' / "
+        "'automatedTradingWorkflow' / 'p2pTradingWorkflow' on "
+        "'trading-execution'; this module registers the mismatched "
+        "'AutomatedTradingWorkflow'/'P2PTradingWorkflow'). Do not run in "
+        "production."
+    )
     # Connect to Temporal
     temporal_address = os.getenv('TEMPORAL_ADDRESS', 'localhost:7233')
     client = await Client.connect(temporal_address)

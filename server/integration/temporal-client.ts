@@ -1,5 +1,5 @@
 import { getTemporalClient, TASK_QUEUES } from './temporal-config';
-import { WorkflowHandle } from '@temporalio/client';
+import { ScheduleOverlapPolicy, WorkflowHandle } from '@temporalio/client';
 
 export interface PaymentWorkflowInput {
   paymentId: string;
@@ -80,6 +80,39 @@ export class TemporalWorkflowClient {
       console.error(`[Temporal] Error cancelling payment workflow:`, error);
       throw error;
     }
+  }
+
+  /**
+   * Start a refund workflow (`refundWorkflow` in server/workflows/payment-workflow.ts,
+   * registered by server/workflows/worker.ts on the payment-processing queue).
+   *
+   * The workflow runs the gateway refund and reverts the billing row, so the
+   * caller gets a durable execution instead of an in-process attempt lost on
+   * restart. Idempotent per transaction: a second start for the same
+   * transactionId raises WorkflowExecutionAlreadyStartedError, which callers
+   * can treat as "refund already running".
+   */
+  async startRefundWorkflow(input: {
+    transactionId: string;
+    gateway: 'mpesa' | 'airtel' | 'tigo';
+    userId: number;
+    billingId: number;
+  }): Promise<WorkflowHandle> {
+    const client = await getTemporalClient();
+
+    const handle = await client.workflow.start('refundWorkflow', {
+      taskQueue: TASK_QUEUES.PAYMENT_PROCESSING,
+      workflowId: `refund-${input.transactionId}`,
+      args: [input.transactionId, input.gateway, input.userId, input.billingId],
+      searchAttributes: {
+        PaymentId: [input.transactionId],
+        UserId: [input.userId.toString()],
+        Gateway: [input.gateway]
+      }
+    });
+
+    console.log(`[Temporal] Started refund workflow: ${handle.workflowId}`);
+    return handle;
   }
 
   // DR event workflows
@@ -168,6 +201,30 @@ export class TemporalWorkflowClient {
     }
   }
 
+  /**
+   * Start a DR event cancellation workflow (`cancelDREventWorkflow` in
+   * server/workflows/dr-event-workflow.ts, registered by
+   * server/workflows/dr-worker.ts on the dr-orchestration queue). It marks the
+   * event cancelled and notifies enrolled participants; the running
+   * `orchestrateDREvent` execution for the same event can be cancelled via
+   * temporalQueryService.cancelWorkflow(`dr-event-${eventId}`).
+   */
+  async startCancelDREventWorkflow(eventId: number, reason: string): Promise<WorkflowHandle> {
+    const client = await getTemporalClient();
+
+    const handle = await client.workflow.start('cancelDREventWorkflow', {
+      taskQueue: TASK_QUEUES.DR_ORCHESTRATION,
+      workflowId: `cancel-dr-event-${eventId}`,
+      args: [eventId, reason],
+      searchAttributes: {
+        EventId: [eventId.toString()]
+      }
+    });
+
+    console.log(`[Temporal] Started DR event cancellation workflow: ${handle.workflowId}`);
+    return handle;
+  }
+
   // NOTE: reconciliation and notification workflow starters were removed.
   // They dispatched 'reconcilePayments' / 'sendNotification' /
   // 'sendBatchNotifications' to the RECONCILIATION and NOTIFICATIONS task
@@ -190,3 +247,65 @@ export class TemporalWorkflowClient {
 
 // Singleton instance
 export const temporalClient = new TemporalWorkflowClient();
+
+/**
+ * Idempotently create the Temporal Schedules this platform relies on.
+ *
+ * The server entry point (server/_core/index.ts) must call this once at boot;
+ * it is safe to call on every replica and every restart — an existing schedule
+ * is described and left untouched rather than overwritten.
+ *
+ * Currently ensured:
+ *   - `prepaid-consumption-sweep`: daily at 03:15, starts
+ *     `prepaidConsumptionSweepWorkflow` (server/workflows/prepaid-issuance-workflow.ts,
+ *     registered by server/workflows/prepaid-worker.ts on the prepaid-issuance
+ *     queue) so prepaid accounts' metered consumption is swept into billed
+ *     segments even when nobody triggers it by hand.
+ *
+ * When `prepaidSweepAccountIds` is empty the scheduled workflow sweeps every
+ * prepaid account at run time (sweep-all semantics in the workflow), so new
+ * accounts are picked up without re-registering the schedule.
+ */
+export async function ensureSchedules(options: {
+  prepaidSweepAccountIds?: number[];
+} = {}): Promise<void> {
+  const scheduleId = 'prepaid-consumption-sweep';
+  // An empty list means sweep-all: the workflow resolves every prepaid
+  // account at run time, so accounts opened after this schedule was created
+  // are included without re-registering the schedule.
+  const accountIds = options.prepaidSweepAccountIds ?? [];
+
+  const client = await getTemporalClient();
+  const existing = client.schedule.getHandle(scheduleId);
+  try {
+    await existing.describe();
+    console.log(`[Temporal] Schedule ${scheduleId} already exists; leaving it as-is.`);
+    return;
+  } catch {
+    // Not found: create it below. Any other failure surfaces from create().
+  }
+
+  await client.schedule.create({
+    scheduleId,
+    spec: {
+      cronExpressions: ['15 3 * * *']
+    },
+    action: {
+      type: 'startWorkflow',
+      workflowType: 'prepaidConsumptionSweepWorkflow',
+      taskQueue: TASK_QUEUES.PREPAID_ISSUANCE,
+      args: [{ accountIds }]
+    },
+    policies: {
+      // A sweep still running at the next tick is skipped, not overlapped:
+      // overlapping sweeps would record the same consumption segment twice.
+      overlap: ScheduleOverlapPolicy.SKIP,
+      catchupWindow: '1 hour'
+    }
+  });
+
+  console.log(
+    `[Temporal] Created schedule ${scheduleId} (daily 03:15) sweeping ` +
+    (accountIds.length > 0 ? `${accountIds.length} prepaid account(s).` : 'all prepaid accounts.')
+  );
+}

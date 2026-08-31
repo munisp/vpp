@@ -31,12 +31,17 @@ export default function AdminAnalytics() {
     end: new Date(),
   });
 
-  const { data: metrics, isLoading } = trpc.adminAnalytics.getAllMetrics.useQuery({
+  const metricsQuery = trpc.adminAnalytics.getAllMetrics.useQuery({
     startDate: dateRange.start,
     endDate: dateRange.end,
   });
+  const { data: metrics, isLoading } = metricsQuery;
 
-  const { data: kpis } = trpc.adminAnalytics.getSystemKPIs.useQuery();
+  const kpisQuery = trpc.adminAnalytics.getSystemKPIs.useQuery();
+  const { data: kpis } = kpisQuery;
+
+  const metricsFailed = metricsQuery.isError;
+  const kpisFailed = kpisQuery.isError;
 
   // Quick date range presets
   const setPreset = (days: number) => {
@@ -59,6 +64,28 @@ export default function AdminAnalytics() {
 
   return (
     <div className="container py-8 space-y-8">
+      {(metricsFailed || kpisFailed) && (
+        <Card className="border-red-200 bg-red-50">
+          <CardContent className="flex items-center justify-between gap-3 py-4">
+            <p className="text-sm text-red-800">
+              {[
+                metricsFailed && `metrics: ${(metricsQuery.error as any)?.message || 'failed'}`,
+                kpisFailed && `KPIs: ${(kpisQuery.error as any)?.message || 'failed'}`,
+              ].filter(Boolean).join(' · ')}
+            </p>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                metricsQuery.refetch();
+                kpisQuery.refetch();
+              }}
+            >
+              Retry
+            </Button>
+          </CardContent>
+        </Card>
+      )}
       <div className="flex justify-between items-center">
         <div>
           <h1 className="text-3xl font-bold">Admin Analytics</h1>
@@ -115,9 +142,9 @@ export default function AdminAnalytics() {
             <Users className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold">{kpis?.totalUsers || 0}</div>
+            <div className="text-2xl font-bold">{kpisFailed ? "—" : kpis?.totalUsers || 0}</div>
             <p className="text-xs text-muted-foreground">
-              {kpis?.activeUsers || 0} active (30 days)
+              {kpisFailed ? "—" : kpis?.activeUsers || 0} active (30 days)
             </p>
           </CardContent>
         </Card>
@@ -129,7 +156,7 @@ export default function AdminAnalytics() {
           </CardHeader>
           <CardContent>
             <div className="text-2xl font-bold">
-              {((kpis?.platformRevenue || 0) / 100).toFixed(0)} TZS
+              {kpisFailed ? "—" : `${((kpis?.platformRevenue || 0) / 100).toFixed(0)} TZS`}
             </div>
             <p className="text-xs text-muted-foreground">All-time total</p>
           </CardContent>
@@ -142,7 +169,7 @@ export default function AdminAnalytics() {
           </CardHeader>
           <CardContent>
             <div className="text-2xl font-bold">
-              {((kpis?.totalEnergyTraded || 0) / 1000).toFixed(1)} kWh
+              {kpisFailed ? "—" : `${((kpis?.totalEnergyTraded || 0) / 1000).toFixed(1)} kWh`}
             </div>
             <p className="text-xs text-muted-foreground">Total volume</p>
           </CardContent>
@@ -155,14 +182,16 @@ export default function AdminAnalytics() {
           </CardHeader>
           <CardContent>
             <div className="text-2xl font-bold">
-              {(kpis?.drParticipationRate || 0).toFixed(1)}%
+              {kpisFailed ? "—" : `${(kpis?.drParticipationRate || 0).toFixed(1)}%`}
             </div>
             <p className="text-xs text-muted-foreground">Enrolled users</p>
           </CardContent>
         </Card>
       </div>
 
-      {/* Detailed Analytics Tabs */}
+      {/* Detailed Analytics Tabs — hidden entirely when the metrics query
+          failed, so a failed backend never renders as empty/zero charts. */}
+      {!metricsFailed && (
       <Tabs defaultValue="payments" className="space-y-4">
         <TabsList>
           <TabsTrigger value="payments">Payments</TabsTrigger>
@@ -179,10 +208,10 @@ export default function AdminAnalytics() {
               </CardHeader>
               <CardContent>
                 <div className="text-3xl font-bold">
-                  {((metrics?.paymentMetrics.totalRevenue || 0) / 100).toFixed(0)} TZS
+                  {metricsFailed ? "—" : `${((metrics?.paymentMetrics.totalRevenue || 0) / 100).toFixed(0)} TZS`}
                 </div>
                 <p className="text-sm text-muted-foreground mt-2">
-                  {metrics?.paymentMetrics.totalTransactions || 0} transactions
+                  {metricsFailed ? "—" : metrics?.paymentMetrics.totalTransactions || 0} transactions
                 </p>
               </CardContent>
             </Card>
@@ -193,7 +222,7 @@ export default function AdminAnalytics() {
               </CardHeader>
               <CardContent>
                 <div className="text-3xl font-bold">
-                  {(metrics?.paymentMetrics.successRate || 0).toFixed(1)}%
+                  {metricsFailed ? "—" : `${(metrics?.paymentMetrics.successRate || 0).toFixed(1)}%`}
                 </div>
                 <p className="text-sm text-muted-foreground mt-2">Payment completion</p>
               </CardContent>
@@ -205,7 +234,7 @@ export default function AdminAnalytics() {
               </CardHeader>
               <CardContent>
                 <div className="text-3xl font-bold">
-                  {((metrics?.paymentMetrics.averageTransactionValue || 0) / 100).toFixed(0)} TZS
+                  {metricsFailed ? "—" : `${((metrics?.paymentMetrics.averageTransactionValue || 0) / 100).toFixed(0)} TZS`}
                 </div>
                 <p className="text-sm text-muted-foreground mt-2">Per transaction</p>
               </CardContent>
@@ -279,7 +308,7 @@ export default function AdminAnalytics() {
               </CardHeader>
               <CardContent>
                 <div className="text-3xl font-bold">
-                  {metrics?.drMetrics.totalEvents || 0}
+                  {metricsFailed ? "—" : metrics?.drMetrics.totalEvents || 0}
                 </div>
               </CardContent>
             </Card>
@@ -290,7 +319,7 @@ export default function AdminAnalytics() {
               </CardHeader>
               <CardContent>
                 <div className="text-3xl font-bold">
-                  {metrics?.drMetrics.totalParticipants || 0}
+                  {metricsFailed ? "—" : metrics?.drMetrics.totalParticipants || 0}
                 </div>
               </CardContent>
             </Card>
@@ -301,7 +330,7 @@ export default function AdminAnalytics() {
               </CardHeader>
               <CardContent>
                 <div className="text-3xl font-bold">
-                  {((metrics?.drMetrics.totalReduction || 0) / 1000).toFixed(1)} kW
+                  {metricsFailed ? "—" : `${((metrics?.drMetrics.totalReduction || 0) / 1000).toFixed(1)} kW`}
                 </div>
               </CardContent>
             </Card>
@@ -312,7 +341,7 @@ export default function AdminAnalytics() {
               </CardHeader>
               <CardContent>
                 <div className="text-3xl font-bold">
-                  {((metrics?.drMetrics.totalCompensation || 0) / 100).toFixed(0)} TZS
+                  {metricsFailed ? "—" : `${((metrics?.drMetrics.totalCompensation || 0) / 100).toFixed(0)} TZS`}
                 </div>
               </CardContent>
             </Card>
@@ -369,7 +398,7 @@ export default function AdminAnalytics() {
               </CardHeader>
               <CardContent>
                 <div className="text-3xl font-bold">
-                  {metrics?.forecastingMetrics.totalForecasts || 0}
+                  {metricsFailed ? "—" : metrics?.forecastingMetrics.totalForecasts || 0}
                 </div>
               </CardContent>
             </Card>
@@ -380,7 +409,7 @@ export default function AdminAnalytics() {
               </CardHeader>
               <CardContent>
                 <div className="text-3xl font-bold">
-                  {(metrics?.forecastingMetrics.averageAccuracy || 0).toFixed(1)}%
+                  {metricsFailed ? "—" : `${(metrics?.forecastingMetrics.averageAccuracy || 0).toFixed(1)}%`}
                 </div>
               </CardContent>
             </Card>
@@ -428,6 +457,7 @@ export default function AdminAnalytics() {
           </Card>
         </TabsContent>
       </Tabs>
+      )}
     </div>
   );
 }

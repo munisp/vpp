@@ -37,17 +37,25 @@ export default function CacheMonitoring() {
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [refreshInterval, setRefreshInterval] = useState(5000); // 5 seconds
 
-  const { data: stats, refetch: refetchStats, isLoading } = trpc.cacheMonitoring.getCacheStats.useQuery(undefined, {
+  const statsQuery = trpc.cacheMonitoring.getCacheStats.useQuery(undefined, {
     refetchInterval: autoRefresh ? refreshInterval : false,
   });
+  const { data: stats, refetch: refetchStats, isLoading } = statsQuery;
 
-  const { data: metrics, refetch: refetchMetrics } = trpc.cacheMonitoring.getCacheMetrics.useQuery(undefined, {
+  const metricsQuery = trpc.cacheMonitoring.getCacheMetrics.useQuery(undefined, {
     refetchInterval: autoRefresh ? refreshInterval : false,
   });
+  const { data: metrics, refetch: refetchMetrics } = metricsQuery;
 
-  const { data: performance, refetch: refetchPerformance } = trpc.cacheMonitoring.getCachePerformance.useQuery(undefined, {
+  const performanceQuery = trpc.cacheMonitoring.getCachePerformance.useQuery(undefined, {
     refetchInterval: autoRefresh ? refreshInterval : false,
   });
+  const { data: performance, refetch: refetchPerformance } = performanceQuery;
+
+  const statsFailed = statsQuery.isError;
+  const metricsFailed = metricsQuery.isError;
+  const performanceFailed = performanceQuery.isError;
+  const anyFailed = statsFailed || metricsFailed || performanceFailed;
 
   const clearCacheMutation = trpc.cacheMonitoring.clearCache.useMutation({
     onSuccess: () => {
@@ -77,8 +85,10 @@ export default function CacheMonitoring() {
     );
   }
 
-  const hitRate = stats?.totalRequests ? (stats.hits / stats.totalRequests * 100).toFixed(2) : '0';
-  const missRate = stats?.totalRequests ? (stats.misses / stats.totalRequests * 100).toFixed(2) : '0';
+  // '—' when the stats query failed or has not returned: a failed Redis probe
+  // must never read as a 0% hit rate.
+  const hitRate = statsFailed || !stats?.totalRequests ? null : (stats.hits / stats.totalRequests * 100).toFixed(2);
+  const missRate = statsFailed || !stats?.totalRequests ? null : (stats.misses / stats.totalRequests * 100).toFixed(2);
 
   const hitMissData = [
     { name: 'Hits', value: stats?.hits || 0 },
@@ -132,6 +142,27 @@ export default function CacheMonitoring() {
         </div>
       </div>
 
+      {anyFailed && (
+        <Card className="border-red-200 bg-red-50">
+          <CardContent className="flex items-center justify-between gap-3 py-4">
+            <div className="flex items-center gap-3">
+              <AlertCircle className="h-5 w-5 text-red-600" />
+              <p className="text-sm text-red-800">
+                {[
+                  statsFailed && `stats: ${(statsQuery.error as any)?.message || 'failed'}`,
+                  metricsFailed && `metrics: ${(metricsQuery.error as any)?.message || 'failed'}`,
+                  performanceFailed && `performance: ${(performanceQuery.error as any)?.message || 'failed'}`,
+                ].filter(Boolean).join(' · ')}
+              </p>
+            </div>
+            <Button variant="outline" size="sm" onClick={handleRefresh}>
+              <RefreshCw className="h-4 w-4 mr-2" />
+              Retry
+            </Button>
+          </CardContent>
+        </Card>
+      )}
+
       {/* Status Cards */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
         <Card>
@@ -140,9 +171,11 @@ export default function CacheMonitoring() {
             <TrendingUp className="h-4 w-4 text-green-600" />
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold">{hitRate}%</div>
+            <div className="text-2xl font-bold">{hitRate !== null ? `${hitRate}%` : '—'}</div>
             <p className="text-xs text-muted-foreground">
-              {stats?.hits.toLocaleString()} hits out of {stats?.totalRequests.toLocaleString()} requests
+              {stats
+                ? `${stats.hits.toLocaleString()} hits out of ${stats.totalRequests.toLocaleString()} requests`
+                : statsFailed ? 'Stats unavailable' : 'No requests recorded'}
             </p>
           </CardContent>
         </Card>
@@ -153,9 +186,9 @@ export default function CacheMonitoring() {
             <TrendingDown className="h-4 w-4 text-red-600" />
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold">{missRate}%</div>
+            <div className="text-2xl font-bold">{missRate !== null ? `${missRate}%` : '—'}</div>
             <p className="text-xs text-muted-foreground">
-              {stats?.misses.toLocaleString()} misses
+              {stats ? `${stats.misses.toLocaleString()} misses` : statsFailed ? 'Stats unavailable' : 'No requests recorded'}
             </p>
           </CardContent>
         </Card>
@@ -166,9 +199,17 @@ export default function CacheMonitoring() {
             <Zap className="h-4 w-4 text-yellow-600" />
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold">{(performance?.avgResponseTime || 0)?.toFixed(2) || 0}ms</div>
+            <div className="text-2xl font-bold">
+              {!performanceFailed && performance?.avgResponseTime != null
+                ? `${performance.avgResponseTime.toFixed(2)}ms`
+                : '—'}
+            </div>
             <p className="text-xs text-muted-foreground">
-              {(performance?.avgResponseTime || 0) < 10 ? 'Excellent' : (performance?.avgResponseTime || 0) < 50 ? 'Good' : 'Needs attention'}
+              {performanceFailed
+                ? 'Performance stats unavailable'
+                : performance?.avgResponseTime == null
+                  ? 'No readings'
+                  : performance.avgResponseTime < 10 ? 'Excellent' : performance.avgResponseTime < 50 ? 'Good' : 'Needs attention'}
             </p>
           </CardContent>
         </Card>
@@ -179,9 +220,11 @@ export default function CacheMonitoring() {
             <Database className="h-4 w-4 text-blue-600" />
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold">{stats?.totalKeys.toLocaleString()}</div>
+            <div className="text-2xl font-bold">
+              {stats ? stats.totalKeys.toLocaleString() : '—'}
+            </div>
             <p className="text-xs text-muted-foreground">
-              Active cache entries
+              {stats ? 'Active cache entries' : statsFailed ? 'Stats unavailable' : 'No data'}
             </p>
           </CardContent>
         </Card>
@@ -198,6 +241,13 @@ export default function CacheMonitoring() {
 
         {/* Overview Tab */}
         <TabsContent value="overview" className="space-y-4">
+          {statsFailed ? (
+            <Card>
+              <CardContent className="py-8 text-center text-sm text-red-600">
+                Cache statistics unavailable: {(statsQuery.error as any)?.message || 'failed to load'}
+              </CardContent>
+            </Card>
+          ) : (
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
             <Card>
               <CardHeader>
@@ -245,6 +295,7 @@ export default function CacheMonitoring() {
               </CardContent>
             </Card>
           </div>
+          )}
         </TabsContent>
 
         {/* Performance Tab */}
@@ -255,6 +306,11 @@ export default function CacheMonitoring() {
               <CardDescription>Cache response time over time</CardDescription>
             </CardHeader>
             <CardContent>
+              {metricsFailed ? (
+                <p className="text-sm text-red-600 py-8 text-center">
+                  Trend unavailable: {(metricsQuery.error as any)?.message || 'failed to load'}
+                </p>
+              ) : (
               <ResponsiveContainer width="100%" height={300}>
                 <LineChart data={metrics?.responseTimeTrend || []}>
                   <CartesianGrid strokeDasharray="3 3" />
@@ -266,6 +322,7 @@ export default function CacheMonitoring() {
                   <Line type="monotone" dataKey="maxTime" stroke="#ef4444" name="Max Response Time (ms)" />
                 </LineChart>
               </ResponsiveContainer>
+              )}
             </CardContent>
           </Card>
 
@@ -275,22 +332,30 @@ export default function CacheMonitoring() {
                 <CardTitle>Performance Metrics</CardTitle>
               </CardHeader>
               <CardContent className="space-y-4">
-                <div className="flex items-center justify-between">
-                  <span className="text-sm font-medium">Min Response Time</span>
-                  <Badge variant="outline">{performance?.minResponseTime.toFixed(2)}ms</Badge>
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-sm font-medium">Max Response Time</span>
-                  <Badge variant="outline">{performance?.maxResponseTime.toFixed(2)}ms</Badge>
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-sm font-medium">P95 Response Time</span>
-                  <Badge variant="outline">{performance?.p95ResponseTime.toFixed(2)}ms</Badge>
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-sm font-medium">P99 Response Time</span>
-                  <Badge variant="outline">{performance?.p99ResponseTime.toFixed(2)}ms</Badge>
-                </div>
+                {performanceFailed ? (
+                  <p className="text-sm text-red-600">
+                    Unavailable: {(performanceQuery.error as any)?.message || 'failed to load'}
+                  </p>
+                ) : (
+                  <>
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm font-medium">Min Response Time</span>
+                      <Badge variant="outline">{performance?.minResponseTime != null ? `${performance.minResponseTime.toFixed(2)}ms` : '—'}</Badge>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm font-medium">Max Response Time</span>
+                      <Badge variant="outline">{performance?.maxResponseTime != null ? `${performance.maxResponseTime.toFixed(2)}ms` : '—'}</Badge>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm font-medium">P95 Response Time</span>
+                      <Badge variant="outline">{performance?.p95ResponseTime != null ? `${performance.p95ResponseTime.toFixed(2)}ms` : '—'}</Badge>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm font-medium">P99 Response Time</span>
+                      <Badge variant="outline">{performance?.p99ResponseTime != null ? `${performance.p99ResponseTime.toFixed(2)}ms` : '—'}</Badge>
+                    </div>
+                  </>
+                )}
               </CardContent>
             </Card>
 
@@ -300,7 +365,7 @@ export default function CacheMonitoring() {
               </CardHeader>
               <CardContent className="space-y-4">
                 <div className="flex items-center gap-2">
-                  {parseFloat(hitRate) > 80 ? (
+                  {hitRate !== null && parseFloat(hitRate) > 80 ? (
                     <CheckCircle2 className="h-5 w-5 text-green-600" />
                   ) : (
                     <AlertCircle className="h-5 w-5 text-yellow-600" />
@@ -308,12 +373,14 @@ export default function CacheMonitoring() {
                   <div>
                     <p className="text-sm font-medium">Hit Rate Status</p>
                     <p className="text-xs text-muted-foreground">
-                      {parseFloat(hitRate) > 80 ? 'Excellent' : parseFloat(hitRate) > 60 ? 'Good' : 'Needs Optimization'}
+                      {hitRate === null
+                        ? 'Unknown — stats unavailable or no requests yet'
+                        : parseFloat(hitRate) > 80 ? 'Excellent' : parseFloat(hitRate) > 60 ? 'Good' : 'Needs Optimization'}
                     </p>
                   </div>
                 </div>
                 <div className="flex items-center gap-2">
-                  {(performance?.avgResponseTime || 0) < 10 ? (
+                  {!performanceFailed && performance?.avgResponseTime != null && performance.avgResponseTime < 10 ? (
                     <CheckCircle2 className="h-5 w-5 text-green-600" />
                   ) : (
                     <AlertCircle className="h-5 w-5 text-yellow-600" />
@@ -321,7 +388,9 @@ export default function CacheMonitoring() {
                   <div>
                     <p className="text-sm font-medium">Response Time Status</p>
                     <p className="text-xs text-muted-foreground">
-                      {(performance?.avgResponseTime || 0) < 10 ? 'Excellent' : (performance?.avgResponseTime || 0) < 50 ? 'Good' : 'Slow'}
+                      {performanceFailed || performance?.avgResponseTime == null
+                        ? 'Unknown — performance stats unavailable'
+                        : performance.avgResponseTime < 10 ? 'Excellent' : performance.avgResponseTime < 50 ? 'Good' : 'Slow'}
                     </p>
                   </div>
                 </div>
@@ -332,6 +401,13 @@ export default function CacheMonitoring() {
 
         {/* Breakdown Tab */}
         <TabsContent value="breakdown" className="space-y-4">
+          {statsFailed ? (
+            <Card>
+              <CardContent className="py-8 text-center text-sm text-red-600">
+                Cache statistics unavailable: {(statsQuery.error as any)?.message || 'failed to load'}
+              </CardContent>
+            </Card>
+          ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <Card>
               <CardHeader>
@@ -401,6 +477,7 @@ export default function CacheMonitoring() {
               </CardContent>
             </Card>
           </div>
+          )}
         </TabsContent>
 
         {/* Management Tab */}

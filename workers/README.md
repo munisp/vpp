@@ -1,4 +1,20 @@
-# Temporal Workers Deployment
+# Temporal Workers Deployment — RETIRED
+
+> **The workers in this directory are retired.** They are duplicate,
+> mismatched implementations of queues the TypeScript workers own:
+>
+> | This directory | Queue it polled | Workflow type it registered | Live implementation |
+> | --- | --- | --- | --- |
+> | `payment-worker/` (Python) | `payment-processing` | `PaymentProcessingWorkflow` | `server/workflows/worker.ts` (`processPayment`) |
+> | `trading-worker/` (Python) | `trading-execution` | `AutomatedTradingWorkflow`, `P2PTradingWorkflow` | `server/workflows/trading-worker.ts` (`executeTrade`, `automatedTradingWorkflow`, `p2pTradingWorkflow`) |
+> | `dr-worker/` (Go) | `dr-events` (nothing publishes here) | `DREventWorkflow` | `server/workflows/dr-worker.ts` (`orchestrateDREvent` on `dr-orchestration`) |
+>
+> Running any of these alongside the TS workers failed dispatched tasks
+> (type-name mismatch) or polled a queue with no publisher. They were removed
+> from `workers/docker-compose.yml` and log a retirement warning at boot. The
+> code is kept for reference only; `docker-compose.yml` here now only starts a
+> local Temporal server + PostgreSQL for developing the TS workers. The
+> remainder of this README is historical and describes the retired setup.
 
 This directory contains Temporal workers for executing VPP platform workflows.
 

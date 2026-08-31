@@ -65,6 +65,26 @@ function age(seconds: number | null): string | null {
   return `${Math.round(seconds / 86_400)}d ago`;
 }
 
+/**
+ * The measured companions of a power reading, joined for one line. The server
+ * nulls every one of these unless the node is currently measured, so nothing
+ * here is ever a fabricated zero.
+ */
+function readings(node: TwinNode): string | null {
+  const parts: string[] = [];
+  if (node.voltageVolts != null) parts.push(`${node.voltageVolts.toFixed(1)} V`);
+  if (node.frequencyHz != null) parts.push(`${node.frequencyHz.toFixed(2)} Hz`);
+  if (node.temperatureCelsius != null) parts.push(`${node.temperatureCelsius.toFixed(1)} °C`);
+  if (node.energyWh != null) {
+    parts.push(
+      Math.abs(node.energyWh) >= 1000
+        ? `${(node.energyWh / 1000).toFixed(1)} kWh`
+        : `${Math.round(node.energyWh)} Wh`
+    );
+  }
+  return parts.length === 0 ? null : parts.join(' · ');
+}
+
 const DIRECTION_COPY: Record<TwinEdge['direction'], string> = {
   in: 'into the bus',
   out: 'out of the bus',
@@ -86,16 +106,26 @@ function NodeCard({ node, edge }: { node: TwinNode; edge?: TwinEdge }) {
   const power = watts(node.powerWatts);
   const last = watts(node.lastPowerWatts);
   const icon = KIND_ICON[node.kind] ?? KIND_ICON.other;
+  // A pending asset is drawn dashed: its place in the plant is unconfirmed.
+  const pending = node.approvalStatus === 'pending';
+  const measuredReadings = node.evidence === 'measured' ? readings(node) : null;
 
   return (
     <View style={styles.nodeRow}>
       <View style={[styles.connector, { backgroundColor: color.line }]} />
-      <View style={[styles.nodeCard, { borderColor: color.line }]}>
+      <View
+        style={[
+          styles.nodeCard,
+          { borderColor: color.line },
+          pending ? styles.nodeCardPending : null,
+        ]}
+      >
         <View style={styles.nodeHeader}>
           <Ionicons name={icon} size={18} color={color.fg} />
           <Text style={styles.nodeLabel} numberOfLines={1}>
             {node.label}
           </Text>
+          {pending ? <Chip label="not yet approved" evidence="stale" /> : null}
           <Chip label={EVIDENCE_LABEL[node.evidence]} evidence={node.evidence} />
         </View>
 
@@ -109,6 +139,8 @@ function NodeCard({ node, edge }: { node: TwinNode; edge?: TwinEdge }) {
             ? ` · ${node.stateOfChargePercent.toFixed(0)}% SoC`
             : ''}
         </Text>
+
+        {measuredReadings ? <Text style={styles.nodeReadings}>{measuredReadings}</Text> : null}
 
         {edge ? (
           <Text style={styles.nodeFlow}>
@@ -168,8 +200,20 @@ export default function DigitalTwinScreen() {
   const graph = twin.data;
   const nodes: TwinNode[] = graph.nodes;
   const edges: TwinEdge[] = graph.edges;
-  const edgeFor = (node: TwinNode) =>
-    edges.find(edge => edge.from === node.id || edge.to === node.id);
+  /**
+   * A boundary meter has two edges: one into the bus like any asset, and the
+   * `edge:grid:` edge that actually carries the measured grid exchange. The
+   * grid edge is the one that says what the meter is for, so it wins.
+   */
+  const edgeFor = (node: TwinNode) => {
+    if (node.kind === 'meter' && node.assetId !== undefined) {
+      return (
+        edges.find(edge => edge.id === `edge:grid:${node.assetId}`) ??
+        edges.find(edge => edge.from === node.id || edge.to === node.id)
+      );
+    }
+    return edges.find(edge => edge.from === node.id || edge.to === node.id);
+  };
 
   const grid = nodes.filter(node => node.kind === 'grid');
   const site = nodes.filter(node => node.kind === 'site');
@@ -280,6 +324,8 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     padding: 12,
   },
+  nodeCardPending: { borderStyle: 'dashed' },
+  nodeReadings: { marginTop: 2, fontSize: 12, color: '#475569' },
   nodeHeader: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   nodeLabel: { flex: 1, fontSize: 15, fontWeight: '600', color: '#0f172a' },
   nodeValue: { marginTop: 8, fontSize: 16, fontWeight: '600', color: '#0f172a' },

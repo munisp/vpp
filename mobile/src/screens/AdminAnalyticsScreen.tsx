@@ -44,19 +44,19 @@ export default function AdminAnalyticsScreen() {
     return { startDate: start.toISOString(), endDate: end.toISOString() };
   }, [dateRange]);
 
-  const { data: userGrowth, isLoading: loadingUserGrowth, refetch: refetchUserGrowth } =
+  const { data: userGrowth, isLoading: loadingUserGrowth, isError: errorUserGrowth, refetch: refetchUserGrowth } =
     trpc.adminAnalytics.getUserGrowth.useQuery(dateRangeParams);
 
-  const { data: tradingMetrics, isLoading: loadingTrading, refetch: refetchTrading } =
+  const { data: tradingMetrics, isLoading: loadingTrading, isError: errorTrading, refetch: refetchTrading } =
     trpc.adminAnalytics.getTradingMetrics.useQuery(dateRangeParams);
 
-  const { data: revenueMetrics, isLoading: loadingRevenue, refetch: refetchRevenue } =
+  const { data: revenueMetrics, isLoading: loadingRevenue, isError: errorRevenue, refetch: refetchRevenue } =
     trpc.adminAnalytics.getRevenueMetrics.useQuery(dateRangeParams);
 
-  const { data: topPerformers, isLoading: loadingPerformers, refetch: refetchPerformers } =
+  const { data: topPerformers, isLoading: loadingPerformers, isError: errorPerformers, refetch: refetchPerformers } =
     trpc.adminAnalytics.getTopPerformers.useQuery({ ...dateRangeParams, limit: 5 });
 
-  const { data: systemHealth, isLoading: loadingHealth, refetch: refetchHealth } =
+  const { data: systemHealth, isLoading: loadingHealth, isError: errorHealth, refetch: refetchHealth } =
     trpc.adminAnalytics.getSystemHealth.useQuery();
 
   const onRefresh = async () => {
@@ -74,10 +74,29 @@ export default function AdminAnalyticsScreen() {
   const isLoading =
     loadingUserGrowth || loadingTrading || loadingRevenue || loadingPerformers || loadingHealth;
 
+  const isError =
+    errorUserGrowth || errorTrading || errorRevenue || errorPerformers || errorHealth;
+
   if (isLoading && !refreshing) {
     return (
       <View style={styles.centerContainer}>
         <ActivityIndicator size="large" color="#10b981" />
+      </View>
+    );
+  }
+
+  // Failed queries must not render as zeroed-out dashboards.
+  if (isError) {
+    return (
+      <View style={styles.centerContainer}>
+        <Ionicons name="alert-circle-outline" size={48} color="#ef4444" />
+        <Text style={styles.errorTitle}>Could not load analytics</Text>
+        <Text style={styles.errorText}>
+          One or more analytics queries failed. Check your connection and try again.
+        </Text>
+        <TouchableOpacity style={styles.retryButton} onPress={onRefresh}>
+          <Text style={styles.retryButtonText}>Retry</Text>
+        </TouchableOpacity>
       </View>
     );
   }
@@ -345,6 +364,31 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     backgroundColor: '#f9fafb',
+    padding: 24,
+  },
+  errorTitle: {
+    fontSize: 18,
+    fontWeight: '600',
+    color: '#111827',
+    marginTop: 12,
+  },
+  errorText: {
+    fontSize: 14,
+    color: '#6b7280',
+    textAlign: 'center',
+    marginTop: 8,
+    marginBottom: 16,
+  },
+  retryButton: {
+    backgroundColor: '#10b981',
+    paddingHorizontal: 24,
+    paddingVertical: 12,
+    borderRadius: 8,
+  },
+  retryButtonText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '600',
   },
   header: {
     padding: 16,

@@ -175,7 +175,7 @@ export default function SettingsScreen({ navigation }: any) {
           icon="💰"
           title="Payment Method"
           description="Add or manage payment methods"
-          onPress={() => Alert.alert('Coming soon')}
+          onPress={() => navigation.navigate('Payments')}
         />
       </View>
 
@@ -209,32 +209,16 @@ export default function SettingsScreen({ navigation }: any) {
         <SettingItem
           icon="🎯"
           title="Participation Preferences"
-          description="Set your DR participation limits"
-          onPress={() => Alert.alert('Coming soon')}
+          description="Manage your DR enrollment and event responses"
+          onPress={() =>
+            navigation.navigate('Main', { screen: 'DR' })
+          }
         />
       </View>
 
       {/* App Settings */}
       <View style={styles.section}>
         <Text style={styles.sectionTitle}>App</Text>
-        <SettingItem
-          icon="🌙"
-          title="Dark Mode"
-          description="Switch to dark theme"
-          onPress={() => Alert.alert('Coming soon')}
-        />
-        <SettingItem
-          icon="🌍"
-          title="Language"
-          description="English"
-          onPress={() => Alert.alert('Coming soon')}
-        />
-        <SettingItem
-          icon="📊"
-          title="Data Usage"
-          description="Manage offline sync settings"
-          onPress={() => Alert.alert('Coming soon')}
-        />
         <SettingItem
           icon="🧭"
           title="Replay Onboarding"
@@ -250,21 +234,6 @@ export default function SettingsScreen({ navigation }: any) {
           icon="ℹ️"
           title="App Version"
           description="1.0.0"
-        />
-        <SettingItem
-          icon="📄"
-          title="Terms of Service"
-          onPress={() => Alert.alert('Coming soon')}
-        />
-        <SettingItem
-          icon="🔒"
-          title="Privacy Policy"
-          onPress={() => Alert.alert('Coming soon')}
-        />
-        <SettingItem
-          icon="💬"
-          title="Help & Support"
-          onPress={() => Alert.alert('Coming soon')}
         />
       </View>
 

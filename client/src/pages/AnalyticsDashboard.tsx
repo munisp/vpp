@@ -2,16 +2,30 @@ import DashboardLayout from "@/components/DashboardLayout";
 import { trpc } from "@/lib/trpc";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { BarChart3, TrendingUp, Users, QrCode, Gift, DollarSign } from "lucide-react";
+import { AlertCircle, BarChart3, TrendingUp, Users, QrCode, Gift, DollarSign, RefreshCw } from "lucide-react";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Button } from "@/components/ui/button";
 import { LineChart, Line, BarChart, Bar, PieChart, Pie, Cell, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 import { useAnalyticsWebSocket } from "@/hooks/useAnalyticsWebSocket";
 import { toast } from "sonner";
 
 export default function AnalyticsDashboard() {
   const utils = trpc.useUtils();
-  const { data: qrStats, isLoading: qrLoading } = trpc.qrHistory.getMyStats.useQuery();
-  const { data: referralStats, isLoading: referralLoading } = trpc.referrals.getMyStats.useQuery();
+  const qrQuery = trpc.qrHistory.getMyStats.useQuery();
+  const referralQuery = trpc.referrals.getMyStats.useQuery();
+  // Real transaction rows — used for status counts and the weekly trend chart.
+  const historyQuery = trpc.qrHistory.getMyHistory.useQuery({ limit: 1000 });
+  const qrStats = qrQuery.data;
+  const referralStats = referralQuery.data;
+  const qrHistory = historyQuery.data;
+  const qrLoading = qrQuery.isLoading;
+  const referralLoading = referralQuery.isLoading;
+
+  const failedQuery = [
+    { label: "QR statistics", q: qrQuery },
+    { label: "referral statistics", q: referralQuery },
+    { label: "QR history", q: historyQuery },
+  ].find((f) => f.q.isError);
 
   // Real-time WebSocket updates
   useAnalyticsWebSocket({
@@ -19,6 +33,7 @@ export default function AnalyticsDashboard() {
       // Invalidate queries to refresh data
       if (update.type === 'qr_transaction') {
         utils.qrHistory.getMyStats.invalidate();
+        utils.qrHistory.getMyHistory.invalidate();
         toast.success('New QR transaction recorded');
       } else if (update.type === 'referral_update' || update.type === 'reward_earned') {
         utils.referrals.getMyStats.invalidate();
@@ -27,6 +42,36 @@ export default function AnalyticsDashboard() {
     },
     enabled: true,
   });
+
+  // Status counts and the weekly trend are aggregated from real transaction
+  // rows (qrHistory.getMyHistory) — never split from totals by fixed ratios.
+  const completedCount = qrHistory ? qrHistory.filter((h: any) => h.status === 'completed').length : null;
+  const pendingCount = qrHistory ? qrHistory.filter((h: any) => h.status === 'pending').length : null;
+  const failedCount = qrHistory ? qrHistory.filter((h: any) => h.status === 'failed').length : null;
+
+  const weeklyTrend = (() => {
+    if (!qrHistory) return [];
+    const weekMs = 7 * 24 * 60 * 60 * 1000;
+    const now = Date.now();
+    const buckets = [3, 2, 1, 0].map((weeksAgo) => {
+      const start = now - (weeksAgo + 1) * weekMs;
+      return {
+        name: `Week of ${new Date(start).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`,
+        scans: 0,
+        generations: 0,
+        start,
+        end: start + weekMs,
+      };
+    });
+    for (const row of qrHistory as any[]) {
+      const ts = new Date(row.createdAt).getTime();
+      const bucket = buckets.find((b) => ts >= b.start && ts < b.end);
+      if (!bucket) continue;
+      if (row.operationType === 'scan') bucket.scans += 1;
+      else if (row.operationType === 'generate') bucket.generations += 1;
+    }
+    return buckets;
+  })();
 
   const formatCurrency = (amount: number, currency: string) => {
     if (currency === "CREDITS") {
@@ -64,6 +109,31 @@ export default function AnalyticsDashboard() {
           </p>
         </div>
 
+        {failedQuery && (
+          <Card className="border-red-200 bg-red-50">
+            <CardContent className="flex items-center justify-between gap-3 py-4">
+              <div className="flex items-center gap-3">
+                <AlertCircle className="h-5 w-5 text-red-600" />
+                <p className="text-sm text-red-800">
+                  Failed to load {failedQuery.label}: {(failedQuery.q.error as any)?.message || "Unknown error"}
+                </p>
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  qrQuery.refetch();
+                  referralQuery.refetch();
+                  historyQuery.refetch();
+                }}
+              >
+                <RefreshCw className="h-4 w-4 mr-2" />
+                Retry
+              </Button>
+            </CardContent>
+          </Card>
+        )}
+
         <Tabs defaultValue="overview" className="space-y-6">
           <TabsList>
             <TabsTrigger value="overview">Overview</TabsTrigger>
@@ -80,9 +150,9 @@ export default function AnalyticsDashboard() {
                   <QrCode className="h-4 w-4 text-muted-foreground" />
                 </CardHeader>
                 <CardContent>
-                  <div className="text-2xl font-bold">{(qrStats ? qrStats.totalScans + qrStats.totalGenerations : 0) || 0}</div>
+                  <div className="text-2xl font-bold">{qrStats ? qrStats.totalScans + qrStats.totalGenerations : "—"}</div>
                   <p className="text-xs text-muted-foreground">
-                    {0 || 0} completed
+                    {completedCount !== null ? `${completedCount} completed` : "— completed"}
                   </p>
                 </CardContent>
               </Card>
@@ -141,7 +211,7 @@ export default function AnalyticsDashboard() {
                       <div className="w-3 h-3 rounded-full bg-yellow-500" />
                       <span className="text-sm">Pending</span>
                     </div>
-                    <span className="text-sm font-semibold">{0 || 0}</span>
+                    <span className="text-sm font-semibold">{pendingCount !== null ? pendingCount : "—"}</span>
                   </div>
                 </CardContent>
               </Card>
@@ -188,7 +258,7 @@ export default function AnalyticsDashboard() {
                   <BarChart3 className="h-4 w-4 text-muted-foreground" />
                 </CardHeader>
                 <CardContent>
-                  <div className="text-2xl font-bold">{(qrStats ? qrStats.totalScans + qrStats.totalGenerations : 0) || 0}</div>
+                  <div className="text-2xl font-bold">{qrStats ? qrStats.totalScans + qrStats.totalGenerations : "—"}</div>
                 </CardContent>
               </Card>
 
@@ -199,10 +269,10 @@ export default function AnalyticsDashboard() {
                 </CardHeader>
                 <CardContent>
                   <div className="text-2xl font-bold text-green-600">
-                    {0 || 0}
+                    {completedCount !== null ? completedCount : "—"}
                   </div>
                   <p className="text-xs text-muted-foreground">
-                    N/A
+                    {historyQuery.isError ? "History unavailable" : "From transaction history"}
                   </p>
                 </CardContent>
               </Card>
@@ -214,7 +284,7 @@ export default function AnalyticsDashboard() {
                 </CardHeader>
                 <CardContent>
                   <div className="text-2xl font-bold text-yellow-600">
-                    {0 || 0}
+                    {pendingCount !== null ? pendingCount : "—"}
                   </div>
                 </CardContent>
               </Card>
@@ -226,38 +296,39 @@ export default function AnalyticsDashboard() {
                 </CardHeader>
                 <CardContent>
                   <div className="text-2xl font-bold text-red-600">
-                    {0 || 0}
+                    {failedCount !== null ? failedCount : "—"}
                   </div>
                 </CardContent>
               </Card>
             </div>
 
-            {/* QR Transaction Trends Chart */}
+            {/* QR Transaction Trends Chart — aggregated from real history rows */}
             <Card>
               <CardHeader>
                 <CardTitle>Transaction Trends</CardTitle>
-                <CardDescription>QR code usage over time</CardDescription>
+                <CardDescription>QR code usage per week, from your transaction history</CardDescription>
               </CardHeader>
               <CardContent>
-                <ResponsiveContainer width="100%" height={300}>
-                  <LineChart
-                    data={[
-                      { name: 'Week 1', scans: qrStats ? Math.floor(qrStats.totalScans * 0.2) : 0, generations: qrStats ? Math.floor(qrStats.totalGenerations * 0.15) : 0 },
-                      { name: 'Week 2', scans: qrStats ? Math.floor(qrStats.totalScans * 0.35) : 0, generations: qrStats ? Math.floor(qrStats.totalGenerations * 0.3) : 0 },
-                      { name: 'Week 3', scans: qrStats ? Math.floor(qrStats.totalScans * 0.6) : 0, generations: qrStats ? Math.floor(qrStats.totalGenerations * 0.5) : 0 },
-                      { name: 'Week 4', scans: qrStats?.totalScans || 0, generations: qrStats?.totalGenerations || 0 },
-                    ]}
-                    margin={{ top: 5, right: 30, left: 20, bottom: 5 }}
-                  >
-                    <CartesianGrid strokeDasharray="3 3" />
-                    <XAxis dataKey="name" />
-                    <YAxis />
-                    <Tooltip />
-                    <Legend />
-                    <Line type="monotone" dataKey="scans" stroke="#3b82f6" strokeWidth={2} />
-                    <Line type="monotone" dataKey="generations" stroke="#10b981" strokeWidth={2} />
-                  </LineChart>
-                </ResponsiveContainer>
+                {historyQuery.isError ? (
+                  <p className="text-sm text-red-600">
+                    Trend unavailable: {(historyQuery.error as any)?.message || "failed to load transaction history"}
+                  </p>
+                ) : (
+                  <ResponsiveContainer width="100%" height={300}>
+                    <LineChart
+                      data={weeklyTrend}
+                      margin={{ top: 5, right: 30, left: 20, bottom: 5 }}
+                    >
+                      <CartesianGrid strokeDasharray="3 3" />
+                      <XAxis dataKey="name" />
+                      <YAxis allowDecimals={false} />
+                      <Tooltip />
+                      <Legend />
+                      <Line type="monotone" dataKey="scans" stroke="#3b82f6" strokeWidth={2} />
+                      <Line type="monotone" dataKey="generations" stroke="#10b981" strokeWidth={2} />
+                    </LineChart>
+                  </ResponsiveContainer>
+                )}
               </CardContent>
             </Card>
           </TabsContent>

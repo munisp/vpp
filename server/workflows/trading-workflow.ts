@@ -593,80 +593,11 @@ export async function executeTrade(input: {
   return { success: true, escrowId: escrow.escrowId, transferId: transfer.transferId };
 }
 
-/**
- * Market Making Workflow
- * 
- * Continuously provides liquidity to the market by placing buy and sell orders
- */
-export async function marketMakingWorkflow(input: {
-  userId: number;
-  spread: number; // Percentage spread between buy and sell
-  maxPosition: number; // Maximum kWh position
-}): Promise<{ success: boolean; ordersPlaced: number; error?: string }> {
-  try {
-    console.log(`[MarketMakingWorkflow] Starting for user ${input.userId}`);
-
-    const db = await getDb();
-    if (!db) {
-      throw new Error('Database not available');
-    }
-
-    // Get current market price
-    const marketPrice = await getCurrentMarketPrice();
-
-    // Calculate bid and ask prices
-    const bidPrice = Math.round(marketPrice * (1 - input.spread / 200));
-    const askPrice = Math.round(marketPrice * (1 + input.spread / 200));
-
-    // Place buy and sell orders
-    const orderSize = input.maxPosition / 2;
-    const energyWh = Math.round(orderSize * 1000);
-
-    console.log(`[MarketMakingWorkflow] Placing orders: BUY ${orderSize}kWh @ ${bidPrice}, SELL ${orderSize}kWh @ ${askPrice}`);
-    
-    // Create buy order (import)
-    await db.insert(trades).values({
-      userId: input.userId,
-      tradeType: 'import',
-      tradingMode: 'automatic',
-      energy: energyWh,
-      price: bidPrice,
-      totalAmount: Math.round(orderSize * bidPrice),
-      timestamp: new Date(),
-      status: 'pending',
-      metadata: JSON.stringify({
-        orderType: 'market_making_bid',
-        spread: input.spread,
-      }),
-    });
-    
-    // Create sell order (export)
-    await db.insert(trades).values({
-      userId: input.userId,
-      tradeType: 'export',
-      tradingMode: 'automatic',
-      energy: energyWh,
-      price: askPrice,
-      totalAmount: Math.round(orderSize * askPrice),
-      timestamp: new Date(),
-      status: 'pending',
-      metadata: JSON.stringify({
-        orderType: 'market_making_ask',
-        spread: input.spread,
-      }),
-    });
-
-    console.log(`[MarketMakingWorkflow] Placed orders for user ${input.userId}`);
-    return { success: true, ordersPlaced: 2 };
-  } catch (error) {
-    console.error('[MarketMakingWorkflow] Error:', error);
-    return {
-      success: false,
-      ordersPlaced: 0,
-      error: error instanceof Error ? error.message : 'Market making workflow failed',
-    };
-  }
-}
+// NOTE: `marketMakingWorkflow` was removed. It had no caller anywhere in the
+// repository, and it did direct database writes (db.insert) inside workflow
+// code, which the Temporal workflow sandbox forbids — had it ever been
+// dispatched it would have failed at runtime. Reintroduce market making as
+// activities, not in-workflow I/O, behind a real trigger.
 
 /**
  * Helper Functions

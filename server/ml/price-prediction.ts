@@ -522,20 +522,40 @@ class PricePredictionService {
   async analyzePricePatterns(days: number = 30): Promise<{
     peakHours: number[];
     offPeakHours: number[];
-    averagePrice: number;
+    averagePrice: number | null; // null when no real historical data available
     priceVolatility: number | null; // null when no historical data available
     bestTradingDays: string[];
+    trained: boolean; // false until the model has been trained on real market data
+    reason: string | null; // why results are empty when trained is false
   }> {
+    // An untrained model's hour/day coefficients are default placeholders, not
+    // learned patterns. Never derive peakHours/bestTradingDays from them, and
+    // never report the placeholder intercept as an "average price" — return
+    // explicit empties and surface trained:false so callers cannot render
+    // fabricated patterns as real analysis.
+    if (this.trainingDataPoints === 0) {
+      console.warn('[ML] analyzePricePatterns called but model has never been trained on real market data — returning empty analysis');
+      return {
+        peakHours: [],
+        offPeakHours: [],
+        averagePrice: null,
+        priceVolatility: null,
+        bestTradingDays: [],
+        trained: false,
+        reason: 'Price prediction model has never been trained on real market data; no price pattern analysis is available.',
+      };
+    }
+
     const db = await getDb();
 
     // Default values if no data available
     let peakHours: number[] = [];
     let offPeakHours: number[] = [];
-    let averagePrice = this.weights.intercept;
+    let averagePrice: number | null = null;
     // No fabricated volatility: null until computed from real historical data.
     let priceVolatility: number | null = null;
     let bestTradingDays: string[] = [];
-    
+
     if (db) {
       try {
         const startDate = new Date();
@@ -550,11 +570,12 @@ class PricePredictionService {
         if (historicalPrices.length > 0) {
           // Calculate average price
           const prices = historicalPrices.map(p => p.price);
-          averagePrice = prices.reduce((a, b) => a + b, 0) / prices.length;
-          
+          const mean = prices.reduce((a, b) => a + b, 0) / prices.length;
+          averagePrice = mean;
+
           // Calculate price volatility (standard deviation as percentage of mean)
-          const variance = prices.reduce((sum, p) => sum + Math.pow(p - averagePrice, 2), 0) / prices.length;
-          priceVolatility = (Math.sqrt(variance) / averagePrice) * 100;
+          const variance = prices.reduce((sum, p) => sum + Math.pow(p - mean, 2), 0) / prices.length;
+          priceVolatility = mean === 0 ? null : (Math.sqrt(variance) / mean) * 100;
         }
       } catch (error) {
         console.error('[ML] Error analyzing price patterns:', error);
@@ -582,9 +603,11 @@ class PricePredictionService {
     return {
       peakHours,
       offPeakHours,
-      averagePrice: Math.round(averagePrice * 100) / 100,
+      averagePrice: averagePrice !== null ? Math.round(averagePrice * 100) / 100 : null,
       priceVolatility: priceVolatility !== null ? Math.round(priceVolatility * 10) / 10 : null,
       bestTradingDays,
+      trained: true,
+      reason: null,
     };
   }
 }

@@ -325,23 +325,26 @@ export async function adapterProofs(now: Date = new Date()): Promise<ProtocolPro
   const db = await requireDb();
   const validityDays = proofValidityDays();
 
+  // DISTINCT ON keeps only the newest run per adapter: the previous version
+  // scanned and returned every run in the table to pick the first per
+  // adapter in JS.
   const latestPassed = await db
-    .select()
+    .selectDistinctOn([conformanceRuns.adapter])
     .from(conformanceRuns)
     .where(eq(conformanceRuns.outcome, 'passed'))
-    .orderBy(desc(conformanceRuns.completedAt));
+    .orderBy(conformanceRuns.adapter, desc(conformanceRuns.completedAt));
   const latestAny = await db
-    .select()
+    .selectDistinctOn([conformanceRuns.adapter])
     .from(conformanceRuns)
-    .orderBy(desc(conformanceRuns.completedAt));
+    .orderBy(conformanceRuns.adapter, desc(conformanceRuns.completedAt));
 
   const firstPassed = new Map<string, ConformanceRun>();
   for (const run of latestPassed) {
-    if (!firstPassed.has(run.adapter)) firstPassed.set(run.adapter, run);
+    firstPassed.set(run.adapter, run);
   }
   const firstAny = new Map<string, ConformanceRun>();
   for (const run of latestAny) {
-    if (!firstAny.has(run.adapter)) firstAny.set(run.adapter, run);
+    firstAny.set(run.adapter, run);
   }
 
   return CONFORMANCE_ADAPTERS.map(adapter =>

@@ -200,6 +200,59 @@ export interface RecordAssignmentInput {
   fallbackLimitWatts: number | null;
   delivery: ControlDelivery;
   deliveryDetail?: string;
+  /**
+   * Set by the delivery path when the twin-evidence gate already ran BEFORE
+   * the command went on the wire (see `checkDispatchEvidence`); the record
+   * then must not re-run it after the fact.
+   */
+  twinEvidenceChecked?: boolean;
+}
+
+export interface DispatchEvidenceCheck {
+  /**
+   * Set when the twin itself could not be read, so the freshness of the
+   * target could not be verified. The dispatch may proceed (the window and
+   * fallback still bound it) but the audit record must carry this note.
+   */
+  note?: string;
+}
+
+/**
+ * The twin-evidence gate for an in-force dispatch, callable BEFORE anything
+ * is published. A setpoint to an asset the platform cannot see is commanding
+ * blind: when the twin says the target has no fresh meter evidence, the
+ * dispatch is refused with a ControlValidityError, and the caller must not
+ * let the command reach the wire. When the twin itself cannot be read, the
+ * check cannot run and the returned note says so; a corrupt registry row
+ * (DigitalTwinError) is an ops incident and stays loud.
+ */
+export async function checkDispatchEvidence(input: {
+  assetId?: number;
+  userId?: number;
+}): Promise<DispatchEvidenceCheck> {
+  if (input.assetId === undefined) return {};
+  let twinEvidence: Map<number, TwinAssetEvidence> | null;
+  try {
+    twinEvidence = await getTwinEvidence({ userId: input.userId });
+  } catch (error) {
+    if (error instanceof DigitalTwinError) throw error;
+    console.error('[ControlValidity] twin evidence check failed:', error);
+    twinEvidence = null;
+  }
+  if (twinEvidence === null) {
+    return {
+      note: 'twin evidence unavailable: meter freshness of the dispatch target could not be verified',
+    };
+  }
+  const target = twinEvidence.get(input.assetId);
+  if (target?.evidence === 'stale' || target?.evidence === 'never') {
+    throw new ControlValidityError(
+      target.evidence === 'never'
+        ? `dispatch to asset ${input.assetId} refused: the platform has never received telemetry from it, so a setpoint would be commanding blind`
+        : `dispatch to asset ${input.assetId} refused: its last telemetry is ${Math.round(target.ageSeconds ?? 0)}s old, past its freshness bound, so a setpoint would be commanding blind`
+    );
+  }
+  return {};
 }
 
 /**
@@ -217,38 +270,20 @@ export async function recordControlAssignment(
   // the twin says the target has no fresh meter evidence, an in-force dispatch
   // is refused rather than recorded as authoritative. Refused and unconfirmed
   // deliveries are exempt — they did not command anything, and their audit
-  // record must still be written. When the twin itself cannot be read, the
-  // dispatch proceeds (the window and fallback still bound it) but the record
-  // says the evidence check did not happen.
+  // record must still be written. When the delivery path already ran this gate
+  // before publishing (`twinEvidenceChecked`), it is not re-run here: re-running
+  // it after the command is on the wire would refuse a setpoint the device may
+  // already hold.
   let deliveryDetail = input.deliveryDetail;
-  if (input.assetId !== undefined && isInForce(input.delivery)) {
-    let twinEvidence: Map<number, TwinAssetEvidence> | null;
-    try {
-      twinEvidence = await getTwinEvidence({ userId: input.userId });
-    } catch (error) {
-      // A corrupt registry row (DigitalTwinError) is an ops incident and stays
-      // loud; any other failure to read the twin means the evidence check
-      // could not run, which the audit record below must say.
-      if (error instanceof DigitalTwinError) throw error;
-      console.error('[ControlValidity] twin evidence check failed:', error);
-      twinEvidence = null;
-    }
-    if (twinEvidence === null) {
-      deliveryDetail = [
-        deliveryDetail,
-        'twin evidence unavailable: meter freshness of the dispatch target could not be verified',
-      ]
+  if (!input.twinEvidenceChecked && input.assetId !== undefined && isInForce(input.delivery)) {
+    const check = await checkDispatchEvidence({
+      assetId: input.assetId,
+      userId: input.userId,
+    });
+    if (check.note) {
+      deliveryDetail = [deliveryDetail, check.note]
         .filter(part => part !== undefined && part !== '')
         .join('; ');
-    } else {
-      const target = twinEvidence.get(input.assetId);
-      if (target?.evidence === 'stale' || target?.evidence === 'never') {
-        throw new ControlValidityError(
-          target.evidence === 'never'
-            ? `dispatch to asset ${input.assetId} refused: the platform has never received telemetry from it, so a setpoint would be commanding blind`
-            : `dispatch to asset ${input.assetId} refused: its last telemetry is ${Math.round(target.ageSeconds ?? 0)}s old, past its freshness bound, so a setpoint would be commanding blind`
-        );
-      }
     }
   }
 

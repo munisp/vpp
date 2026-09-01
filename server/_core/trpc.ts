@@ -3,8 +3,22 @@ import { initTRPC, TRPCError } from "@trpc/server";
 import superjson from "superjson";
 import type { TrpcContext } from "./context";
 
+const isProduction = process.env.NODE_ENV === "production";
+
 const t = initTRPC.context<TrpcContext>().create({
   transformer: superjson,
+  /**
+   * Error hygiene: never serialize stack traces or internal error metadata
+   * into API responses in production. The full error (with stack) is logged
+   * server-side by the onError hook in server/_core/index.ts; the client
+   * only needs the code and a message it can show a user.
+   */
+  errorFormatter({ shape }) {
+    if (!isProduction) return shape;
+    const { stack, ...data } = shape.data as Record<string, unknown> & { stack?: unknown };
+    void stack;
+    return { ...shape, data };
+  },
 });
 
 export const router = t.router;

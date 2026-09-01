@@ -19,7 +19,7 @@
 import { and, eq, gte, inArray, lte } from 'drizzle-orm';
 import { getDb } from '../db';
 import { payments, telemetry, trades } from '../../drizzle/schema';
-import { p2pSettlements } from '../../drizzle/innovations-schema';
+import { p2pMatches, p2pSettlements } from '../../drizzle/innovations-schema';
 import { PaymentGatewayManager } from '../payment-gateways';
 import { resolveGatewayEnvironment } from '../payment-gateways/environment';
 import { isUniqueViolation } from '../pg-errors';
@@ -63,6 +63,155 @@ function parseMetadata(raw: string | null): Record<string, unknown> {
  */
 function mergeMetadata(existing: string | null, patch: Record<string, unknown>): string {
   return JSON.stringify({ ...parseMetadata(existing), ...patch });
+}
+
+type SettlementDb = NonNullable<Awaited<ReturnType<typeof getDb>>>;
+type TradeRow = typeof trades.$inferSelect;
+
+/**
+ * The settlement basis of a matched purchase.
+ *
+ * `p2p_matches` is the source of truth for what was agreed: each row names both
+ * order ids, both parties, the matched energy and the agreed (maker) price. A
+ * trade's `counterpartyId` can only name ONE counterparty, so multi-counterparty
+ * and partial fills leave it null — reading the counterparty or the amount from
+ * the trade row settles the wrong amount (the buyer's limit price times the full
+ * order quantity) or refuses a validly matched trade outright.
+ */
+export interface SettlementBasis {
+  source: 'p2p_matches' | 'legacy_trade_columns';
+  energyWh: number;
+  totalAmountCents: number;
+  sellerIds: number[];
+  sellTradeIds: number[];
+  matches: Array<{
+    matchId: number;
+    sellTradeId: number;
+    sellerId: number;
+    energyWh: number;
+    priceCentsPerKwh: number;
+    totalAmountCents: number;
+  }>;
+}
+
+function singleOrNull(ids: number[]): number | null {
+  return ids.length === 1 ? ids[0] : null;
+}
+
+/**
+ * `p2p_settlements.sellerId` is NOT NULL, so a multi-seller purchase must still
+ * name someone: the seller owed the largest matched share, with every seller
+ * named in the reconciliation note. This is a reporting key, not a claim that
+ * only that seller is owed.
+ */
+function primarySellerId(basis: SettlementBasis): number {
+  if (basis.sellerIds.length === 1) return basis.sellerIds[0];
+  const shareBySeller = new Map<number, number>();
+  for (const m of basis.matches) {
+    shareBySeller.set(m.sellerId, (shareBySeller.get(m.sellerId) ?? 0) + m.totalAmountCents);
+  }
+  let best = basis.sellerIds[0];
+  for (const [sellerId, share] of shareBySeller) {
+    if (share > (shareBySeller.get(best) ?? 0)) best = sellerId;
+  }
+  return best;
+}
+
+/**
+ * Resolve what a purchase is actually owed, from its match rows.
+ *
+ * Every match price is verified against BOTH sides' limit prices: a match is
+ * only valid at a price the buyer offered to pay and the seller offered to
+ * accept, so a match outside either limit means the match record itself is
+ * corrupt and settlement must stop loudly rather than pay the wrong amount.
+ *
+ * Trades matched before `p2p_matches` existed (the offer/accept path wrote only
+ * `counterpartyId` + `metadata.sellOfferId`) fall back to those columns; a
+ * trade with neither matches nor a counterparty has never been matched.
+ */
+export async function resolveSettlementBasis(db: SettlementDb, buyTrade: TradeRow): Promise<SettlementBasis> {
+  const matches = await db
+    .select()
+    .from(p2pMatches)
+    .where(eq(p2pMatches.buyOrderId, buyTrade.id));
+
+  if (matches.length === 0) {
+    if (buyTrade.counterpartyId === null) {
+      throw new P2pSettlementError(
+        'TRADE_UNMATCHED',
+        `Trade ${buyTrade.id} has no p2p_matches rows and names no counterparty; it has never been matched, so there is nothing to settle.`
+      );
+    }
+    const meta = parseMetadata(buyTrade.metadata);
+    const sellTradeId = Number(meta.sellOfferId);
+    return {
+      source: 'legacy_trade_columns',
+      energyWh: buyTrade.energy,
+      totalAmountCents: buyTrade.totalAmount,
+      sellerIds: [buyTrade.counterpartyId],
+      sellTradeIds: Number.isInteger(sellTradeId) && sellTradeId > 0 ? [sellTradeId] : [],
+      matches: [],
+    };
+  }
+
+  const sellTradeIds = [...new Set(matches.map(m => m.sellOrderId))];
+  const sellLegs = await db.select().from(trades).where(inArray(trades.id, sellTradeIds));
+  const sellLegById = new Map(sellLegs.map(t => [t.id, t]));
+
+  let energyWh = 0;
+  let totalAmountCents = 0;
+  const resolved = matches.map(m => {
+    const sellLeg = sellLegById.get(m.sellOrderId);
+    if (!sellLeg) {
+      throw new P2pSettlementError(
+        'MATCH_SELL_LEG_MISSING',
+        `Match ${m.id} names sell order ${m.sellOrderId}, which does not exist; the match record is corrupt and trade ${buyTrade.id} cannot be settled against it.`
+      );
+    }
+    if (sellLeg.userId !== m.sellerId) {
+      throw new P2pSettlementError(
+        'MATCH_SELLER_MISMATCH',
+        `Match ${m.id} names seller ${m.sellerId} but sell order ${m.sellOrderId} belongs to user ${sellLeg.userId}; the match record is corrupt.`
+      );
+    }
+    if (m.buyerId !== buyTrade.userId) {
+      throw new P2pSettlementError(
+        'MATCH_BUYER_MISMATCH',
+        `Match ${m.id} names buyer ${m.buyerId} but purchase ${buyTrade.id} belongs to user ${buyTrade.userId}; the match record is corrupt.`
+      );
+    }
+    if (m.priceCentsPerKwh > buyTrade.price) {
+      throw new P2pSettlementError(
+        'MATCH_PRICE_OUT_OF_LIMITS',
+        `Match ${m.id} agreed ${m.priceCentsPerKwh}c/kWh, above the buyer's ${buyTrade.price}c/kWh limit on trade ${buyTrade.id}; settling it would overcharge the buyer.`
+      );
+    }
+    if (m.priceCentsPerKwh < sellLeg.price) {
+      throw new P2pSettlementError(
+        'MATCH_PRICE_OUT_OF_LIMITS',
+        `Match ${m.id} agreed ${m.priceCentsPerKwh}c/kWh, below the seller's ${sellLeg.price}c/kWh limit on trade ${sellLeg.id}; settling it would underpay the seller.`
+      );
+    }
+    energyWh += m.energyWh;
+    totalAmountCents += m.totalAmountCents;
+    return {
+      matchId: m.id,
+      sellTradeId: m.sellOrderId,
+      sellerId: m.sellerId,
+      energyWh: m.energyWh,
+      priceCentsPerKwh: m.priceCentsPerKwh,
+      totalAmountCents: m.totalAmountCents,
+    };
+  });
+
+  return {
+    source: 'p2p_matches',
+    energyWh,
+    totalAmountCents,
+    sellerIds: [...new Set(matches.map(m => m.sellerId))],
+    sellTradeIds,
+    matches: resolved,
+  };
 }
 
 /**
@@ -133,12 +282,16 @@ export async function startTradePayment(input: StartTradePaymentInput): Promise<
       `This purchase is '${trade.status}' and cannot be paid for.`
     );
   }
-  if (trade.counterpartyId === null) {
-    throw new P2pSettlementError('TRADE_UNMATCHED', 'This purchase has no seller matched to it yet.');
-  }
-  if (trade.totalAmount <= 0) {
+  // The match rows decide whether this purchase is payable and for how much:
+  // `counterpartyId` is null for multi-counterparty and partial fills, and the
+  // trade row's total is the buyer's limit price over the full order, not the
+  // agreed match price over the matched energy.
+  const basis = await resolveSettlementBasis(db, trade);
+  if (basis.totalAmountCents <= 0) {
     throw new P2pSettlementError('TRADE_AMOUNT_INVALID', 'This purchase has no amount to pay.');
   }
+  const soleSellerId = singleOrNull(basis.sellerIds);
+  const soleSellTradeId = singleOrNull(basis.sellTradeIds);
 
   // Resolved before anything is reserved: a deployment with no provider cannot
   // charge anyone, and saying so is not the same as a payment that failed.
@@ -183,7 +336,7 @@ export async function startTradePayment(input: StartTradePaymentInput): Promise<
       .values({
         userId: input.buyerId,
         paymentType: 'p2p_trade',
-        amount: trade.totalAmount,
+        amount: basis.totalAmountCents,
         currency: P2P_CURRENCY,
         paymentMethod: input.gateway,
         phoneNumber: input.phoneNumber,
@@ -191,8 +344,11 @@ export async function startTradePayment(input: StartTradePaymentInput): Promise<
         p2pTradeId: trade.id,
         metadata: JSON.stringify({
           buyTradeId: trade.id,
-          sellTradeId: parseMetadata(trade.metadata).sellOfferId ?? null,
-          sellerId: trade.counterpartyId,
+          sellTradeId: soleSellTradeId,
+          sellerId: soleSellerId,
+          sellerIds: basis.sellerIds,
+          sellTradeIds: basis.sellTradeIds,
+          matchIds: basis.matches.map(m => m.matchId),
           providerRequested: false,
         }),
       })
@@ -231,14 +387,14 @@ export async function startTradePayment(input: StartTradePaymentInput): Promise<
     response = await PaymentGatewayManager.initiatePayment(
       input.gateway,
       {
-        amount: trade.totalAmount,
+        amount: basis.totalAmountCents,
         phoneNumber: input.phoneNumber,
         accountReference: `P2P-${trade.id}`,
-        transactionDesc: `P2P energy purchase ${trade.energy}Wh (trade ${trade.id})`,
+        transactionDesc: `P2P energy purchase ${basis.energyWh}Wh (trade ${trade.id})`,
         metadata: {
           userId: input.buyerId,
           buyTradeId: trade.id,
-          sellerId: trade.counterpartyId,
+          sellerId: soleSellerId,
         },
       },
       environment
@@ -266,7 +422,8 @@ export async function startTradePayment(input: StartTradePaymentInput): Promise<
         status: 'failed',
         metadata: JSON.stringify({
           buyTradeId: trade.id,
-          sellerId: trade.counterpartyId,
+          sellerId: soleSellerId,
+          sellerIds: basis.sellerIds,
           providerRequested: true,
           providerRefusal: response.message ?? 'no message',
         }),
@@ -288,8 +445,11 @@ export async function startTradePayment(input: StartTradePaymentInput): Promise<
         transactionId: response.transactionId,
         metadata: JSON.stringify({
           buyTradeId: trade.id,
-          sellTradeId: parseMetadata(trade.metadata).sellOfferId ?? null,
-          sellerId: trade.counterpartyId,
+          sellTradeId: soleSellTradeId,
+          sellerId: soleSellerId,
+          sellerIds: basis.sellerIds,
+          sellTradeIds: basis.sellTradeIds,
+          matchIds: basis.matches.map(m => m.matchId),
           checkoutRequestId: response.checkoutRequestId,
           providerRequested: true,
         }),
@@ -318,7 +478,7 @@ export async function startTradePayment(input: StartTradePaymentInput): Promise<
 
   return {
     paymentId: payment.id,
-    amountDueCents: trade.totalAmount,
+    amountDueCents: basis.totalAmountCents,
     transactionId: response.transactionId ?? null,
     checkoutRequestId: response.checkoutRequestId ?? null,
     settlement: SETTLEMENT_PAYMENT_INITIATED,
@@ -407,10 +567,14 @@ export async function recordBuyerPaymentSettled(payment: {
       `Payment ${payment.id} references trade ${buyTradeId}, which is a '${buyTrade.tradeType}' and not a P2P purchase.`
     );
   }
-  if (payment.amount !== buyTrade.totalAmount) {
+  // What the payment must cover is the sum of the agreed match amounts, not
+  // the trade row's limit-price total; and the sellers are whoever the match
+  // rows name, not a nullable single counterparty column.
+  const basis = await resolveSettlementBasis(db, buyTrade);
+  if (payment.amount !== basis.totalAmountCents) {
     throw new P2pSettlementError(
       'AMOUNT_MISMATCH',
-      `Payment ${payment.id} settled ${payment.amount} cents but trade ${buyTradeId} owes ${buyTrade.totalAmount} cents.`
+      `Payment ${payment.id} settled ${payment.amount} cents but trade ${buyTradeId} owes ${basis.totalAmountCents} cents across its ${basis.source === 'p2p_matches' ? `${basis.matches.length} match(es)` : 'match'}.`
     );
   }
   // An equal number of a different currency is not the amount owed.
@@ -418,12 +582,6 @@ export async function recordBuyerPaymentSettled(payment: {
     throw new P2pSettlementError(
       'CURRENCY_MISMATCH',
       `Payment ${payment.id} settled in ${payment.currency} but trade ${buyTradeId} is owed in ${P2P_CURRENCY}.`
-    );
-  }
-  if (buyTrade.counterpartyId === null) {
-    throw new P2pSettlementError(
-      'TRADE_UNMATCHED',
-      `Payment ${payment.id} settled trade ${buyTradeId}, which names no seller to settle with.`
     );
   }
   // The provider's own reference is the evidence; our row id is not.
@@ -435,8 +593,13 @@ export async function recordBuyerPaymentSettled(payment: {
     );
   }
 
+  const soleSellerId = singleOrNull(basis.sellerIds);
+  const soleSellTradeId = singleOrNull(basis.sellTradeIds);
+
   const detail =
-    'The buyer has paid and the provider confirmed it. The seller has not been paid: the platform has no disbursement provider, so this trade is not complete.';
+    basis.sellerIds.length > 1
+      ? `The buyer has paid and the provider confirmed it. The purchase covers ${basis.sellerIds.length} sellers (${basis.sellerIds.join(', ')}) via sell trades ${basis.sellTradeIds.join(', ')}; none of them has been paid: the platform has no disbursement provider, so this trade is not complete.`
+      : 'The buyer has paid and the provider confirmed it. The seller has not been paid: the platform has no disbursement provider, so this trade is not complete.';
 
   const patch = {
     settlement: SETTLEMENT_BUYER_PAID,
@@ -447,8 +610,8 @@ export async function recordBuyerPaymentSettled(payment: {
 
   const paidAt = new Date();
 
-  // Both legs and the settlement record move together: a buyer marked paid
-  // while the seller's leg still reads unpaid would be a discrepancy the
+  // All legs and the settlement record move together: a buyer marked paid
+  // while a seller's leg still reads unpaid would be a discrepancy the
   // platform invented itself.
   const { settlementId, settledSellTradeId } = await db.transaction(async tx => {
     await tx
@@ -456,16 +619,15 @@ export async function recordBuyerPaymentSettled(payment: {
       .set({ metadata: mergeMetadata(buyTrade.metadata, patch) })
       .where(eq(trades.id, buyTrade.id));
 
-    const candidateSellTradeId = Number(parseMetadata(buyTrade.metadata).sellOfferId);
-    let sellTradeIdOrNull: number | null = null;
-    if (Number.isInteger(candidateSellTradeId) && candidateSellTradeId > 0) {
+    // Every seller leg named by the match rows moves to buyer-paid, not just a
+    // single metadata-named one: a multi-counterparty fill has several.
+    for (const sellTradeId of basis.sellTradeIds) {
       const [sellTrade] = await tx
         .select()
         .from(trades)
-        .where(eq(trades.id, candidateSellTradeId))
+        .where(eq(trades.id, sellTradeId))
         .limit(1);
       if (sellTrade) {
-        sellTradeIdOrNull = sellTrade.id;
         await tx
           .update(trades)
           .set({ metadata: mergeMetadata(sellTrade.metadata, patch) })
@@ -475,16 +637,18 @@ export async function recordBuyerPaymentSettled(payment: {
 
     // Idempotent under a duplicate provider callback: the settlement is keyed
     // by its trade, and a second confirmation of the same payment updates the
-    // same row rather than opening a second one.
+    // same row rather than opening a second one. A settlement over several
+    // sellers cannot name one sellTradeId, so it stays null and the note names
+    // every leg instead of implying a single one.
     const [settlement] = await tx
       .insert(p2pSettlements)
       .values({
         buyTradeId: buyTrade.id,
-        sellTradeId: sellTradeIdOrNull,
+        sellTradeId: soleSellTradeId,
         buyerId: buyTrade.userId,
-        sellerId: buyTrade.counterpartyId as number,
-        energyWh: buyTrade.energy,
-        amountCents: buyTrade.totalAmount,
+        sellerId: soleSellerId ?? primarySellerId(basis),
+        energyWh: basis.energyWh,
+        amountCents: basis.totalAmountCents,
         currency: P2P_CURRENCY,
         buyerPaymentId: payment.id,
         buyerPaymentReference: providerReference,
@@ -498,7 +662,7 @@ export async function recordBuyerPaymentSettled(payment: {
       .onConflictDoUpdate({
         target: p2pSettlements.buyTradeId,
         set: {
-          sellTradeId: sellTradeIdOrNull,
+          sellTradeId: soleSellTradeId,
           buyerPaymentId: payment.id,
           buyerPaymentReference: providerReference,
           buyerPaidAt: paidAt,
@@ -509,21 +673,45 @@ export async function recordBuyerPaymentSettled(payment: {
       })
       .returning({ id: p2pSettlements.id });
 
-    return { settlementId: settlement.id, settledSellTradeId: sellTradeIdOrNull };
+    return { settlementId: settlement.id, settledSellTradeId: soleSellTradeId };
   });
 
   // The double entry is attempted after the settlement commits, because the money
   // has already moved at the provider: the entry records that fact, it does not
   // authorise it. A ledger that is unreachable or that refuses therefore leaves a
   // visible unposted row for reconciliation instead of discarding a confirmed
-  // payment.
-  const ledgerPosting = await recordCaptureOnLedger({
-    paymentId: payment.id,
-    sellerUserId: buyTrade.counterpartyId as number,
-    gatewayKey: payment.paymentMethod ?? 'unknown_gateway',
-    amountMinor: payment.amount,
-    providerReference,
-  });
+  // payment. A multi-seller purchase owes each seller their matched share, so
+  // each share is its own entry rather than the whole payment being owed to one
+  // of them.
+  const sellerShares = new Map<number, number>();
+  if (basis.matches.length > 0) {
+    for (const m of basis.matches) {
+      sellerShares.set(m.sellerId, (sellerShares.get(m.sellerId) ?? 0) + m.totalAmountCents);
+    }
+  } else {
+    sellerShares.set(primarySellerId(basis), basis.totalAmountCents);
+  }
+
+  const ledgerPostings: Array<{ state: LedgerPostingState; detail: string }> = [];
+  for (const [sellerUserId, shareCents] of sellerShares) {
+    ledgerPostings.push(
+      await recordCaptureOnLedger({
+        paymentId: payment.id,
+        sellerUserId,
+        gatewayKey: payment.paymentMethod ?? 'unknown_gateway',
+        amountMinor: shareCents,
+        providerReference,
+      })
+    );
+  }
+  const ledgerPosting = ledgerPostings.length === 1
+    ? ledgerPostings[0]
+    : {
+        state: ledgerPostings.every(p => p.state === 'posted')
+          ? ('posted' as LedgerPostingState)
+          : (ledgerPostings.find(p => p.state !== 'posted')?.state ?? ('pending' as LedgerPostingState)),
+        detail: ledgerPostings.map((p, i) => `seller share ${i + 1}: ${p.detail}`).join(' '),
+      };
 
   return {
     buyTradeId: buyTrade.id,

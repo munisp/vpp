@@ -150,10 +150,33 @@ export const adminRouter = router({
         }
 
         if (input.role) {
+          // Demoting an administrator ('admin' -> 'user') is only safe when at
+          // least one OTHER admin remains. This one rule covers both lockout
+          // paths: demoting the last admin, and an admin demoting themselves
+          // while no other admin exists.
+          if (userBefore.role === 'admin' && input.role !== 'admin') {
+            const { ne, and } = await import('drizzle-orm');
+            const otherAdmins = await db_instance
+              .select({ id: users.id })
+              .from(users)
+              .where(and(eq(users.role, 'admin'), ne(users.id, input.userId)))
+              .limit(1);
+
+            if (otherAdmins.length === 0) {
+              throw new TRPCError({
+                code: 'FORBIDDEN',
+                message:
+                  input.userId === ctx.user.id
+                    ? 'You cannot demote yourself while you are the only administrator; promote another admin first.'
+                    : 'Cannot demote the last remaining administrator; promote another admin first.',
+              });
+            }
+          }
+
           await db_instance.update(users)
             .set({ role: input.role })
             .where(eq(users.id, input.userId));
-          
+
           // Create audit log
           await createAuditLog({
             userId: ctx.user.id,
@@ -178,6 +201,9 @@ export const adminRouter = router({
           message: 'User updated successfully',
         };
       } catch (error) {
+        // Deliberate refusals (NOT_FOUND, FORBIDDEN lockout guards) reach the
+        // caller as they were raised; only unexpected faults become 500s.
+        if (error instanceof TRPCError) throw error;
         console.error('Error updating user:', error);
         throw new TRPCError({
           code: 'INTERNAL_SERVER_ERROR',

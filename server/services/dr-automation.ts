@@ -6,7 +6,7 @@
  */
 
 import { getDb } from '../db';
-import { demandResponseEvents, drParticipants, drResponses, users, assets } from '../../drizzle/schema';
+import { demandResponseEvents, drResponses, users, assets } from '../../drizzle/schema';
 import { eq, and, gte, lte, sql, desc } from 'drizzle-orm';
 import { TRPCError } from '@trpc/server';
 import { redisCache } from './redis-cache';
@@ -194,12 +194,26 @@ class DRAutomationService {
       return false;
     }
 
-    // Check frequency
-    if (ruleCond.maxFrequency && conditions.frequency > ruleCond.maxFrequency) {
-      return false;
-    }
-    if (ruleCond.minFrequency && conditions.frequency < ruleCond.minFrequency) {
-      return false;
+    // Check frequency. When both bounds are set they define a deviation
+    // band around nominal: fire when the grid is OUTSIDE it (under- OR
+    // over-frequency). Requiring both bounds at once would be unsatisfiable
+    // — no frequency is simultaneously ≤ the lower and ≥ the upper bound —
+    // which made the frequency-deviation rule dead. A single bound keeps its
+    // one-sided meaning.
+    if (ruleCond.maxFrequency && ruleCond.minFrequency) {
+      if (
+        conditions.frequency > ruleCond.maxFrequency &&
+        conditions.frequency < ruleCond.minFrequency
+      ) {
+        return false;
+      }
+    } else {
+      if (ruleCond.maxFrequency && conditions.frequency > ruleCond.maxFrequency) {
+        return false;
+      }
+      if (ruleCond.minFrequency && conditions.frequency < ruleCond.minFrequency) {
+        return false;
+      }
     }
 
     // Check temperature
@@ -278,20 +292,21 @@ class DRAutomationService {
 
     const { participantCriteria } = rule;
 
-    // Build query to find eligible participants
-    let query = db
+    // Find candidate participants with their total asset capacity. The old
+    // query also joined drResponses and selected the whole drResponses table
+    // while grouping only by user — invalid SQL in Postgres, and the join
+    // multiplied each asset row by the user's response count, inflating
+    // SUM(capacity) (fan-out). Response history is loaded per participant by
+    // computeReliabilityScore below, so the aggregate query joins only assets.
+    const participants = await db
       .select({
         userId: users.id,
-        capacity: sql<number>`SUM(${assets.capacity})`.as('total_capacity'),
-        responses: drResponses,
+        capacity: sql<number>`COALESCE(SUM(${assets.capacity}), 0)`.as('total_capacity'),
       })
       .from(users)
       .leftJoin(assets, eq(assets.userId, users.id))
-      .leftJoin(drResponses, eq(drResponses.userId, users.id))
       .where(eq(users.role, 'user'))
       .groupBy(users.id);
-
-    const participants = await query;
 
     // Filter based on criteria
     const eligible: typeof participants = [];
@@ -336,16 +351,18 @@ class DRAutomationService {
       eligible.push(p);
     }
 
-    // Enroll eligible participants
+    // Enroll eligible participants. Enrollment in an event is a drResponses
+    // row with participationStatus 'auto_enrolled' (the table that actually
+    // carries eventId — see drizzle/schema.ts and the demandResponse router);
+    // drParticipants is the program-level roster and has no per-event columns.
     const enrollments = eligible.map(p => ({
       eventId,
       userId: p.userId,
-      enrollmentStatus: 'auto_enrolled' as const,
-      enrolledAt: new Date(),
+      participationStatus: 'auto_enrolled' as const,
     }));
 
     if (enrollments.length > 0) {
-      await db.insert(drParticipants).values(enrollments);
+      await db.insert(drResponses).values(enrollments);
       console.log(`[DR Automation] Auto-enrolled ${enrollments.length} participants for event ${eventId}`);
     }
   }
@@ -362,6 +379,10 @@ class DRAutomationService {
     performanceBonus: number;
     totalCompensation: number;
     compensationRate: number;
+    /** Event window in hours — the multiplier that turns kW into kWh. */
+    eventDurationHours: number;
+    /** avg kW reduction × event hours; the energy the compensation pays for. */
+    energyBasisKwh: number;
     reliabilityScore: number | null;
     scoreAvailable: boolean;
   }> {
@@ -397,8 +418,23 @@ class DRAutomationService {
     // based on a track record we cannot verify.
     const { score: reliabilityScore, scoreAvailable } = await computeReliabilityScore(db, userId);
 
-    // Calculate base compensation
-    const baseCompensation = actualReduction * compensationRate;
+    // Compensation pays for ENERGY: the rate is per kWh, so the average kW
+    // reduction must be multiplied by the event duration in hours. Without
+    // the duration the amount is off by exactly that factor.
+    const startMs = eventData.startTime.getTime();
+    const endMs = eventData.endTime.getTime();
+    const eventDurationHours = (endMs - startMs) / 3_600_000;
+    if (!Number.isFinite(eventDurationHours) || eventDurationHours <= 0) {
+      throw new TRPCError({
+        code: 'PRECONDITION_FAILED',
+        message:
+          `invalid_event_window: DR event ${eventId} has a non-positive duration ` +
+          `(${eventData.startTime.toISOString()} → ${eventData.endTime.toISOString()}); ` +
+          'refusing to compute compensation on an energy basis that does not exist',
+      });
+    }
+    const energyBasisKwh = actualReduction * eventDurationHours;
+    const baseCompensation = energyBasisKwh * compensationRate;
 
     // Calculate performance bonus (only from a real, available score)
     let bonusPercentage = 0;
@@ -420,6 +456,8 @@ class DRAutomationService {
       performanceBonus,
       totalCompensation,
       compensationRate,
+      eventDurationHours,
+      energyBasisKwh,
       reliabilityScore,
       scoreAvailable,
     };

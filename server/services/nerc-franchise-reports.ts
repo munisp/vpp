@@ -43,7 +43,7 @@
  */
 
 import { createHash } from "crypto";
-import { and, desc, eq, gte, lte, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, lte, sql } from "drizzle-orm";
 import { getDb } from "../db";
 import { assets, billings, payments, telemetry } from "../../drizzle/schema";
 import { prepaidSupplyEvents } from "../../drizzle/prepaid-schema";
@@ -99,7 +99,7 @@ export interface FranchiseSourceData {
       assetsWithReadings: number;
       boundaryMeterAssetIds: number[];
       assetsWithInsufficientReadings: number[];
-      assetsExcludedMeterReset: number[];
+      assetsWithMeterReset: number[];
     };
   };
   commercial: {
@@ -161,7 +161,8 @@ async function collectSourceData(
     a.assetType === "meter" && BOUNDARY_ROLES.has(assetRole(a.metadata) ?? "");
   const configuredBoundaryIds = assetRows.filter(isBoundaryAsset).map((a) => a.id);
 
-  // 1b. Telemetry in window, joined to assets for classification.
+  // 1b. Telemetry in window, joined to assets for classification, in counter
+  //     order per asset: meter-reset detection needs readings time-ordered.
   const rows = (await db
     .select({
       assetId: telemetry.assetId,
@@ -173,10 +174,19 @@ async function collectSourceData(
     })
     .from(telemetry)
     .innerJoin(assets, eq(telemetry.assetId, assets.id))
-    .where(and(gte(telemetry.timestamp, periodStart), lte(telemetry.timestamp, periodEnd)))) as TelemetryRow[];
+    .where(and(gte(telemetry.timestamp, periodStart), lte(telemetry.timestamp, periodEnd)))
+    .orderBy(asc(telemetry.assetId), asc(telemetry.timestamp))) as TelemetryRow[];
 
   // Per-asset cumulative-energy deltas (Wh): needs >= 2 non-null readings.
-  const perAsset = new Map<number, { min: number; max: number; readings: number }>();
+  // Readings are walked in time order; when the counter decreases, the meter
+  // reset (or rolled over). The register's maximum is not recorded anywhere,
+  // so the post-reset reading itself is counted as the delta across the reset
+  // and the asset is flagged as reset-detected — honest accounting with the
+  // rollover gap acknowledged, not a fabricated max-minus-min delta.
+  const perAsset = new Map<
+    number,
+    { last: number | null; totalWh: number; readings: number; resets: number }
+  >();
   const hoursWithReadings = new Set<number>();
   let peakPowerW: number | null = null;
 
@@ -185,19 +195,25 @@ async function collectSourceData(
     hoursWithReadings.add(Math.floor(ts.getTime() / 3_600_000));
     if (r.power != null && (peakPowerW == null || r.power > peakPowerW)) peakPowerW = r.power;
     if (r.energy == null) continue;
-    const a = perAsset.get(r.assetId);
-    if (!a) {
-      perAsset.set(r.assetId, { min: r.energy, max: r.energy, readings: 1 });
-    } else {
-      a.readings += 1;
-      if (r.energy < a.min) a.min = r.energy;
-      if (r.energy > a.max) a.max = r.energy;
+    const a = perAsset.get(r.assetId) ?? { last: null, totalWh: 0, readings: 0, resets: 0 };
+    a.readings += 1;
+    if (a.last !== null) {
+      if (r.energy >= a.last) {
+        a.totalWh += r.energy - a.last;
+      } else {
+        // Counter reset/rollover: the pre-reset tail (last -> register max) is
+        // unknown, so count only what is evidenced — the post-reset reading.
+        a.resets += 1;
+        a.totalWh += r.energy;
+      }
     }
+    a.last = r.energy;
+    perAsset.set(r.assetId, a);
   }
 
   const boundaryMeterAssetIds: number[] = [];
   const assetsWithInsufficientReadings: number[] = [];
-  const assetsExcludedMeterReset: number[] = [];
+  const assetsWithMeterReset: number[] = [];
   let importedWh = 0, generatedWh = 0, distributedWh = 0;
   let importOk = false, generatedOk = false, distributedOk = false;
 
@@ -214,12 +230,12 @@ async function collectSourceData(
       assetsWithInsufficientReadings.push(assetId);
       continue;
     }
-    if (a.max < a.min) {
-      // Counter reset/rollover — a delta would be fabricated; exclude loudly.
-      assetsExcludedMeterReset.push(assetId);
-      continue;
+    if (a.resets > 0) {
+      // Included in the totals with the evidenced post-reset energy; flagged
+      // here so the reader knows the pre-reset tail is not in the figure.
+      assetsWithMeterReset.push(assetId);
     }
-    const delta = a.max - a.min;
+    const delta = a.totalWh;
     if (isBoundary) { importedWh += delta; importOk = true; }
     else if (isGeneration) { generatedWh += delta; generatedOk = true; }
     else { distributedWh += delta; distributedOk = true; }
@@ -271,7 +287,7 @@ async function collectSourceData(
 
   // 3. Commercial: billings whose billing period starts inside the window.
   const billingRows = await db
-    .select()
+    .select({ userId: billings.userId, totalValue: billings.totalValue })
     .from(billings)
     .where(and(gte(billings.periodStart, periodStart), lte(billings.periodStart, periodEnd)));
 
@@ -284,7 +300,7 @@ async function collectSourceData(
   const totalBilledNaira = round(billedMinor / 100, 2);
 
   const paymentRows = await db
-    .select()
+    .select({ currency: payments.currency, amount: payments.amount })
     .from(payments)
     .where(and(
       eq(payments.status, "completed"),
@@ -335,7 +351,7 @@ async function collectSourceData(
         assetsWithReadings: perAsset.size,
         boundaryMeterAssetIds: boundaryMeterAssetIds.sort((a, b) => a - b),
         assetsWithInsufficientReadings: assetsWithInsufficientReadings.sort((a, b) => a - b),
-        assetsExcludedMeterReset: assetsExcludedMeterReset.sort((a, b) => a - b),
+        assetsWithMeterReset: assetsWithMeterReset.sort((a, b) => a - b),
       },
     },
     commercial: {
@@ -350,7 +366,7 @@ async function collectSourceData(
     notes: [
       "Billing rows carry no currency column; billed minor units are presented as NGN for this franchise pack.",
       "Headline collection figures cover NGN payments only; other currencies are itemised in collectedByCurrencyNaira and excluded from collection efficiency.",
-      "Energy figures are cumulative-counter deltas (max - min) per asset over the window; assets with fewer than two energy readings or a counter reset are excluded and listed under technical.metering.",
+      "Energy figures are cumulative-counter deltas summed per asset over the window in reading order; a counter decrease is treated as a meter reset/rollover, the post-reset reading is counted as the delta across the reset (the register maximum is not recorded, so the pre-reset tail is excluded), and the asset is flagged under technical.metering.assetsWithMeterReset. Assets with fewer than two energy readings are excluded and listed under technical.metering.",
     ],
   };
 }
@@ -395,7 +411,7 @@ function renderSourceDataToPdf(source: FranchiseSourceData, checksum: string): P
           `Assets with in-window readings: ${t.metering.assetsWithReadings}`,
           `Boundary meter asset ids: ${t.metering.boundaryMeterAssetIds.join(", ") || "none"}`,
           `Assets excluded (<2 energy readings): ${t.metering.assetsWithInsufficientReadings.join(", ") || "none"}`,
-          `Assets excluded (counter reset): ${t.metering.assetsExcludedMeterReset.join(", ") || "none"}`,
+          `Assets with meter reset/rollover (post-reset reading counted, pre-reset tail unknown): ${t.metering.assetsWithMeterReset.join(", ") || "none"}`,
           ...source.notes.map((n) => `Note: ${n}`),
         ],
       },

@@ -96,6 +96,7 @@ function fakeDb(results: unknown[][]) {
   builder.then = (resolve: (value: unknown[]) => unknown) => Promise.resolve(next()).then(resolve);
   const db = {
     select: () => builder,
+    selectDistinctOn: () => builder,
     execute: async () => ({ rows: next() }),
     insert: () => ({
       values: (rows: unknown) => {

@@ -19,8 +19,10 @@ import {
   type ChargingSchedulePeriod,
 } from './grid-commands';
 import {
+  checkDispatchEvidence,
   claimForFallback,
   closeHoldLast,
+  ControlValidityError,
   expiredAssignments,
   liveAssignmentFor,
   recordControlAssignment,
@@ -99,6 +101,14 @@ export async function dispatchChargingPlan(
   };
 
   try {
+    // Evidence before the wire: the twin-evidence gate must run BEFORE the
+    // profile is sent to the charge point. A command the twin refuses that has
+    // already been delivered is an actuation the platform disclaims but the
+    // hardware executes.
+    const evidence = await checkDispatchEvidence({
+      assetId: input.assetId,
+      userId: input.userId,
+    });
     const result = await setChargingProfile({
       chargePointId: input.chargePointId,
       connectorId: input.connectorId,
@@ -115,7 +125,10 @@ export async function dispatchChargingPlan(
     const assignmentId = await recordControlAssignment({
       ...shared,
       delivery: 'accepted',
-      deliveryDetail: `charge point answered ${result.status}`,
+      deliveryDetail: [evidence.note, `charge point answered ${result.status}`]
+        .filter(part => part !== undefined)
+        .join('; '),
+      twinEvidenceChecked: true,
     });
     return {
       delivered: true,
@@ -128,14 +141,20 @@ export async function dispatchChargingPlan(
     };
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
-    // A rejection is final; a timeout or an unreachable service leaves the
-    // charge point's state genuinely unknown, and is recorded as such.
+    // A twin-evidence refusal happens before anything is sent, so the charge
+    // point never saw the profile; a rejection is final; a timeout or an
+    // unreachable service leaves the charge point's state genuinely unknown,
+    // and is recorded as such.
     const delivery =
-      error instanceof GridCommandError && error.status === 409 ? 'rejected' : 'unconfirmed';
+      error instanceof ControlValidityError ||
+      (error instanceof GridCommandError && error.status === 409)
+        ? 'rejected'
+        : 'unconfirmed';
     const assignmentId = await recordControlAssignment({
       ...shared,
       delivery,
       deliveryDetail: reason,
+      twinEvidenceChecked: true,
     });
     return {
       delivered: false,
@@ -169,7 +188,8 @@ export interface DispatchDeviceSetpointInput {
 export interface DispatchDeviceSetpointResult {
   /** True when the broker took the message; the device has not answered. */
   published: boolean;
-  status: 'broker_queued' | 'unconfirmed';
+  /** `rejected` means the twin-evidence gate refused the dispatch before anything was published. */
+  status: 'broker_queued' | 'rejected' | 'unconfirmed';
   assignmentId: number | null;
   validFrom: Date;
   validTo: Date;
@@ -215,6 +235,13 @@ export async function dispatchDeviceSetpoint(
   };
 
   try {
+    // Evidence before the wire: the twin-evidence gate must complete BEFORE
+    // the command is published. A refused setpoint must never reach the
+    // broker — MQTT has no recall, so a refusal after publish would be a lie.
+    const evidence = await checkDispatchEvidence({
+      assetId: input.assetId,
+      userId: input.userId,
+    });
     await mqttBrokerService.publishCommand(input.deviceId, 'set_power', {
       targetPowerWatts: Math.round(input.setpointWatts),
       validFrom: window.validFrom.toISOString(),
@@ -226,7 +253,13 @@ export async function dispatchDeviceSetpoint(
     const assignmentId = await recordControlAssignment({
       ...shared,
       delivery: 'broker_queued',
-      deliveryDetail: 'published to the MQTT broker; the device does not acknowledge commands',
+      deliveryDetail: [
+        evidence.note,
+        'published to the MQTT broker; the device does not acknowledge commands',
+      ]
+        .filter(part => part !== undefined)
+        .join('; '),
+      twinEvidenceChecked: true,
     });
     return {
       published: true,
@@ -239,14 +272,19 @@ export async function dispatchDeviceSetpoint(
     };
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
+    // A ControlValidityError comes from the pre-publish evidence gate: nothing
+    // was published, so the refusal is recorded as rejected with its reason,
+    // not as an unconfirmed delivery.
+    const refused = error instanceof ControlValidityError;
     const assignmentId = await recordControlAssignment({
       ...shared,
-      delivery: 'unconfirmed',
-      deliveryDetail: `MQTT publish failed: ${reason}`,
+      delivery: refused ? 'rejected' : 'unconfirmed',
+      deliveryDetail: refused ? reason : `MQTT publish failed: ${reason}`,
+      twinEvidenceChecked: true,
     });
     return {
       published: false,
-      status: 'unconfirmed',
+      status: refused ? 'rejected' : 'unconfirmed',
       assignmentId,
       validFrom: window.validFrom,
       validTo: window.validTo,

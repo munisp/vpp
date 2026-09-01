@@ -9,6 +9,7 @@ import { KAFKA_TOPICS } from "../integration/kafka-config";
 import { enqueueEvent } from "../services/events/outbox";
 import { temporalClient } from "../integration/temporal-client";
 import { resolveGatewayEnvironment } from "../payment-gateways/environment";
+import { settleBillingIfCovered } from "../webhooks/payment-callbacks";
 
 /**
  * Payment Processing Router
@@ -203,10 +204,15 @@ export const paymentProcessingRouter = router({
 
         // A gateway-reported amount that disagrees with the recorded amount is
         // a discrepancy for reconciliation, not a settled payment.
+        // `PaymentStatusResponse.amount` is already in the platform's minor
+        // units (cents) — the gateway adapters scale provider major units once
+        // (`amount * 100` in payment-gateways/*.ts). Scaling here again made
+        // every genuine amount look 100x too large, so verification of a real
+        // Airtel/Tigo payment could never match and nothing ever settled.
         if (
           response.status === "completed" &&
           typeof response.amount === "number" &&
-          Math.round(response.amount * 100) !== pmt.amount
+          Math.round(response.amount) !== pmt.amount
         ) {
           console.error(
             `[Payment] Amount mismatch on payment ${pmt.id}: gateway ${response.amount} vs recorded ${pmt.amount} cents`
@@ -228,12 +234,26 @@ export const paymentProcessingRouter = router({
             .set({ status: "completed" })
             .where(and(eq(payments.id, pmt.id), eq(payments.status, "pending")));
 
-          // Only the transition that actually happened settles the invoice.
+          // Only the transition that actually happened settles the invoice,
+          // and the invoice is only settled when the completed payments
+          // against it cover the invoiced consumer share.
           if ((settled.rowCount ?? 0) > 0 && pmt.billingId) {
-            await db
-              .update(billings)
-              .set({ status: "paid", paidAt: new Date(), transactionId: pmt.transactionId })
-              .where(eq(billings.id, pmt.billingId));
+            const settlement = await settleBillingIfCovered(
+              db,
+              pmt.billingId,
+              pmt.paymentMethod,
+              pmt.transactionId
+            );
+            if (!settlement.paid) {
+              return {
+                success: true,
+                status: "partial" as const,
+                message:
+                  `Payment confirmed, but the invoice is only partially covered ` +
+                  `(${settlement.totalPaidCents}/${settlement.dueCents} cents); it remains issued.`,
+                transactionId: response.transactionId,
+              };
+            }
           }
         } else if (response.status === "failed") {
           await db

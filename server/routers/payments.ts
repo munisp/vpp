@@ -5,24 +5,30 @@ import * as db from '../db';
 import * as notifications from '../_core/notifications';
 import * as paymentGateway from '../_core/paymentGateway';
 import { issuePrepaidTokenForPayment } from '../services/prepaid-issuance-entry';
+import { paystackService } from '../services/paystack-service';
+import { flutterwaveService } from '../services/flutterwave-service';
+import { settleBillingIfCovered } from '../webhooks/payment-callbacks';
 import { payments, tokens, billings } from '../../drizzle/schema';
 import { eq, desc, and, inArray, sql } from 'drizzle-orm';
 
 const InitiatePaymentInputSchema = z.object({
   paymentType: z.enum(['invoice', 'token_purchase', 'monthly_fee']),
   amount: z.number().int().positive(),
-  paymentMethod: z.enum(['mpesa', 'airtel_money', 'tigo_pesa', 'bank_transfer', 'card']),
+  paymentMethod: z.enum(['mpesa', 'airtel_money', 'tigo_pesa', 'bank_transfer', 'card', 'paystack', 'flutterwave']),
   phoneNumber: z.string().optional(),
   accountNumber: z.string().optional(),
   billingId: z.number().int().positive().optional(),
   energyKwh: z.number().int().positive().optional(), // for token purchase
+  email: z.string().email().optional(), // hosted-checkout gateways (paystack/flutterwave)
+  callbackUrl: z.string().url().optional(), // redirect after hosted checkout
 });
 
 /**
- * The only payment methods behind which this platform has a provider are the
- * three mobile-money gateways. `bank_transfer` and `card` are collected by the
- * schema but reach no provider, so a payment made with them is never asked for:
- * it can only sit pending until someone reads it as money on its way.
+ * The payment methods behind which this platform has a provider: the three
+ * mobile-money gateways plus the two Nigerian hosted-checkout providers.
+ * `bank_transfer` and `card` are collected by the schema but reach no
+ * provider, so a payment made with them is never asked for: it can only sit
+ * pending until someone reads it as money on its way.
  */
 const GATEWAY_INITIATORS = {
   mpesa: 'initiateMpesaPayment',
@@ -32,8 +38,16 @@ const GATEWAY_INITIATORS = {
 
 type GatewayMethod = keyof typeof GATEWAY_INITIATORS;
 
+/** Hosted-checkout providers (Paystack, Flutterwave) — server-side adapters. */
+const HOSTED_GATEWAYS = ['paystack', 'flutterwave'] as const;
+type HostedGateway = (typeof HOSTED_GATEWAYS)[number];
+
 function isGatewayMethod(method: string): method is GatewayMethod {
   return method in GATEWAY_INITIATORS;
+}
+
+function isHostedGateway(method: string): method is HostedGateway {
+  return (HOSTED_GATEWAYS as readonly string[]).includes(method);
 }
 
 /**
@@ -42,7 +56,116 @@ function isGatewayMethod(method: string): method is GatewayMethod {
  * than being shown a failure it can do nothing about.
  */
 function gatewayFailureCode(message: string): TRPCError['code'] {
-  return /_NOT_CONFIGURED$/.test(message) ? 'SERVICE_UNAVAILABLE' : 'BAD_GATEWAY';
+  return /_NOT_CONFIGURED$/.test(message) || /not_configured/i.test(message)
+    ? 'SERVICE_UNAVAILABLE'
+    : 'BAD_GATEWAY';
+}
+
+/**
+ * Initiate a hosted-checkout charge (Paystack or Flutterwave) for a payment
+ * row that already exists. Single row, single initiation: the provider
+ * reference becomes the payment's transactionId so the webhook can resolve
+ * it. Amount conventions: Paystack takes kobo — identical to the platform's
+ * minor units, passed unscaled; Flutterwave takes major units (naira), so
+ * the amount must be exactly representable (whole naira) or the charge is
+ * refused rather than rounded.
+ */
+async function initiateHostedCheckout(args: {
+  gateway: 'paystack' | 'flutterwave';
+  payment: { id: number };
+  amountCents: number;
+  currency: string;
+  accountReference: string;
+  email: string;
+  phoneNumber?: string;
+  callbackUrl?: string;
+  energyKwh?: number;
+}) {
+  const fail = async (code: TRPCError['code'], message: string) => {
+    // The provider never accepted a charge: retire the reservation instead of
+    // leaving a pending payment a status query could later resolve.
+    await db.updatePaymentStatus(args.payment.id, 'failed', undefined, 'pending');
+    throw new TRPCError({ code, message });
+  };
+
+  if (args.gateway === 'paystack') {
+    const response = await paystackService.initiatePayment({
+      email: args.email,
+      amount: args.amountCents, // platform cents == kobo for NGN
+      reference: args.accountReference,
+      callbackUrl: args.callbackUrl,
+      currency: args.currency,
+    });
+
+    if (!response.success || !response.reference) {
+      const message = response.error || 'Paystack rejected the payment request.';
+      return fail(gatewayFailureCode(message), message);
+    }
+
+    await db.updatePaymentMetadata(args.payment.id, {
+      ...(args.energyKwh ? { energyKwh: args.energyKwh } : {}),
+      gatewayReference: response.reference,
+      authorizationUrl: response.authorizationUrl,
+    });
+    await db.updatePaymentStatus(args.payment.id, 'pending', response.reference);
+
+    return {
+      success: true,
+      payment: { ...args.payment, transactionId: response.reference },
+      gatewayResponse: {
+        success: true,
+        transactionId: response.reference,
+        message: response.message || 'Paystack checkout initialized.',
+        authorizationUrl: response.authorizationUrl,
+      },
+      message: response.message || 'Paystack checkout initialized.',
+    };
+  }
+
+  // flutterwave
+  let amountMajor: number;
+  try {
+    amountMajor = paymentGateway.toGatewayMajorUnits(args.amountCents);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return fail('BAD_REQUEST', message);
+  }
+
+  const response = await flutterwaveService.initiatePayment({
+    txRef: args.accountReference,
+    amount: amountMajor,
+    currency: args.currency,
+    customer: {
+      email: args.email,
+      phonenumber: args.phoneNumber,
+      name: args.accountReference,
+    },
+    redirectUrl: args.callbackUrl,
+  });
+
+  if (!response.success || !response.txRef) {
+    const message = response.error || 'Flutterwave rejected the payment request.';
+    return fail(gatewayFailureCode(message), message);
+  }
+
+  await db.updatePaymentMetadata(args.payment.id, {
+    ...(args.energyKwh ? { energyKwh: args.energyKwh } : {}),
+    gatewayReference: response.txRef,
+    paymentLink: response.paymentLink,
+  });
+  await db.updatePaymentStatus(args.payment.id, 'pending', response.txRef);
+
+  return {
+    success: true,
+    payment: { ...args.payment, transactionId: response.txRef },
+    gatewayResponse: {
+      success: true,
+      transactionId: response.txRef,
+      message: response.message || 'Flutterwave checkout initialized.',
+      paymentLink: response.paymentLink,
+    },
+    message: response.message || 'Flutterwave checkout initialized.',
+  };
 }
 
 const VerifyPaymentInputSchema = z.object({
@@ -96,17 +219,27 @@ export const paymentsRouter = router({
 
         // Refuse before a payment row exists: a pending payment nobody will ever
         // ask a provider about is indistinguishable from one in flight.
-        if (!isGatewayMethod(input.paymentMethod)) {
+        if (!isGatewayMethod(input.paymentMethod) && !isHostedGateway(input.paymentMethod)) {
           throw new TRPCError({
             code: 'SERVICE_UNAVAILABLE',
             message: `PAYMENT_METHOD_NO_PROVIDER: ${input.paymentMethod} has no payment provider on this deployment.`,
           });
         }
 
-        if (!input.phoneNumber) {
+        if (isGatewayMethod(input.paymentMethod) && !input.phoneNumber) {
           throw new TRPCError({
             code: 'BAD_REQUEST',
             message: `phoneNumber is required to charge ${input.paymentMethod}.`,
+          });
+        }
+
+        // Hosted-checkout providers must email the customer their receipt and
+        // refuse initialization without one; fail before money is asked for.
+        const customerEmail = input.email ?? ctx.user.email ?? undefined;
+        if (isHostedGateway(input.paymentMethod) && !customerEmail) {
+          throw new TRPCError({
+            code: 'BAD_REQUEST',
+            message: `email is required to charge ${input.paymentMethod}.`,
           });
         }
 
@@ -123,10 +256,29 @@ export const paymentsRouter = router({
           metadata: input.energyKwh ? JSON.stringify({ energyKwh: input.energyKwh }) : undefined,
         });
 
+        const accountReference = `PAY${payment.id}`;
+
+        // Hosted-checkout providers (Paystack, Flutterwave) run through their
+        // server-side adapters; the customer completes the charge on the
+        // provider's checkout page and the webhook settles the payment.
+        if (isHostedGateway(input.paymentMethod)) {
+          return initiateHostedCheckout({
+            gateway: input.paymentMethod,
+            payment,
+            amountCents: input.amount,
+            currency: ctx.user.currency,
+            accountReference,
+            email: customerEmail!,
+            phoneNumber: input.phoneNumber,
+            callbackUrl: input.callbackUrl,
+            energyKwh: input.energyKwh,
+          });
+        }
+
         const request = {
           amount: input.amount,
-          phoneNumber: input.phoneNumber,
-          accountReference: `PAY${payment.id}`,
+          phoneNumber: input.phoneNumber!,
+          accountReference,
           description: `VPP ${input.paymentType} payment`,
         };
 
@@ -202,13 +354,16 @@ export const paymentsRouter = router({
           });
         }
 
-        // Verify payment with gateway. Only mobile-money gateway providers
-        // support self-service verification via the gateway status query.
-        const provider = payment.paymentMethod === 'mpesa' ? 'mpesa' 
+        // Verify payment with gateway. Mobile-money and hosted-checkout
+        // gateway providers support self-service verification via the gateway
+        // status query.
+        const provider = payment.paymentMethod === 'mpesa' ? 'mpesa'
           : payment.paymentMethod === 'airtel_money' ? 'airtel_money'
           : payment.paymentMethod === 'tigo_pesa' ? 'tigo_pesa'
+          : payment.paymentMethod === 'paystack' ? 'paystack'
+          : payment.paymentMethod === 'flutterwave' ? 'flutterwave'
           : null;
-        
+
         if (!provider) {
           throw new TRPCError({
             code: 'FORBIDDEN',
@@ -250,10 +405,50 @@ export const paymentsRouter = router({
           });
         }
 
-        const verificationResult = await paymentGateway.verifyPaymentStatus(
-          gatewayReference,
-          provider
-        );
+        let verificationResult: { status: string; message?: string };
+        if (provider === 'paystack') {
+          const r = await paystackService.queryPaymentStatus(gatewayReference);
+          if (!r.success) {
+            throw new TRPCError({
+              code: gatewayFailureCode(r.error || ''),
+              message: r.error || 'Paystack verification failed.',
+            });
+          }
+          // A completed charge whose kobo amount differs from the recorded
+          // payment is a discrepancy for reconciliation, not a settlement.
+          if (r.status === 'completed' && typeof r.amount === 'number' && Math.round(r.amount) !== payment.amount) {
+            throw new TRPCError({
+              code: 'BAD_REQUEST',
+              message: `Paystack reported ${r.amount} kobo but the payment records ${payment.amount}; held for reconciliation.`,
+            });
+          }
+          verificationResult = { status: r.status ?? 'pending', message: r.resultDesc };
+        } else if (provider === 'flutterwave') {
+          const r = await flutterwaveService.queryPaymentStatus(gatewayReference);
+          if (!r.success) {
+            throw new TRPCError({
+              code: gatewayFailureCode(r.error || ''),
+              message: r.error || 'Flutterwave verification failed.',
+            });
+          }
+          // Flutterwave reports major units (naira); scale exactly once.
+          if (
+            r.status === 'completed' &&
+            typeof r.amount === 'number' &&
+            Math.round(r.amount * 100) !== payment.amount
+          ) {
+            throw new TRPCError({
+              code: 'BAD_REQUEST',
+              message: `Flutterwave reported ${r.amount} but the payment records ${payment.amount} cents; held for reconciliation.`,
+            });
+          }
+          verificationResult = { status: r.status ?? 'pending', message: r.resultDesc };
+        } else {
+          verificationResult = await paymentGateway.verifyPaymentStatus(
+            gatewayReference,
+            provider
+          );
+        }
 
         if (verificationResult.status === 'completed') {
           const transitioned = await db.updatePaymentStatus(
@@ -273,15 +468,32 @@ export const paymentsRouter = router({
             };
           }
 
-          // Update billing if associated
+          // Settle the invoice only when the completed payments against it
+          // cover the invoiced consumer share. A partial payment is real
+          // money received, but it does not pay the invoice off — report the
+          // remainder honestly instead of marking the invoice paid.
           if (payment.billingId) {
-            await db.updateBillingStatus(
+            const dbInstance = await db.getDb();
+            if (!dbInstance) throw new Error('Database not available');
+            const settlement = await settleBillingIfCovered(
+              dbInstance,
               payment.billingId,
-              'paid',
-              new Date(),
               payment.paymentMethod,
               gatewayReference
             );
+
+            if (!settlement.paid) {
+              return {
+                success: true,
+                partial: true,
+                paidCents: settlement.totalPaidCents,
+                dueCents: settlement.dueCents,
+                message:
+                  `Payment verified, but the invoice is only partially covered ` +
+                  `(${settlement.totalPaidCents}/${settlement.dueCents} cents); it remains issued until fully paid.`,
+                token: null,
+              };
+            }
           }
 
           // Auto-generate token for token purchases

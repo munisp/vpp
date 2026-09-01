@@ -1,7 +1,16 @@
 import { z } from 'zod';
-import { protectedProcedure, router } from '../../_core/trpc';
+import { adminProcedure, protectedProcedure, router } from '../../_core/trpc';
 import { complianceAutomation } from '../../services/compliance-automation';
 
+/**
+ * Compliance automation router.
+ *
+ * Running checks, reading summaries, generating reports and seeding
+ * jurisdiction rules are regulatory operations over the whole platform's
+ * evidence, so they are admin-only (same guard as the other admin routers).
+ * Reading the active rule set for a jurisdiction stays authenticated-only:
+ * the rules themselves are public regulatory texts.
+ */
 export const complianceRouter = router({
   getActiveRules: protectedProcedure
     .input(z.object({ jurisdiction: z.string().default('NG') }).optional())
@@ -9,7 +18,7 @@ export const complianceRouter = router({
       return complianceAutomation.getActiveRules(input?.jurisdiction || 'NG');
     }),
 
-  runComplianceCheck: protectedProcedure
+  runComplianceCheck: adminProcedure
     .input(z.object({
       ruleId: z.number(),
       scopeType: z.enum(['user', 'asset', 'community', 'platform']),
@@ -22,7 +31,7 @@ export const complianceRouter = router({
       );
     }),
 
-    getComplianceSummary: protectedProcedure
+  getComplianceSummary: adminProcedure
       .input(z.object({
         scopeType: z.enum(['user', 'asset', 'community', 'platform']).default('user'),
         scopeId: z.number().optional(),
@@ -35,7 +44,7 @@ export const complianceRouter = router({
         );
       }),
 
-  generateComplianceReport: protectedProcedure
+  generateComplianceReport: adminProcedure
     .input(z.object({
       jurisdiction: z.string(),
       periodStart: z.date(),
@@ -51,7 +60,7 @@ export const complianceRouter = router({
       );
     }),
 
-  initializeJurisdictionRules: protectedProcedure
+  initializeJurisdictionRules: adminProcedure
     .input(z.object({ jurisdiction: z.string() }))
     .mutation(async ({ input }) => {
       return complianceAutomation.initializeJurisdictionRules(input.jurisdiction);

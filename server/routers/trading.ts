@@ -3,7 +3,8 @@ import { router, protectedProcedure, publicProcedure } from '../_core/trpc';
 import { TRPCError } from '@trpc/server';
 import * as db from '../db';
 import { trades, marketPrices } from '../../drizzle/schema';
-import { and, desc, eq, inArray, sql } from 'drizzle-orm';
+import { p2pSettlements } from '../../drizzle/innovations-schema';
+import { and, desc, eq, inArray, or, sql } from 'drizzle-orm';
 import { KAFKA_TOPICS } from '../integration/kafka-config';
 import { enqueueEvent } from '../services/events/outbox';
 import { temporalClient } from '../integration/temporal-client';
@@ -191,6 +192,32 @@ export const tradingRouter = router({
             code: 'INTERNAL_SERVER_ERROR',
             message: 'Database not available',
           });
+        }
+
+        // An 'executed' status is a claim that money and energy actually moved,
+        // so no caller — admin included — may set it by hand. It is only
+        // allowed when there is system evidence: a settlement row in its
+        // terminal 'complete' state linked to this trade (match + settlement
+        // linkage). The settlement pipeline is what reaches that state after
+        // payment and delivery are evidenced. Admins can still cancel a trade
+        // or mark it failed; they cannot declare it settled.
+        if (input.status === 'executed') {
+          const evidence = await conn
+            .select({ id: p2pSettlements.id, state: p2pSettlements.state })
+            .from(p2pSettlements)
+            .where(or(eq(p2pSettlements.buyTradeId, input.tradeId), eq(p2pSettlements.sellTradeId, input.tradeId)))
+            .limit(1);
+
+          if (evidence.length === 0 || evidence[0].state !== 'complete') {
+            throw new TRPCError({
+              code: 'FORBIDDEN',
+              message:
+                `Cannot mark trade ${input.tradeId} as executed without settlement evidence: ` +
+                'executed requires a p2p_settlements row in its terminal state linked to this trade. ' +
+                'The status is written by the settlement pipeline once payment and delivery are evidenced; ' +
+                'this API can only cancel a trade or mark it failed.',
+            });
+          }
         }
 
         // The settlement event belongs to the transition that caused it, so both

@@ -1,10 +1,15 @@
 /**
  * Energy Wallet + Auto Top-Up Service
  *
- * The wallet balance is DERIVED from the real ledger on every read:
+ * The wallet holds the CONSUMER's money, so both sides of the ledger speak in
+ * the consumer share (what the consumer owes/was credited), never the gross
+ * billing value that includes the platform's commission:
  *   balance = Σ(payments completed) + Σ(top-ups completed)
- *             − Σ(billings issued) − Σ(token purchases)
+ *             − Σ(billings consumerShare issued) − Σ(token purchases)
  * and each computation is persisted as an append-only snapshot for audit.
+ * (routers/payments.ts getBalance uses the same consumerShare convention; a
+ * totalValue subtraction would overstate what the consumer owes by the 30%
+ * commission the consumer never held.)
  *
  * Auto top-up: when the derived balance falls below the user's threshold and
  * autoTopUp is enabled, a REAL top-up is initiated through
@@ -17,7 +22,7 @@
  */
 
 import { getDb } from '../db';
-import { sql, desc, eq } from 'drizzle-orm';
+import { sql, desc, eq, and } from 'drizzle-orm';
 import {
   energyWallets,
   walletBalanceSnapshots,
@@ -80,8 +85,10 @@ export class EnergyWalletService {
     `);
     const ledger = paymentsResult.rows[0] || {};
 
+    // The consumer owes their SHARE of the billing, not the gross totalValue
+    // (which includes the 30% platform commission the consumer never held).
     const billingsResult = await db.execute<SqlRow>(sql`
-      SELECT COALESCE(SUM("totalValue"), 0) as issued_cents
+      SELECT COALESCE(SUM("consumerShare"), 0) as issued_cents
       FROM billings
       WHERE "userId" = ${userId} AND status IN ('issued', 'paid', 'overdue')
     `);
@@ -231,6 +238,10 @@ export class EnergyWalletService {
 
   /**
    * Initiate a real top-up through the configured gateway.
+   * - IN-FLIGHT GUARD: one live top-up per wallet. A per-user transaction-scoped
+   *   advisory lock serializes triggers; a second trigger that finds an
+   *   'initiated' attempt is refused with `already_in_progress` instead of
+   *   charging the customer twice.
    * - Gateway *_NOT_CONFIGURED / network throws are recorded as 'failed' and rethrown.
    * - Gateway rejection (success:false) is recorded as 'failed' and reported.
    * - Gateway acceptance (success:true) is recorded as 'initiated'. Completion
@@ -246,66 +257,94 @@ export class EnergyWalletService {
     const db = await getDb();
     if (!db) throw new Error('Database not available');
 
-    const accountReference = `WALLET-${userId}-${Date.now().toString(36)}`;
+    // The lock, the in-flight check and the attempt record commit in one
+    // transaction: a concurrent trigger either waits and then sees the
+    // 'initiated' row (refused) or fails outright — it can never slip a
+    // second gateway charge between the check and the insert.
+    return db.transaction(async (tx) => {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`wallet-topup:${userId}`}))`);
 
-    let gatewayResponse: PaymentResponse;
-    try {
-      gatewayResponse = await GATEWAY_INITIATORS[method]({
-        amount: amountCents,
-        phoneNumber,
-        accountReference,
-        description: `Energy wallet top-up (${triggerType})`,
-      });
-    } catch (error: any) {
-      // e.g. MPESA_NOT_CONFIGURED / AIRTEL_NOT_CONFIGURED / TIGO_NOT_CONFIGURED
-      await db.insert(walletTopUpAttempts).values({
+      const inFlight = await tx
+        .select({ id: walletTopUpAttempts.id })
+        .from(walletTopUpAttempts)
+        .where(and(
+          eq(walletTopUpAttempts.userId, userId),
+          eq(walletTopUpAttempts.status, 'initiated'),
+        ))
+        .limit(1);
+
+      if (inFlight.length > 0) {
+        console.warn(
+          `[EnergyWallet] Top-up refused for user ${userId}: attempt ${inFlight[0].id} is already in flight`
+        );
+        return {
+          topUpInitiated: false,
+          reason: 'already_in_progress',
+          attemptId: Number(inFlight[0].id),
+        };
+      }
+
+      const accountReference = `WALLET-${userId}-${Date.now().toString(36)}`;
+
+      let gatewayResponse: PaymentResponse;
+      try {
+        gatewayResponse = await GATEWAY_INITIATORS[method]({
+          amount: amountCents,
+          phoneNumber,
+          accountReference,
+          description: `Energy wallet top-up (${triggerType})`,
+        });
+      } catch (error: any) {
+        // e.g. MPESA_NOT_CONFIGURED / AIRTEL_NOT_CONFIGURED / TIGO_NOT_CONFIGURED
+        await tx.insert(walletTopUpAttempts).values({
+          userId,
+          amountCents,
+          method,
+          phoneNumber,
+          triggerType,
+          status: 'failed',
+          errorMessage: error.message || String(error),
+        });
+        throw error;
+      }
+
+      if (!gatewayResponse.success) {
+        const insertResult = await tx.insert(walletTopUpAttempts).values({
+          userId,
+          amountCents,
+          method,
+          phoneNumber,
+          triggerType,
+          status: 'failed',
+          errorMessage: gatewayResponse.error || gatewayResponse.message,
+        }).returning({ id: walletTopUpAttempts.id });
+        return {
+          topUpInitiated: false,
+          reason: 'gateway_rejected',
+          attemptId: Number(insertResult[0].id),
+          gatewayMessage: gatewayResponse.message,
+        };
+      }
+
+      const insertResult = await tx.insert(walletTopUpAttempts).values({
         userId,
         amountCents,
         method,
         phoneNumber,
         triggerType,
-        status: 'failed',
-        errorMessage: error.message || String(error),
-      });
-      throw error;
-    }
-
-    if (!gatewayResponse.success) {
-      const insertResult = await db.insert(walletTopUpAttempts).values({
-        userId,
-        amountCents,
-        method,
-        phoneNumber,
-        triggerType,
-        status: 'failed',
-        errorMessage: gatewayResponse.error || gatewayResponse.message,
+        status: 'initiated',
+        gatewayTransactionId: gatewayResponse.transactionId || null,
+        gatewayCheckoutId: gatewayResponse.checkoutRequestId || null,
       }).returning({ id: walletTopUpAttempts.id });
+
+      console.log(`[EnergyWallet] Top-up initiated for user ${userId}: ${amountCents}c via ${method} (${triggerType})`);
+
       return {
-        topUpInitiated: false,
-        reason: 'gateway_rejected',
+        topUpInitiated: true,
         attemptId: Number(insertResult[0].id),
         gatewayMessage: gatewayResponse.message,
       };
-    }
-
-    const insertResult = await db.insert(walletTopUpAttempts).values({
-      userId,
-      amountCents,
-      method,
-      phoneNumber,
-      triggerType,
-      status: 'initiated',
-      gatewayTransactionId: gatewayResponse.transactionId || null,
-      gatewayCheckoutId: gatewayResponse.checkoutRequestId || null,
-    }).returning({ id: walletTopUpAttempts.id });
-
-    console.log(`[EnergyWallet] Top-up initiated for user ${userId}: ${amountCents}c via ${method} (${triggerType})`);
-
-    return {
-      topUpInitiated: true,
-      attemptId: Number(insertResult[0].id),
-      gatewayMessage: gatewayResponse.message,
-    };
+    });
   }
 
   /**
@@ -317,10 +356,20 @@ export class EnergyWalletService {
     const db = await getDb();
     if (!db) throw new Error('Database not available');
 
+    // Only initiated attempts can be reconciled: filter and project in SQL
+    // rather than fetching every attempt row for the user.
     const initiated = await db
-      .select()
+      .select({
+        id: walletTopUpAttempts.id,
+        method: walletTopUpAttempts.method,
+        gatewayCheckoutId: walletTopUpAttempts.gatewayCheckoutId,
+        gatewayTransactionId: walletTopUpAttempts.gatewayTransactionId,
+      })
       .from(walletTopUpAttempts)
-      .where(eq(walletTopUpAttempts.userId, userId))
+      .where(and(
+        eq(walletTopUpAttempts.userId, userId),
+        eq(walletTopUpAttempts.status, 'initiated'),
+      ))
       .orderBy(desc(walletTopUpAttempts.createdAt));
 
     let completed = 0;
@@ -328,7 +377,7 @@ export class EnergyWalletService {
     let stillPending = 0;
     let checked = 0;
 
-    for (const attempt of initiated.filter(a => a.status === 'initiated')) {
+    for (const attempt of initiated) {
       const txnRef = attempt.method === 'mpesa'
         ? (attempt.gatewayCheckoutId || attempt.gatewayTransactionId)
         : (attempt.gatewayTransactionId || attempt.gatewayCheckoutId);

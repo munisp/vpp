@@ -32,13 +32,23 @@ const {
 
 /**
  * Payment Workflow Configuration
+ *
+ * The tRPC router (paymentProcessing.initiatePayment) initiates the charge
+ * and writes the payment row BEFORE starting this workflow, then passes its
+ * id. The workflow must therefore adopt that payment — re-initiating would
+ * charge the customer twice. `amount` is in the platform's canonical minor
+ * units (cents); the workflow never scales it.
  */
 export interface PaymentWorkflowInput {
+  /** Id of the payment row created (and gateway-initiated) by the caller. */
+  paymentId?: number;
   userId: number;
   billingId: number;
-  amount: number;
-  gateway: 'mpesa' | 'airtel' | 'tigo';
+  amount: number; // cents
+  gateway: 'mpesa' | 'airtel' | 'tigo' | 'airtel_money' | 'tigo_pesa';
   phoneNumber: string;
+  currency?: string;
+  metadata?: Record<string, any>;
 }
 
 export interface PaymentWorkflowResult {
@@ -65,14 +75,27 @@ export async function processPayment(
 ): Promise<PaymentWorkflowResult> {
   let transactionId: string | undefined;
 
+  // The Temporal client (integration/temporal-client.ts) passes ids as
+  // strings and carries billingId in metadata; normalise once, deterministically.
+  const userId = Number(input.userId);
+  const billingId = Number(input.billingId ?? input.metadata?.billingId);
+  const paymentId =
+    input.paymentId !== undefined && input.paymentId !== null
+      ? Number(input.paymentId)
+      : input.metadata?.paymentId
+        ? Number(input.metadata.paymentId)
+        : undefined;
+
   try {
-    // Step 1: Initiate payment with gateway
+    // Step 1: Adopt the caller-initiated payment, or initiate when this
+    // workflow is the first mover (no paymentId supplied).
     const initiateResult = await initiatePaymentActivity({
-      userId: input.userId,
-      billingId: input.billingId,
+      userId,
+      billingId,
       amount: input.amount,
       gateway: input.gateway,
       phoneNumber: input.phoneNumber,
+      paymentId,
     });
 
     if (!initiateResult.success || !initiateResult.transactionId) {
@@ -112,12 +135,15 @@ export async function processPayment(
       gateway: input.gateway,
     });
 
-    // Step 4: Update billing status to paid
-    await updateBillingStatusActivity(input.billingId, 'paid');
+    // Step 4: Update billing status to paid (the activity itself refuses to
+    // mark an under-covered invoice paid)
+    if (Number.isInteger(billingId) && billingId > 0) {
+      await updateBillingStatusActivity(billingId, 'paid');
+    }
 
     // Step 5: Send success notification
     await sendPaymentNotificationActivity(
-      input.userId,
+      userId,
       transactionId,
       'success'
     );
@@ -136,7 +162,7 @@ export async function processPayment(
         gateway: input.gateway,
       });
       await sendPaymentNotificationActivity(
-        input.userId,
+        userId,
         transactionId,
         'failed'
       );

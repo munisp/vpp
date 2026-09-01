@@ -59,7 +59,13 @@ function dbWith(seed: Seed) {
         if (table === assets) return Promise.resolve(seed.assetRows ?? []);
         if (table === telemetry) {
           return {
-            innerJoin: () => ({ where: () => Promise.resolve(seed.telemetryRows ?? []) }),
+            innerJoin: () => ({
+              where: () => ({
+                // collectSourceData reads the counter time-ordered per asset
+                // for meter-reset detection; fixtures are already in that order.
+                orderBy: () => Promise.resolve(seed.telemetryRows ?? []),
+              }),
+            }),
           };
         }
         if (table === billings) return { where: () => Promise.resolve(seed.billingRows ?? []) };
@@ -174,7 +180,7 @@ describe('nerc-franchise-reports', () => {
       assetsWithReadings: 5,
       boundaryMeterAssetIds: [1],
       assetsWithInsufficientReadings: [],
-      assetsExcludedMeterReset: [],
+      assetsWithMeterReset: [],
     });
 
     // Commercial — pinned computed numbers
@@ -261,6 +267,28 @@ describe('nerc-franchise-reports', () => {
     expect(s.technical.peakDemandKw).toEqual({ value: null, reason: 'no_power_readings' });
     expect(s.technical.systemAvailabilityPercent).toBe(0); // zero coverage is a real measurement
     expect(s.technical.supplyInterruptions.count).toBe(0);
+  });
+
+  it('(b3) a meter reset is handled: post-reset reading counted as the delta and the asset flagged, not excluded', async () => {
+    getDbMock.mockResolvedValue(
+      dbWith({
+        assetRows: [{ id: 2, assetType: 'meter', metadata: null }],
+        telemetryRows: [
+          // 900 -> 950 (+50), counter resets to 100 (+100 post-reset reading;
+          // the pre-reset tail is unknown), 100 -> 120 (+20). Total: 170 Wh.
+          { assetId: 2, timestamp: t(0), power: 900, energy: 900, assetType: 'meter', metadata: null },
+          { assetId: 2, timestamp: t(1), power: 950, energy: 950, assetType: 'meter', metadata: null },
+          { assetId: 2, timestamp: t(2), power: 100, energy: 100, assetType: 'meter', metadata: null },
+          { assetId: 2, timestamp: t(3), power: 120, energy: 120, assetType: 'meter', metadata: null },
+        ],
+      })
+    );
+
+    await generateFranchiseReport({ generatedBy: 7, periodStart: START, periodEnd: END, franchiseAreaName: AREA });
+    const s = storedSource();
+
+    expect(s.technical.energyDistributedKwh).toEqual({ value: 0.17, reason: null });
+    expect(s.technical.metering.assetsWithMeterReset).toEqual([2]);
   });
 
   it('(d) database unavailable: throws instead of fabricating a report', async () => {

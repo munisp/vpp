@@ -1,4 +1,5 @@
 import {
+  index,
   boolean,
   integer as int,
   pgTable,
@@ -44,7 +45,10 @@ export const priceAlerts = pgTable("price_alerts", {
   
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().$onUpdate(() => new Date()).notNull(),
-});
+}, (table) => [
+  // Per-user alert lists (db-price-alerts.ts getPriceAlertsByUserId)
+  index("price_alerts_user_idx").on(table.userId),
+]);
 
 export type PriceAlert = typeof priceAlerts.$inferSelect;
 export type InsertPriceAlert = typeof priceAlerts.$inferInsert;

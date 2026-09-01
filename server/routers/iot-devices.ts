@@ -4,7 +4,7 @@ import { protectedProcedure, router } from '../_core/trpc';
 import { mqttBrokerService } from '../integration/mqtt-broker';
 import { getDb } from '../db';
 import { telemetry, assets, devices } from '../../drizzle/schema';
-import { eq, desc, and, gte } from 'drizzle-orm';
+import { eq, desc, and, gte, lte, sql } from 'drizzle-orm';
 
 async function requireDb() {
   const db = await getDb();
@@ -80,12 +80,15 @@ export const iotDevicesRouter = router({
         .where(
           and(
             eq(telemetry.assetId, input.assetId),
-            gte(telemetry.timestamp, input.startTime)
+            gte(telemetry.timestamp, input.startTime),
+            // Bound the range in SQL: without the upper bound this scans
+            // everything from startTime to the end of the table.
+            lte(telemetry.timestamp, input.endTime)
           )
         )
         .orderBy(telemetry.timestamp);
 
-      return readings.filter(r => r.timestamp <= input.endTime);
+      return readings;
     }),
 
   /**
@@ -102,8 +105,16 @@ export const iotDevicesRouter = router({
 
       const startTime = new Date(Date.now() - input.hours * 3600000);
 
-      const readings = await db
-        .select()
+      // Aggregate in SQL over the telemetry_asset_ts_idx range instead of
+      // pulling up to 720h of raw rows into memory.
+      const [agg] = await db
+        .select({
+          readingsCount: sql<number>`count(*)::int`,
+          avgPower: sql<number | null>`avg(${telemetry.power})`,
+          maxPower: sql<number | null>`max(${telemetry.power})`,
+          minPower: sql<number | null>`min(${telemetry.power})`,
+          totalEnergy: sql<number | null>`sum(${telemetry.energy})`,
+        })
         .from(telemetry)
         .where(
           and(
@@ -112,7 +123,8 @@ export const iotDevicesRouter = router({
           )
         );
 
-      if (readings.length === 0) {
+      const readingsCount = Number(agg?.readingsCount ?? 0);
+      if (readingsCount === 0) {
         return {
           avgPower: 0,
           maxPower: 0,
@@ -122,15 +134,12 @@ export const iotDevicesRouter = router({
         };
       }
 
-      const powers = readings.map(r => r.power).filter(p => p !== null) as number[];
-      const energies = readings.map(r => r.energy).filter(e => e !== null) as number[];
-
       return {
-        avgPower: powers.length > 0 ? powers.reduce((a, b) => a + b, 0) / powers.length : 0,
-        maxPower: powers.length > 0 ? Math.max(...powers) : 0,
-        minPower: powers.length > 0 ? Math.min(...powers) : 0,
-        totalEnergy: energies.length > 0 ? energies.reduce((a, b) => a + b, 0) : 0,
-        readingsCount: readings.length,
+        avgPower: agg?.avgPower != null ? Number(agg.avgPower) : 0,
+        maxPower: agg?.maxPower != null ? Number(agg.maxPower) : 0,
+        minPower: agg?.minPower != null ? Number(agg.minPower) : 0,
+        totalEnergy: agg?.totalEnergy != null ? Number(agg.totalEnergy) : 0,
+        readingsCount,
       };
     }),
 

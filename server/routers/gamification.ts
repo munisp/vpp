@@ -92,6 +92,17 @@ export const gamificationRouter = router({
     }),
 
   /**
+   * Surface a period's earned rewards (admin only). There is no payout rail,
+   * so this reports the awards as 'pending_rail' and pays nothing out rather
+   * than marking them paid.
+   */
+  disbursePeriodRewards: adminProcedure
+    .input(z.object({ period: z.enum(['daily', 'weekly', 'monthly', 'all_time']) }))
+    .mutation(async ({ input }) => {
+      return await GamificationEngine.disbursePeriodRewards(input.period);
+    }),
+
+  /**
    * Initialize default achievements (admin only)
    */
   initializeAchievements: adminProcedure.mutation(async () => {

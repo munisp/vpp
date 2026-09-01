@@ -15,7 +15,7 @@
  *  - Every dispatch attempt is persisted to price_alert_dispatch_log.
  */
 
-import { eq } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
 import { getDb, getCurrentPrice } from "../db";
 import { users } from "../../drizzle/schema";
 import { priceAlertMarketScopes, priceAlertDispatchLog } from "../../drizzle/trust-access-schema";
@@ -56,17 +56,6 @@ export interface EvaluationSummary {
   errors: Array<{ priceAlertId: number; error: string }>;
 }
 
-async function getAlertScope(priceAlertId: number): Promise<{ country: Country; priceType: PriceType } | null> {
-  const db = await getDb();
-  if (!db) return null;
-  const rows = await db
-    .select()
-    .from(priceAlertMarketScopes)
-    .where(eq(priceAlertMarketScopes.priceAlertId, priceAlertId))
-    .limit(1);
-  return rows[0] ? { country: rows[0].country, priceType: rows[0].priceType } : null;
-}
-
 /**
  * Evaluate all active price alerts against the latest market prices and
  * dispatch notifications. Safe to call from a scheduler: dedupe is handled
@@ -77,6 +66,40 @@ export async function checkPriceAlerts(): Promise<EvaluationSummary> {
   if (!db) throw new Error("Database not available");
 
   const activeAlerts = await getAllActivePriceAlerts();
+
+  // Batch the per-alert lookups: one query for all market scopes and one for
+  // the fallback user countries, instead of two queries per alert.
+  const alertIds = activeAlerts.map((a) => a.id);
+  const scopeByAlertId = new Map<number, { country: Country; priceType: PriceType }>();
+  if (alertIds.length > 0) {
+    const scopeRows = await db
+      .select({
+        priceAlertId: priceAlertMarketScopes.priceAlertId,
+        country: priceAlertMarketScopes.country,
+        priceType: priceAlertMarketScopes.priceType,
+      })
+      .from(priceAlertMarketScopes)
+      .where(inArray(priceAlertMarketScopes.priceAlertId, alertIds));
+    for (const row of scopeRows) {
+      scopeByAlertId.set(row.priceAlertId, { country: row.country, priceType: row.priceType });
+    }
+  }
+  const scopelessUserIds = [
+    ...new Set(
+      activeAlerts.filter((a) => !scopeByAlertId.has(a.id)).map((a) => a.userId)
+    ),
+  ];
+  const countryByUserId = new Map<number, Country>();
+  if (scopelessUserIds.length > 0) {
+    const userRows = await db
+      .select({ id: users.id, country: users.country })
+      .from(users)
+      .where(inArray(users.id, scopelessUserIds));
+    for (const row of userRows) {
+      countryByUserId.set(row.id, row.country as Country);
+    }
+  }
+
   const summary: EvaluationSummary = {
     evaluatedAt: new Date().toISOString(),
     activeAlerts: activeAlerts.length,
@@ -91,13 +114,12 @@ export async function checkPriceAlerts(): Promise<EvaluationSummary> {
       // Market scope: companion table wins; otherwise fall back to the user's
       // country and evaluate all price types (legacy alerts created before
       // scopes existed).
-      const scope = await getAlertScope(alert.id);
+      const scope = scopeByAlertId.get(alert.id) ?? null;
       let candidates: Array<{ country: Country; priceType: PriceType }>;
       if (scope) {
         candidates = [scope];
       } else {
-        const userRows = await db.select({ country: users.country }).from(users).where(eq(users.id, alert.userId)).limit(1);
-        const country = (userRows[0]?.country ?? "tanzania") as Country;
+        const country = countryByUserId.get(alert.userId) ?? "tanzania";
         candidates = PRICE_TYPES.map((priceType) => ({ country, priceType }));
       }
 

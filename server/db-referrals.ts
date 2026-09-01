@@ -120,6 +120,12 @@ export async function applyReferralCode(
 
   const referral = result[0];
 
+  // Self-referral is reward farming, not a referral: the referrer referring
+  // their own account (or their own email address) must never complete.
+  if (referral.referrerId === refereeId) {
+    throw new Error("Self-referral is not allowed: you cannot refer your own account");
+  }
+
   // Check if expired
   if (referral.expiresAt && referral.expiresAt < new Date()) {
     throw new Error("Referral code has expired");
@@ -128,6 +134,20 @@ export async function applyReferralCode(
   // Check if already used
   if (referral.status !== "pending") {
     throw new Error("Referral code already used");
+  }
+
+  // Same person behind a second account: the referrer's own email as the
+  // referee's email is a self-referral too.
+  if (refereeEmail) {
+    const referrerRows = await db
+      .select({ email: users.email })
+      .from(users)
+      .where(eq(users.id, referral.referrerId))
+      .limit(1);
+    const referrerEmail = referrerRows[0]?.email;
+    if (referrerEmail && referrerEmail.trim().toLowerCase() === refereeEmail.trim().toLowerCase()) {
+      throw new Error("Self-referral is not allowed: the referral code belongs to this email address");
+    }
   }
 
   // Update referral with referee information
@@ -169,6 +189,12 @@ export async function processReferralReward(referralId: number) {
 
   if (referral.status === "rewarded") {
     throw new Error("Reward already processed");
+  }
+
+  // A self-referral that predates the apply-time guard must still never pay
+  // out: the reward step is the last place to refuse it loudly.
+  if (referral.refereeId !== null && referral.refereeId === referral.referrerId) {
+    throw new Error("Self-referral is not rewardable: referrer and referee are the same account");
   }
 
   return await db.transaction(async (tx) => {

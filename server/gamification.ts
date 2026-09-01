@@ -137,9 +137,16 @@ export class GamificationEngine {
         break;
     }
 
-    // Get all participant scores
+    // Get all participant scores (only the columns the ranking actually reads)
     const scores = await db
-      .select()
+      .select({
+        userId: participantScores.userId,
+        overallScore: participantScores.overallScore,
+        reliabilityScore: participantScores.reliabilityScore,
+        totalEventsParticipated: participantScores.totalEventsParticipated,
+        averageReduction: participantScores.averageReduction,
+        totalCompensationEarned: participantScores.totalCompensationEarned,
+      })
       .from(participantScores)
       .orderBy(desc(participantScores.overallScore));
 
@@ -148,7 +155,11 @@ export class GamificationEngine {
     
     if (period !== 'all_time') {
       const periodResponses = await db
-        .select()
+        .select({
+          userId: drResponses.userId,
+          actualReduction: drResponses.actualReduction,
+          compensation: drResponses.compensation,
+        })
         .from(drResponses)
         .where(
           and(
@@ -182,35 +193,69 @@ export class GamificationEngine {
         )
       );
 
+    // Ranking differs by period kind. all_time ranks by the accumulated
+    // overallScore, as before. A windowed period must rank by what happened
+    // INSIDE the window: ranking a daily board by all-time score would hand
+    // the daily reward to whoever has the highest lifetime score, regardless
+    // of whether they did anything today. The period score is the window's
+    // total reduction; compensation breaks ties; userId keeps it
+    // deterministic.
+    const reliabilityByUser = new Map(scores.map(s => [s.userId, s.reliabilityScore]));
+
+    type Candidate = {
+      userId: number;
+      score: number;
+      eventsParticipated: number;
+      totalReduction: number;
+      compensationEarned: number;
+      reliabilityScore: number;
+    };
+
+    let candidates: Candidate[];
+    if (period === 'all_time') {
+      candidates = scores.map(score => ({
+        userId: score.userId,
+        score: score.overallScore,
+        eventsParticipated: score.totalEventsParticipated,
+        totalReduction: (score.averageReduction || 0) * score.totalEventsParticipated,
+        compensationEarned: score.totalCompensationEarned,
+        reliabilityScore: score.reliabilityScore,
+      }));
+      candidates.sort((a, b) => b.score - a.score || a.userId - b.userId);
+    } else {
+      candidates = Array.from(periodMetrics.entries())
+        // No activity in the window means no place on the window's board.
+        .filter(([, m]) => m.eventsParticipated > 0)
+        .map(([userId, m]) => ({
+          userId,
+          score: m.totalReduction,
+          eventsParticipated: m.eventsParticipated,
+          totalReduction: m.totalReduction,
+          compensationEarned: m.compensationEarned,
+          reliabilityScore: reliabilityByUser.get(userId) ?? 0,
+        }));
+      candidates.sort(
+        (a, b) =>
+          b.totalReduction - a.totalReduction ||
+          b.compensationEarned - a.compensationEarned ||
+          a.userId - b.userId
+      );
+    }
+
     // Create new entries
     let rank = 1;
-    for (const score of scores) {
-      const metrics = period === 'all_time' 
-        ? {
-            eventsParticipated: score.totalEventsParticipated,
-            totalReduction: (score.averageReduction || 0) * score.totalEventsParticipated,
-            compensationEarned: score.totalCompensationEarned,
-          }
-        : (periodMetrics.get(score.userId) || {
-            eventsParticipated: 0,
-            totalReduction: 0,
-            compensationEarned: 0,
-          });
-
-      // Skip if no activity in period
-      if (period !== 'all_time' && metrics.eventsParticipated === 0) continue;
-
+    for (const candidate of candidates) {
       const entry: InsertLeaderboardEntry = {
-        userId: score.userId,
+        userId: candidate.userId,
         period,
         periodStart,
         periodEnd,
         rank,
-        score: score.overallScore,
-        eventsParticipated: metrics.eventsParticipated,
-        totalReduction: metrics.totalReduction,
-        compensationEarned: metrics.compensationEarned,
-        reliabilityScore: score.reliabilityScore,
+        score: candidate.score,
+        eventsParticipated: candidate.eventsParticipated,
+        totalReduction: candidate.totalReduction,
+        compensationEarned: candidate.compensationEarned,
+        reliabilityScore: candidate.reliabilityScore,
         rewardAmount: this.calculateReward(rank, period),
         rewardPaid: false,
       };
@@ -220,6 +265,103 @@ export class GamificationEngine {
     }
 
     return rank - 1;
+  }
+
+  /**
+   * Surface the rewards a period's leaderboard has earned.
+   *
+   * The platform has no monetary payout rail for gamification rewards (no
+   * disbursement provider, no points balance in the wallet — wallet balances
+   * derive only from real money flows). So nothing is marked paid here:
+   * `rewardPaid` stays false and every award is returned with the loud status
+   * 'pending_rail'. Silently crediting a wallet or flipping rewardPaid would
+   * be a fake payout; silently dropping the rewards would hide money owed.
+   */
+  static async disbursePeriodRewards(period: 'daily' | 'weekly' | 'monthly' | 'all_time'): Promise<{
+    period: string;
+    periodStart: Date;
+    periodEnd: Date;
+    status: 'pending_rail' | 'no_rewards';
+    reason: string;
+    awards: Array<{
+      entryId: number;
+      userId: number;
+      rank: number;
+      rewardAmount: number;
+      rewardPaid: false;
+      status: 'pending_rail';
+    }>;
+  }> {
+    const db = await getDb();
+    if (!db) throw new Error('Database not available');
+
+    const now = new Date();
+    let periodStart: Date;
+    let periodEnd: Date = now;
+
+    switch (period) {
+      case 'daily':
+        periodStart = startOfDay(now);
+        break;
+      case 'weekly':
+        periodStart = startOfWeek(now);
+        break;
+      case 'monthly':
+        periodStart = startOfMonth(now);
+        break;
+      case 'all_time':
+        periodStart = new Date(0);
+        break;
+    }
+
+    const entries = await db
+      .select()
+      .from(leaderboardEntries)
+      .where(
+        and(
+          eq(leaderboardEntries.period, period),
+          gte(leaderboardEntries.periodStart, periodStart),
+          sql`${leaderboardEntries.rewardAmount} > 0`
+        )
+      )
+      .orderBy(leaderboardEntries.rank);
+
+    if (entries.length === 0) {
+      return {
+        period,
+        periodStart,
+        periodEnd,
+        status: 'no_rewards',
+        reason: `No ${period} leaderboard entries carry a reward, so there is nothing to disburse.`,
+        awards: [],
+      };
+    }
+
+    const reason =
+      'The platform has no reward payout rail (no disbursement provider and no points balance): ' +
+      'these rewards are earned and recorded but cannot be paid out yet. rewardPaid is left false ' +
+      'so no reader can mistake them for completed payouts.';
+
+    console.warn(
+      `[Gamification] ${entries.length} ${period} reward(s) earned but pending_rail: no payout rail exists. ` +
+        `Entries: ${entries.map(e => `#${e.id} user=${e.userId} rank=${e.rank} amount=${e.rewardAmount}c`).join(', ')}`
+    );
+
+    return {
+      period,
+      periodStart,
+      periodEnd,
+      status: 'pending_rail',
+      reason,
+      awards: entries.map(e => ({
+        entryId: e.id,
+        userId: e.userId,
+        rank: e.rank,
+        rewardAmount: e.rewardAmount ?? 0,
+        rewardPaid: false,
+        status: 'pending_rail' as const,
+      })),
+    };
   }
 
   /**

@@ -193,16 +193,19 @@ export class CommunityPoolsService {
     }).returning({ id: allocationRuns.id });
     const runId = Number(runInsert[0].id);
 
-    for (let i = 0; i < shares.length; i++) {
-      await db.insert(allocationEntries).values({
-        runId,
-        communityId,
-        userId: shares[i].userId,
-        shareBps: Math.round(shares[i].share * 10000),
-        generationWh: Math.round(shares[i].generationWh),
-        consumptionWh: Math.round(shares[i].consumptionWh),
-        allocatedValueCents: rawCents[i],
-      });
+    if (shares.length > 0) {
+      // One multi-row INSERT instead of one round trip per member.
+      await db.insert(allocationEntries).values(
+        shares.map((share, i) => ({
+          runId,
+          communityId,
+          userId: share.userId,
+          shareBps: Math.round(share.share * 10000),
+          generationWh: Math.round(share.generationWh),
+          consumptionWh: Math.round(share.consumptionWh),
+          allocatedValueCents: rawCents[i],
+        }))
+      );
     }
 
     console.log(`[CommunityPools] Allocation run ${runId} for community ${communityId}: rule=${rule.ruleType}, net=${netValueCents}c across ${shares.length} members`);

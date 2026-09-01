@@ -49,6 +49,19 @@ vi.mock('../db', () => ({
           return { where: vi.fn(() => Promise.resolve()) };
         }),
       })),
+      // processRefund claims the payment inside a transaction: the tx client
+      // serves the locked row via execute() and records updates via update().
+      transaction: vi.fn(async (fn: (tx: any) => Promise<unknown>) =>
+        fn({
+          execute: vi.fn(() => Promise.resolve({ rows: h.paymentRow ? [h.paymentRow] : [] })),
+          update: vi.fn(() => ({
+            set: vi.fn((vals: any) => {
+              h.updates.push(vals);
+              return { where: vi.fn(() => Promise.resolve({ rowCount: 1 })) };
+            }),
+          })),
+        })
+      ),
     })
   ),
 }));

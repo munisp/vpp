@@ -1,4 +1,5 @@
 import {
+  index,
   boolean,
   integer as int,
   json,
@@ -70,7 +71,10 @@ export const tradingStrategies = pgTable("trading_strategies", {
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().$onUpdate(() => new Date()).notNull(),
   lastActivatedAt: timestamp("lastActivatedAt"),
-});
+}, (table) => [
+  // Strategy lists per user (strategy routers/services)
+  index("trading_strategies_user_idx").on(table.userId),
+]);
 
 export type TradingStrategy = typeof tradingStrategies.$inferSelect;
 export type InsertTradingStrategy = typeof tradingStrategies.$inferInsert;

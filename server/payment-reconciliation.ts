@@ -186,8 +186,9 @@ export class PaymentReconciliationEngine {
     const db = await getDb();
     if (!db) throw new Error('Database not available');
 
+    // Only the id is needed: reconcilePayment re-loads each payment by id.
     const paymentsToReconcile = await db
-      .select()
+      .select({ id: payments.id })
       .from(payments)
       .where(
         and(

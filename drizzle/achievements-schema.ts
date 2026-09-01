@@ -1,4 +1,5 @@
 import {
+  index,
   boolean,
   integer as int,
   pgEnum,
@@ -55,9 +56,12 @@ export const userAchievements = pgTable("user_achievements", {
   
   unlockedAt: timestamp("unlocked_at").defaultNow().notNull(),
   notified: boolean("notified").default(false).notNull(),
-  
+
   metadata: text("metadata"), // JSON for additional data
-});
+}, (table) => [
+  // Per-user achievement lists and unlock checks (gamification.ts)
+  index("user_achievements_user_idx").on(table.userId),
+]);
 
 export type UserAchievement = typeof userAchievements.$inferSelect;
 export type InsertUserAchievement = typeof userAchievements.$inferInsert;
@@ -88,7 +92,13 @@ export const leaderboardEntries = pgTable("leaderboard_entries", {
   
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().$onUpdate(() => new Date()).notNull(),
-});
+}, (table) => [
+  // Leaderboard reads filter (period, periodStart >=) ordered by rank
+  // (gamification.ts)
+  index("leaderboard_entries_period_idx").on(table.period, table.periodStart),
+  // "My rank" lookups filter (userId, period)
+  index("leaderboard_entries_user_idx").on(table.userId, table.period),
+]);
 
 export type LeaderboardEntry = typeof leaderboardEntries.$inferSelect;
 export type InsertLeaderboardEntry = typeof leaderboardEntries.$inferInsert;

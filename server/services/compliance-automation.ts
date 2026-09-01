@@ -314,6 +314,10 @@ export class ComplianceAutomationService {
       status = 'non_compliant';
     } else if (findings.some(f => f.severity === 'major')) {
       status = 'non_compliant';
+    } else if (findings.some(f => f.findingCode === 'EVIDENCE_UNAVAILABLE')) {
+      // The evidence source has no data (e.g. a table with no writer wired):
+      // the requirement is unverifiable, which is not the same as met.
+      status = 'pending_review';
     } else if (findings.some(f => f.severity === 'minor')) {
       status = 'warning';
     }
@@ -607,26 +611,48 @@ export class ComplianceAutomationService {
 
     // Check complaint response times
     if (requirements.complaint_response_hours) {
-      const overdueResult = await db.execute<SqlRow>(sql`
+      // support_tickets has no writer wired anywhere in the platform, so an
+      // empty table is not "no complaints" — it is no evidence. Report the
+      // requirement as unverifiable instead of passing it.
+      const totalResult = await db.execute<SqlRow>(sql`
         SELECT COUNT(*) as count FROM support_tickets
-        WHERE status = 'open'
-          AND created_at < (NOW() - (${requirements.complaint_response_hours} * INTERVAL '1 hour'))
       `);
-      const overdueCount = overdueResult.rows[0]?.count || 0;
+      const totalTickets = Number(totalResult.rows[0]?.count || 0);
 
-      if (overdueCount > 0) {
+      if (totalTickets === 0) {
         findings.push({
-          findingCode: 'COMPLAINT_RESPONSE_OVERDUE',
-          severity: 'minor',
-          description: `${overdueCount} complaints exceed response time requirement`,
+          findingCode: 'EVIDENCE_UNAVAILABLE',
+          severity: 'warning',
+          description:
+            'Complaint response compliance cannot be evidenced: support_tickets holds no rows and no support-ticket writer is wired on the platform',
           requirement: `Respond to complaints within ${requirements.complaint_response_hours} hours`,
-          actualValue: `${overdueCount} overdue complaints`,
-          expectedValue: '0 overdue complaints',
-          remediation: 'Address overdue complaints immediately',
+          actualValue: 'no_data',
+          expectedValue: 'complaint records to evaluate',
+          remediation: 'Wire support ticket capture before claiming complaint-response compliance',
         });
-      }
+        evidenceReferences.push('complaint_evidence:no_data');
+      } else {
+        const overdueResult = await db.execute<SqlRow>(sql`
+          SELECT COUNT(*) as count FROM support_tickets
+          WHERE status = 'open'
+            AND created_at < (NOW() - (${requirements.complaint_response_hours} * INTERVAL '1 hour'))
+        `);
+        const overdueCount = overdueResult.rows[0]?.count || 0;
 
-      evidenceReferences.push(`overdue_complaints:${overdueCount}`);
+        if (overdueCount > 0) {
+          findings.push({
+            findingCode: 'COMPLAINT_RESPONSE_OVERDUE',
+            severity: 'minor',
+            description: `${overdueCount} complaints exceed response time requirement`,
+            requirement: `Respond to complaints within ${requirements.complaint_response_hours} hours`,
+            actualValue: `${overdueCount} overdue complaints`,
+            expectedValue: '0 overdue complaints',
+            remediation: 'Address overdue complaints immediately',
+          });
+        }
+
+        evidenceReferences.push(`overdue_complaints:${overdueCount}`);
+      }
     }
 
     // Check service availability
@@ -641,7 +667,21 @@ export class ComplianceAutomationService {
       `);
       const uptimeStats = uptimeResult.rows[0] || {};
 
-      if (uptimeStats.total_checks > 0) {
+      // health_checks has no writer wired anywhere in the platform, so zero
+      // rows is missing evidence, not 100% uptime.
+      if (!(uptimeStats.total_checks > 0)) {
+        findings.push({
+          findingCode: 'EVIDENCE_UNAVAILABLE',
+          severity: 'warning',
+          description:
+            'Service availability compliance cannot be evidenced: health_checks holds no rows in the last 30 days and no health-check writer is wired on the platform',
+          requirement: `Maintain ${requirements.service_availability * 100}% service availability`,
+          actualValue: 'no_data',
+          expectedValue: 'health check measurements to evaluate',
+          remediation: 'Wire health check measurement before claiming service-availability compliance',
+        });
+        evidenceReferences.push('availability_evidence:no_data');
+      } else {
         const availability = uptimeStats.healthy_checks / uptimeStats.total_checks;
         if (availability < requirements.service_availability) {
           findings.push({

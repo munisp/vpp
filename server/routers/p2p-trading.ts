@@ -3,9 +3,10 @@ import { router, protectedProcedure } from '../_core/trpc';
 import { TRPCError } from '@trpc/server';
 import { getDb } from '../db';
 import { assets, trades, users } from '../../drizzle/schema';
-import { p2pSettlements } from '../../drizzle/innovations-schema';
-import { and, desc, eq, inArray, isNull, ne, or } from 'drizzle-orm';
+import { p2pMatches, p2pSettlements } from '../../drizzle/innovations-schema';
+import { and, desc, eq, inArray, isNull, ne, or, sql } from 'drizzle-orm';
 import { P2pSettlementError, startTradePayment } from '../services/p2p-settlement';
+import { filledEnergySql } from '../services/p2p-matching';
 import {
   ParticipantError,
   counterpartyFacts,
@@ -86,8 +87,10 @@ export const p2pTradingRouter = router({
       const conditions = [
         eq(trades.tradeType, 'p2p_sell'),
         eq(trades.status, 'pending'),
-        // Already matched offers are no longer available, even though the
-        // trade stays pending until settlement.
+        // Offers matched through the offer/accept path name their buyer here.
+        // Offers matched through the order book do NOT (a fill can have several
+        // counterparties), so availability is decided by the committed quantity
+        // below, not by this column alone.
         isNull(trades.counterpartyId),
       ];
       conditions.push(ne(trades.userId, ctx.user.id));
@@ -101,6 +104,7 @@ export const p2pTradingRouter = router({
           totalAmount: trades.totalAmount,
           timestamp: trades.timestamp,
           createdAt: trades.createdAt,
+          committed: filledEnergySql,
           sellerName: users.name,
           // A buyer is entitled to know whether the counterparty is a household
           // or a business trading under a registered name.
@@ -114,7 +118,20 @@ export const p2pTradingRouter = router({
         .orderBy(desc(trades.createdAt))
         .limit(input?.limit ?? 50);
 
-      return offers;
+      // What is actually for sale is what the matcher has not already
+      // committed: an offer with 60 of its 100 kWh filled by order-book matches
+      // shows 40, and a fully filled offer is not shown at all.
+      return offers
+        .map(o => {
+          const committedEnergyWh = Number(o.committed ?? 0);
+          return {
+            ...o,
+            committedEnergyWh,
+            availableEnergyWh: o.energy - committedEnergyWh,
+          };
+        })
+        .filter(o => o.availableEnergyWh > 0)
+        .map(({ committed: _committed, ...o }) => o);
     }),
 
   // The caller's own P2P trades (both offers and purchases)
@@ -189,9 +206,18 @@ export const p2pTradingRouter = router({
       };
     }),
 
-  // Accept an open offer: atomically marks it executed and records the buy side
+  // Accept an open offer: records the match in p2p_matches (the same source of
+  // truth the order book writes) and the buyer's counter trade. The acceptable
+  // quantity is what the order book has NOT already committed — accepting more
+  // than remains would sell the same energy twice.
   acceptOffer: protectedProcedure
-    .input(z.object({ offerId: z.number().int().positive() }))
+    .input(
+      z.object({
+        offerId: z.number().int().positive(),
+        // Defaults to everything still available on the offer.
+        energyWh: z.number().int().positive().optional(),
+      })
+    )
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Database not available' });
@@ -199,11 +225,15 @@ export const p2pTradingRouter = router({
       const buyer = await toParticipant(ctx.user.id);
 
       return db.transaction(async (tx) => {
+        // Lock the offer row for the whole accept: the committed-quantity read
+        // below is only race-free if a concurrent accept or matcher fill
+        // against the same offer has to wait for this transaction.
         const [offer] = await tx
           .select()
           .from(trades)
           .where(eq(trades.id, input.offerId))
-          .limit(1);
+          .limit(1)
+          .for('update');
 
         if (!offer || offer.tradeType !== 'p2p_sell') {
           throw new TRPCError({ code: 'NOT_FOUND', message: 'P2P offer not found.' });
@@ -215,32 +245,67 @@ export const p2pTradingRouter = router({
           throw new TRPCError({ code: 'CONFLICT', message: 'This offer has already been taken or cancelled.' });
         }
 
+        // Available = listed − committed by matcher fills. This is the
+        // double-sell guard: p2p_matches rows are commitments against the same
+        // energy, so they come off the top before anything is accepted here.
+        const committedRows = await tx
+          .select({ committed: sql<number>`COALESCE(SUM(${p2pMatches.energyWh}), 0)` })
+          .from(p2pMatches)
+          .where(eq(p2pMatches.sellOrderId, offer.id));
+        const committedWh = Number(committedRows[0]?.committed ?? 0);
+        const availableWh = offer.energy - committedWh;
+        if (availableWh <= 0) {
+          throw new TRPCError({
+            code: 'CONFLICT',
+            message: 'This offer has been fully matched through the order book; nothing remains to accept.',
+          });
+        }
+
+        const acceptWh = input.energyWh ?? availableWh;
+        if (acceptWh > availableWh) {
+          throw new TRPCError({
+            code: 'CONFLICT',
+            message: `Only ${availableWh} Wh of this offer remain available (${committedWh} Wh already matched); accepting ${acceptWh} Wh would sell the same energy twice.`,
+          });
+        }
+
+        const amountCents = Math.floor((acceptWh * offer.price) / 1000);
+        if (amountCents <= 0) {
+          throw new TRPCError({
+            code: 'BAD_REQUEST',
+            message: 'Accepted quantity is too small to price; accept more energy.',
+          });
+        }
+
         const seller = await toParticipant(offer.userId);
         const parties = counterpartyFacts(seller, buyer);
 
-        // Conditional update on both status and counterparty: only one buyer
-        // can win the offer, and the offer is not settled here.
-        const updateResult = await tx
-          .update(trades)
-          .set({
-            counterpartyId: ctx.user.id,
-            metadata: JSON.stringify({
-              ...(offer.metadata ? JSON.parse(offer.metadata) : {}),
-              settlement: 'awaiting_payment',
-              matchedAt: new Date().toISOString(),
-              ...parties,
-            }),
-          })
-          .where(
-            and(
-              eq(trades.id, input.offerId),
-              eq(trades.status, 'pending'),
-              isNull(trades.counterpartyId)
-            )
-          );
+        // Fully consumed offers name their buyer and leave the market;
+        // partially consumed ones stay open for the remainder.
+        const fullyConsumed = acceptWh === availableWh;
+        if (fullyConsumed) {
+          const updateResult = await tx
+            .update(trades)
+            .set({
+              counterpartyId: ctx.user.id,
+              metadata: JSON.stringify({
+                ...(offer.metadata ? JSON.parse(offer.metadata) : {}),
+                settlement: 'awaiting_payment',
+                matchedAt: new Date().toISOString(),
+                ...parties,
+              }),
+            })
+            .where(
+              and(
+                eq(trades.id, input.offerId),
+                eq(trades.status, 'pending'),
+                isNull(trades.counterpartyId)
+              )
+            );
 
-        if (affectedRows(updateResult) === 0) {
-          throw new TRPCError({ code: 'CONFLICT', message: 'This offer has already been taken.' });
+          if (affectedRows(updateResult) === 0) {
+            throw new TRPCError({ code: 'CONFLICT', message: 'This offer has already been taken.' });
+          }
         }
 
         // Record the buyer's counter trade, also awaiting settlement.
@@ -248,9 +313,9 @@ export const p2pTradingRouter = router({
           userId: ctx.user.id,
           tradeType: 'p2p_buy',
           tradingMode: 'p2p',
-          energy: offer.energy,
+          energy: acceptWh,
           price: offer.price,
-          totalAmount: offer.totalAmount,
+          totalAmount: amountCents,
           timestamp: new Date(),
           status: 'pending',
           counterpartyId: offer.userId,
@@ -261,14 +326,30 @@ export const p2pTradingRouter = router({
             ...parties,
           }),
         }).returning({ id: trades.id });
+        const buyTradeId = Number(buyInsert[0].id);
+
+        // The match row is what settlement resolves against; it must name both
+        // order ids or the seller leg is invisible to delivery measurement.
+        const matchInsert = await tx.insert(p2pMatches).values({
+          buyOrderId: buyTradeId,
+          sellOrderId: offer.id,
+          buyerId: ctx.user.id,
+          sellerId: offer.userId,
+          energyWh: acceptWh,
+          priceCentsPerKwh: offer.price,
+          totalAmountCents: amountCents,
+        }).returning({ id: p2pMatches.id });
 
         return {
           success: true,
           offerId: offer.id,
-          buyTradeId: Number(buyInsert[0].id),
+          buyTradeId,
+          matchId: Number(matchInsert[0].id),
+          acceptedEnergyWh: acceptWh,
+          remainingEnergyWh: availableWh - acceptWh,
           settlement: 'awaiting_payment' as const,
           relation: parties.relation,
-          amountDueCents: offer.totalAmount,
+          amountDueCents: amountCents,
           message:
             'Offer matched. The trade settles once your payment clears and the energy transfer is confirmed.',
         };

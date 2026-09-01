@@ -129,6 +129,8 @@ export type InsertUser = typeof users.$inferInsert;
  */
 export const assets = pgTable("assets", {
   id: serial("id").primaryKey(),
+  // Indexed: every per-user asset list (dashboards, dispatch, billing) filters
+  // on userId (~20 eq(assets.userId, ...) call sites in server/).
   userId: int("userId").notNull(),
   assetType: assetsAssetTypeEnum("assetType").notNull(),
   name: varchar("name", { length: 255 }).notNull(),
@@ -142,7 +144,9 @@ export const assets = pgTable("assets", {
   metadata: text("metadata"), // JSON string for additional data
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().$onUpdate(() => new Date()).notNull(),
-});
+}, (table) => [
+  index("assets_user_idx").on(table.userId),
+]);
 
 export type Asset = typeof assets.$inferSelect;
 export type InsertAsset = typeof assets.$inferInsert;
@@ -194,7 +198,10 @@ export const contracts = pgTable("contracts", {
   metadata: text("metadata"), // JSON string for contract terms
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().$onUpdate(() => new Date()).notNull(),
-});
+}, (table) => [
+  // getActiveContractForUser filters (userId, status); per-user contract lists
+  index("contracts_user_idx").on(table.userId),
+]);
 
 export type Contract = typeof contracts.$inferSelect;
 export type InsertContract = typeof contracts.$inferInsert;
@@ -216,7 +223,12 @@ export const trades = pgTable("trades", {
   metadata: text("metadata"), // JSON string for trade details
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().$onUpdate(() => new Date()).notNull(),
-});
+}, (table) => [
+  // Per-user trade history + status slices (energy-advisor, trading router)
+  index("trades_user_status_idx").on(table.userId, table.status),
+  // Admin analytics and p2p-matching scan by status over createdAt ranges
+  index("trades_status_created_idx").on(table.status, table.createdAt),
+]);
 
 export type Trade = typeof trades.$inferSelect;
 export type InsertTrade = typeof trades.$inferInsert;
@@ -233,7 +245,13 @@ export const marketPrices = pgTable("marketPrices", {
   validUntil: timestamp("validUntil").notNull(),
   metadata: text("metadata"), // JSON string for market data
   createdAt: timestamp("createdAt").defaultNow().notNull(),
-});
+}, (table) => [
+  // Latest-price-per-country lookups (ml-predictions, dynamic-tariffs) filter
+  // by country and order/range by timestamp
+  index("market_prices_country_ts_idx").on(table.country, table.timestamp),
+  // Country-agnostic time-range scans (dr-pricing, ev-charging, community-energy)
+  index("market_prices_ts_idx").on(table.timestamp),
+]);
 
 export type MarketPrice = typeof marketPrices.$inferSelect;
 export type InsertMarketPrice = typeof marketPrices.$inferInsert;
@@ -262,7 +280,10 @@ export const billings = pgTable("billings", {
   metadata: text("metadata"), // JSON string for billing details
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().$onUpdate(() => new Date()).notNull(),
-});
+}, (table) => [
+  // Per-user billing history (db.ts, energy-advisor, sms-commands, ntl-detection)
+  index("billings_user_idx").on(table.userId),
+]);
 
 export type Billing = typeof billings.$inferSelect;
 export type InsertBilling = typeof billings.$inferInsert;
@@ -289,7 +310,20 @@ export const payments = pgTable("payments", {
   metadata: text("metadata"), // JSON string for payment details
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().$onUpdate(() => new Date()).notNull(),
-});
+}, (table) => [
+  // Per-user payment history filtered by status (payments router, sms-commands)
+  index("payments_user_status_idx").on(table.userId, table.status),
+  // Admin analytics revenue sums/counts filter status over createdAt ranges
+  index("payments_status_created_idx").on(table.status, table.createdAt),
+  // Billing router looks up payments per invoice
+  index("payments_billing_idx").on(table.billingId),
+  // Gateway callbacks resolve a payment by provider transaction id
+  // (webhooks/payment-callbacks.ts)
+  index("payments_transaction_idx").on(table.transactionId),
+  // P2P settlement loads all payments for a trade; the existing
+  // payments_p2p_trade_live_uq partial unique only covers live rows
+  index("payments_p2p_trade_idx").on(table.p2pTradeId),
+]);
 
 export type Payment = typeof payments.$inferSelect;
 export type InsertPayment = typeof payments.$inferInsert;
@@ -317,7 +351,12 @@ export const tokens = pgTable(
   // two customers' meters can legitimately be handed the same digits. The code is
   // therefore unique per customer, so one customer's vend cannot displace
   // another's or be looked up by them.
-  (table) => [uniqueIndex("tokens_user_code_unique").on(table.userId, table.tokenCode)]
+  (table) => [
+    uniqueIndex("tokens_user_code_unique").on(table.userId, table.tokenCode),
+    // Token issuance/lookup by the payment that funded it (db.ts,
+    // prepaid-energy, payment webhooks)
+    index("tokens_payment_idx").on(table.paymentId),
+  ]
 );
 
 export type Token = typeof tokens.$inferSelect;
@@ -337,7 +376,10 @@ export const alerts = pgTable("alerts", {
   readAt: timestamp("readAt"),
   metadata: text("metadata"),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
-});
+}, (table) => [
+  // Per-user alert feed (db.ts getAlertsByUser)
+  index("alerts_user_idx").on(table.userId),
+]);
 
 export type Alert = typeof alerts.$inferSelect;
 export type InsertAlert = typeof alerts.$inferInsert;
@@ -400,7 +442,10 @@ export const devices = pgTable("devices", {
   
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().$onUpdate(() => new Date()).notNull(),
-});
+}, (table) => [
+  // Device lookups by owning asset (devices-db.ts, inverter-faults)
+  index("devices_asset_idx").on(table.assetId),
+]);
 
 export type Device = typeof devices.$inferSelect;
 export type InsertDevice = typeof devices.$inferInsert;
@@ -418,7 +463,10 @@ export const deviceCommands = pgTable("device_commands", {
   acknowledgedAt: timestamp("acknowledgedAt"),
   response: text("response"), // JSON string
   createdAt: timestamp("createdAt").defaultNow().notNull(),
-});
+}, (table) => [
+  // Command history per device (devices-db.ts)
+  index("device_commands_device_idx").on(table.deviceId),
+]);
 
 export type DeviceCommand = typeof deviceCommands.$inferSelect;
 export type InsertDeviceCommand = typeof deviceCommands.$inferInsert;
@@ -433,7 +481,10 @@ export const deviceLogs = pgTable("device_logs", {
   message: text("message").notNull(),
   metadata: text("metadata"), // JSON string
   createdAt: timestamp("createdAt").defaultNow().notNull(),
-});
+}, (table) => [
+  // Log tail per device (devices-db.ts)
+  index("device_logs_device_idx").on(table.deviceId),
+]);
 
 export type DeviceLog = typeof deviceLogs.$inferSelect;
 export type InsertDeviceLog = typeof deviceLogs.$inferInsert;
@@ -455,7 +506,10 @@ export const demandResponseEvents = pgTable("demandResponseEvents", {
   metadata: text("metadata"),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().$onUpdate(() => new Date()).notNull(),
-});
+}, (table) => [
+  // DR automation polls scheduled/active events; dr-db filters by status
+  index("demand_response_events_status_idx").on(table.status),
+]);
 
 export type DemandResponseEvent = typeof demandResponseEvents.$inferSelect;
 export type InsertDemandResponseEvent = typeof demandResponseEvents.$inferInsert;
@@ -475,7 +529,10 @@ export const drParticipants = pgTable("drParticipants", {
   metadata: text("metadata"),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().$onUpdate(() => new Date()).notNull(),
-});
+}, (table) => [
+  // Enrollment lookups per user (dr-db, dr-segmentation)
+  index("dr_participants_user_idx").on(table.userId),
+]);
 
 export type DrParticipant = typeof drParticipants.$inferSelect;
 export type InsertDrParticipant = typeof drParticipants.$inferInsert;
@@ -496,7 +553,13 @@ export const drResponses = pgTable("drResponses", {
   metadata: text("metadata"),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().$onUpdate(() => new Date()).notNull(),
-});
+}, (table) => [
+  // Joined from demandResponseEvents and scanned per event (dr-db,
+  // dr-automation, participant-insights)
+  index("dr_responses_event_idx").on(table.eventId),
+  // Per-user participation history (participant-insights, dr-automation)
+  index("dr_responses_user_idx").on(table.userId),
+]);
 
 export type DrResponse = typeof drResponses.$inferSelect;
 export type InsertDrResponse = typeof drResponses.$inferInsert;
@@ -518,7 +581,10 @@ export const drCompensation = pgTable("drCompensation", {
   metadata: text("metadata"),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().$onUpdate(() => new Date()).notNull(),
-});
+}, (table) => [
+  // Per-user compensation history (dr-db, participant-insights)
+  index("dr_compensation_user_idx").on(table.userId),
+]);
 
 export type DrCompensation = typeof drCompensation.$inferSelect;
 export type InsertDrCompensation = typeof drCompensation.$inferInsert;
@@ -706,7 +772,11 @@ export const gridMonitoring = pgTable("grid_monitoring", {
   
   metadata: text("metadata"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
-});
+}, (table) => [
+  // "Latest grid status" polls order by timestamp desc (dr-automation,
+  // dr-forecasting, dr-pricing, drForecasting router)
+  index("grid_monitoring_ts_idx").on(table.timestamp),
+]);
 
 export type GridMonitoring = typeof gridMonitoring.$inferSelect;
 export type InsertGridMonitoring = typeof gridMonitoring.$inferInsert;

@@ -1,4 +1,5 @@
 import {
+  index,
   integer as int,
   pgEnum,
   pgTable,
@@ -74,7 +75,11 @@ export const auditLogs = pgTable("audit_logs", {
   errorMessage: text("error_message"), // If status is failure
   
   createdAt: timestamp("created_at").defaultNow().notNull(),
-});
+}, (table) => [
+  // Admin audit-log UI pages order by createdAt desc with date-range filters
+  // (routers/auditLogs.ts)
+  index("audit_logs_created_idx").on(table.createdAt),
+]);
 
 export type AuditLog = typeof auditLogs.$inferSelect;
 export type InsertAuditLog = typeof auditLogs.$inferInsert;

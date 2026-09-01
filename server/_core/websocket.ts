@@ -5,32 +5,9 @@ import * as db from '../db';
 import { users } from '../../drizzle/schema';
 import { sdk } from './sdk';
 import { COOKIE_NAME } from '@shared/const';
+import { resolveAllowedOrigins } from '../security/cors';
 
 let io: SocketIOServer | null = null;
-
-/**
- * Allowed cross-origin clients for the WebSocket server.
- * Configured via ALLOWED_ORIGINS (comma-separated). When unset, no CORS
- * headers are emitted, which restricts connections to same-origin clients.
- * Origin '*' is never allowed.
- */
-function resolveAllowedOrigins(): string[] | undefined {
-  const raw = process.env.ALLOWED_ORIGINS || process.env.CORS_ORIGINS || '';
-  const origins = raw
-    .split(',')
-    .map((o) => o.trim())
-    .filter((o) => o.length > 0 && o !== '*');
-
-  if (origins.length === 0) {
-    if (process.env.NODE_ENV === 'production') {
-      console.warn(
-        '[WebSocket] ALLOWED_ORIGINS is not set — cross-origin WebSocket connections are disabled (same-origin only)'
-      );
-    }
-    return undefined;
-  }
-  return origins;
-}
 
 /**
  * Authenticate a socket.io handshake using the same session cookie/JWT
@@ -67,7 +44,10 @@ async function authenticateSocket(socket: Socket): Promise<number | null> {
 }
 
 export function initializeWebSocket(httpServer: HTTPServer) {
-  const allowedOrigins = resolveAllowedOrigins();
+  // Same allowlist as the HTTP API (server/security/cors.ts): unset in
+  // production denies cross-origin connections; development falls back to
+  // localhost ports; '*' is never honoured.
+  const allowedOrigins = resolveAllowedOrigins().origins;
 
   io = new SocketIOServer(httpServer, {
     ...(allowedOrigins

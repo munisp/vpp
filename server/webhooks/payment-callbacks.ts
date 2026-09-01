@@ -1,18 +1,22 @@
 /**
  * Payment Gateway Webhook Handlers
- * 
- * Handles callbacks from payment gateways (M-Pesa, Airtel Money, Tigo Pesa)
+ *
+ * Handles callbacks from payment gateways (M-Pesa, Airtel Money, Tigo Pesa,
+ * Paystack, Flutterwave).
  * Production-ready with idempotency, environment configuration, and post-payment actions
  */
 
 import { Request, Response } from 'express';
+import { createHmac, timingSafeEqual } from 'crypto';
 import { PaymentGatewayManager } from '../payment-gateways';
 import { getDb } from '../db';
 import { payments, billings, paymentGatewayLogs, tokens, users } from '../../drizzle/schema';
-import { eq, and } from 'drizzle-orm';
+import { eq, and, or, sql } from 'drizzle-orm';
 import { sendPushNotification } from '../_core/sendNotification';
 import { resolveGatewayEnvironment } from '../payment-gateways/environment';
 import { issuePrepaidTokenForPayment } from '../services/prepaid-issuance-entry';
+import { paystackService } from '../services/paystack-service';
+import { flutterwaveService } from '../services/flutterwave-service';
 
 // Environment configuration - single authoritative source, never a request value
 const PAYMENTS_ENV = resolveGatewayEnvironment();
@@ -158,6 +162,62 @@ export async function handleTigoCallback(req: Request, res: Response) {
 }
 
 /**
+ * Resolve the payment row a gateway callback refers to.
+ *
+ * At initiation the stored `payments.transactionId` is the reference the
+ * provider returns FIRST (M-Pesa: MerchantRequestID or CheckoutRequestID,
+ * recorded both in the column and in metadata). A success callback instead
+ * carries the final receipt (M-Pesa: MpesaReceiptNumber), which never equals
+ * those initiation references — so a receipt-only lookup settles nothing.
+ * Resolution order:
+ *   1. exact transactionId hit (Airtel/Tigo/Paystack/Flutterwave references,
+ *      M-Pesa failure callbacks keyed by MerchantRequestID, settled rows)
+ *   2. M-Pesa: match the callback's CheckoutRequestID against the stored
+ *      transactionId or the metadata references written at initiation.
+ */
+async function resolvePaymentForCallback(db: any, callbackData: any): Promise<any | null> {
+  const direct = await db
+    .select()
+    .from(payments)
+    .where(eq(payments.transactionId, callbackData.transactionId))
+    .limit(1);
+  if (direct.length > 0) return direct[0];
+
+  const checkoutRequestId = callbackData.checkoutRequestId;
+  if (checkoutRequestId) {
+    const byCheckout = await db
+      .select()
+      .from(payments)
+      .where(
+        or(
+          eq(payments.transactionId, checkoutRequestId),
+          sql`${payments.metadata} ->> 'gatewayReference' = ${checkoutRequestId}`,
+          sql`${payments.metadata} ->> 'checkoutRequestId' = ${checkoutRequestId}`
+        )
+      )
+      .limit(1);
+    if (byCheckout.length > 0) return byCheckout[0];
+  }
+
+  const merchantRequestId = callbackData.metadata?.MerchantRequestID || callbackData.merchantRequestId;
+  if (merchantRequestId) {
+    const byMerchant = await db
+      .select()
+      .from(payments)
+      .where(
+        or(
+          eq(payments.transactionId, merchantRequestId),
+          sql`${payments.metadata} ->> 'merchantRequestId' = ${merchantRequestId}`
+        )
+      )
+      .limit(1);
+    if (byMerchant.length > 0) return byMerchant[0];
+  }
+
+  return null;
+}
+
+/**
  * Update payment record from callback data with idempotency
  * Returns true if state transition occurred, false if already processed
  */
@@ -170,19 +230,13 @@ async function updatePaymentFromCallback(
     throw new Error('Database not available');
   }
 
-  // Find payment by transaction ID
-  const payment = await db
-    .select()
-    .from(payments)
-    .where(eq(payments.transactionId, callbackData.transactionId))
-    .limit(1);
+  const pmt = await resolvePaymentForCallback(db, callbackData);
 
-  if (payment.length === 0) {
+  if (!pmt) {
     console.warn(`Payment not found for transaction: ${callbackData.transactionId}`);
     return false;
   }
 
-  const pmt = payment[0];
   const previousStatus = pmt.status;
   let newStatus: 'completed' | 'failed' =
     callbackData.status === 'completed' ? 'completed' : 'failed';
@@ -225,16 +279,35 @@ async function updatePaymentFromCallback(
   // Update payment status atomically. affectedRows tells us whether THIS call
   // performed the transition; concurrent duplicate callbacks see 0 rows and
   // must not run the post-payment actions again.
+  //
+  // On settlement the provider's final receipt becomes the transactionId
+  // (M-Pesa: MpesaReceiptNumber), replacing the initiation reference the row
+  // was created with — the receipt is what reversals and customer support
+  // quote. The initiation references stay in metadata for audit.
+  const mpesaReceipt =
+    gateway === 'mpesa' && newStatus === 'completed'
+      ? callbackData.metadata?.MpesaReceiptNumber ?? callbackData.transactionId
+      : undefined;
+
   const result = await db
     .update(payments)
     .set({
       status: newStatus,
+      ...(callbackData.transactionId ? { transactionId: callbackData.transactionId } : {}),
       metadata: JSON.stringify({
         ...(pmt.metadata ? JSON.parse(pmt.metadata) : {}),
         callback: callbackData,
         processedAt: new Date().toISOString(),
         gateway,
         environment: PAYMENTS_ENV,
+        // The reversal API keys off the M-Pesa receipt number; persist it on
+        // the row so refunds can target the original transaction.
+        ...(mpesaReceipt ? { mpesaReceiptNumber: mpesaReceipt } : {}),
+        // Flutterwave refunds target the numeric transaction id, learned from
+        // the webhook payload.
+        ...(gateway === 'flutterwave' && callbackData.flutterwaveTransactionId
+          ? { flutterwaveTransactionId: callbackData.flutterwaveTransactionId }
+          : {}),
       }),
     })
     .where(and(
@@ -259,6 +332,57 @@ async function updatePaymentFromCallback(
 }
 
 /**
+ * Mark a billing paid only when the completed payments recorded against it
+ * cover the invoiced consumer share. Anything less leaves the invoice
+ * 'issued' — a partially paid invoice reported as paid is money the books
+ * claim arrived that never did.
+ */
+export async function settleBillingIfCovered(
+  db: any,
+  billingId: number,
+  paymentMethod?: string | null,
+  transactionId?: string | null
+): Promise<{ paid: boolean; totalPaidCents: number; dueCents: number }> {
+  const billingRows = await db
+    .select()
+    .from(billings)
+    .where(eq(billings.id, billingId))
+    .limit(1);
+  const billing = billingRows[0];
+  if (!billing) {
+    console.error(`[PostPayment] Billing ${billingId} not found; cannot settle`);
+    return { paid: false, totalPaidCents: 0, dueCents: 0 };
+  }
+
+  const [paidRow] = await db
+    .select({ total: sql<number>`COALESCE(SUM(${payments.amount}), 0)` })
+    .from(payments)
+    .where(and(eq(payments.billingId, billingId), eq(payments.status, 'completed')));
+
+  const totalPaidCents = Number(paidRow?.total ?? 0);
+  const dueCents = billing.consumerShare;
+
+  if (totalPaidCents >= dueCents) {
+    await db
+      .update(billings)
+      .set({
+        status: 'paid',
+        paidAt: new Date(),
+        ...(paymentMethod ? { paymentMethod } : {}),
+        ...(transactionId ? { transactionId } : {}),
+      })
+      .where(and(
+        eq(billings.id, billingId),
+        // Idempotent - only settle an invoice that is still outstanding
+        or(eq(billings.status, 'issued'), eq(billings.status, 'overdue'))
+      ));
+    return { paid: true, totalPaidCents, dueCents };
+  }
+
+  return { paid: false, totalPaidCents, dueCents };
+}
+
+/**
  * Execute post-payment actions based on payment type
  * All actions are idempotent - safe to call multiple times
  */
@@ -278,21 +402,24 @@ async function executePostPaymentActions(
     switch (paymentType) {
       case 'invoice':
       case 'billing':
-        // Update billing record to paid
+        // An invoice is only settled when the COMPLETED payments against it
+        // cover the invoiced consumer share; a partial payment is real money
+        // received but does not pay the invoice off.
         if (payment.billingId) {
-          await db
-            .update(billings)
-            .set({
-              status: 'paid',
-              paidAt: new Date(),
-              paymentMethod: payment.paymentMethod,
-              transactionId: callbackData.transactionId,
-            })
-            .where(and(
-              eq(billings.id, payment.billingId),
-              eq(billings.status, 'issued') // Idempotent - only update if issued
-            ));
-          console.log(`[PostPayment] Billing ${payment.billingId} marked as paid`);
+          const settlement = await settleBillingIfCovered(
+            db,
+            payment.billingId,
+            payment.paymentMethod,
+            callbackData.transactionId
+          );
+          if (settlement.paid) {
+            console.log(`[PostPayment] Billing ${payment.billingId} marked as paid`);
+          } else {
+            console.warn(
+              `[PostPayment] Billing ${payment.billingId} partially paid: ` +
+                `${settlement.totalPaidCents}/${settlement.dueCents} cents; invoice remains issued`
+            );
+          }
         }
         break;
 
@@ -457,5 +584,160 @@ async function handlePaymentFailure(
     console.log(`[PaymentCallback] Failure notification sent for payment ${payment.id}`);
   } catch (error) {
     console.error('[PaymentCallback] Error sending failure notification:', error);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Paystack / Flutterwave webhooks
+//
+// Both providers authenticate webhooks with secrets only the platform and the
+// provider know. FAIL-CLOSED: when the secret is unset the webhook is refused
+// with 503 (a loud misconfiguration) — an unverifiable payment notification is
+// rejected, never accepted.
+//
+// NOTE: paymentGatewayLogs.gateway is a pg enum limited to the three
+// mobile-money gateways, so these events are not written to that table; the
+// payment row's metadata records the verified callback for audit.
+// ---------------------------------------------------------------------------
+
+/** Raw bytes the provider signed, mirroring verify-signature.ts. */
+function webhookBodyBytes(req: Request): Buffer {
+  const raw = (req as Request & { rawBody?: Buffer }).rawBody;
+  if (raw && Buffer.isBuffer(raw)) return raw;
+  return Buffer.from(JSON.stringify(req.body ?? {}), 'utf8');
+}
+
+function safeEqualHex(a: string, b: string): boolean {
+  const bufA = Buffer.from(a, 'utf8');
+  const bufB = Buffer.from(b, 'utf8');
+  if (bufA.length !== bufB.length) return false;
+  return timingSafeEqual(bufA, bufB);
+}
+
+/**
+ * Paystack webhook: verifies HMAC-SHA512 of the raw body in the
+ * `x-paystack-signature` header (keyed with PAYSTACK_SECRET_KEY), then handles
+ * `charge.success` by VERIFYING the transaction against the Paystack API before
+ * settling — a webhook alone is a claim, not a confirmation.
+ */
+export async function handlePaystackCallback(req: Request, res: Response) {
+  const secret = process.env.PAYSTACK_SECRET_KEY;
+  if (!secret) {
+    console.error('[PaystackWebhook] PAYSTACK_SECRET_KEY is not set; refusing unverifiable webhook');
+    res.status(503).json({
+      error: 'PAYSTACK_NOT_CONFIGURED',
+      message: 'Paystack webhook verification is not configured (PAYSTACK_SECRET_KEY unset).',
+    });
+    return;
+  }
+
+  const signature = req.header('x-paystack-signature');
+  const expected = createHmac('sha512', secret).update(webhookBodyBytes(req)).digest('hex');
+  if (!signature || !safeEqualHex(signature, expected)) {
+    console.error('[PaystackWebhook] Signature mismatch; rejecting');
+    res.status(401).json({ error: 'INVALID_SIGNATURE', message: 'Paystack signature verification failed.' });
+    return;
+  }
+
+  try {
+    const event = req.body;
+    if (event?.event === 'charge.success' && event.data?.reference) {
+      const reference: string = event.data.reference;
+
+      // Confirm with the gateway itself before any money is recorded.
+      const verification = await paystackService.queryPaymentStatus(reference);
+      if (!verification.success || verification.status !== 'completed') {
+        console.error(
+          `[PaystackWebhook] charge.success for ${reference} did not verify as completed ` +
+            `(${verification.status ?? verification.error}); not settling`
+        );
+        res.status(200).json({ received: true, settled: false });
+        return;
+      }
+
+      // Paystack reports kobo; the platform stores kobo for NGN — unscaled.
+      await updatePaymentFromCallback(
+        {
+          transactionId: reference,
+          amount: verification.amount,
+          status: 'completed',
+          metadata: { paystackEvent: event },
+        },
+        'paystack'
+      );
+    }
+
+    res.status(200).json({ received: true });
+  } catch (error: any) {
+    console.error('[PaystackWebhook] Processing error:', error);
+    res.status(500).json({ error: 'PROCESSING_FAILED', message: error.message || 'Failed to process webhook' });
+  }
+}
+
+/**
+ * Flutterwave webhook: the `verif-hash` header must equal the
+ * FLUTTERWAVE_SECRET_HASH configured on the Flutterwave dashboard. A
+ * successful charge is then VERIFIED against the Flutterwave API before
+ * settling.
+ */
+export async function handleFlutterwaveCallback(req: Request, res: Response) {
+  const secretHash = process.env.FLUTTERWAVE_SECRET_HASH;
+  if (!secretHash) {
+    console.error('[FlutterwaveWebhook] FLUTTERWAVE_SECRET_HASH is not set; refusing unverifiable webhook');
+    res.status(503).json({
+      error: 'FLUTTERWAVE_NOT_CONFIGURED',
+      message: 'Flutterwave webhook verification is not configured (FLUTTERWAVE_SECRET_HASH unset).',
+    });
+    return;
+  }
+
+  const verifHash = req.header('verif-hash');
+  if (!verifHash || !safeEqualHex(verifHash, secretHash)) {
+    console.error('[FlutterwaveWebhook] verif-hash mismatch; rejecting');
+    res.status(401).json({ error: 'INVALID_SIGNATURE', message: 'Flutterwave verif-hash verification failed.' });
+    return;
+  }
+
+  try {
+    const event = req.body;
+    const data = event?.data;
+    if (data?.status === 'successful' && (data.tx_ref || data.id)) {
+      // Confirm with the gateway itself before any money is recorded. The
+      // numeric id is preferred for verification; tx_ref is our stored handle.
+      const verification = data.id !== undefined
+        ? await flutterwaveService.verifyTransaction(String(data.id))
+        : await flutterwaveService.queryPaymentStatus(String(data.tx_ref));
+
+      if (!verification.success || verification.status !== 'completed') {
+        console.error(
+          `[FlutterwaveWebhook] successful charge for ${data.tx_ref} did not verify as completed ` +
+            `(${verification.status ?? verification.error}); not settling`
+        );
+        res.status(200).json({ received: true, settled: false });
+        return;
+      }
+
+      // Flutterwave reports MAJOR units (naira); the platform stores minor
+      // units (kobo), so the verified amount is scaled exactly once here.
+      const amountCents =
+        typeof verification.amount === 'number' ? Math.round(verification.amount * 100) : undefined;
+
+      await updatePaymentFromCallback(
+        {
+          transactionId: String(data.tx_ref),
+          amount: amountCents,
+          status: 'completed',
+          flutterwaveTransactionId:
+            verification.transactionId ?? (data.id !== undefined ? String(data.id) : undefined),
+          metadata: { flutterwaveEvent: event },
+        },
+        'flutterwave'
+      );
+    }
+
+    res.status(200).json({ received: true });
+  } catch (error: any) {
+    console.error('[FlutterwaveWebhook] Processing error:', error);
+    res.status(500).json({ error: 'PROCESSING_FAILED', message: error.message || 'Failed to process webhook' });
   }
 }

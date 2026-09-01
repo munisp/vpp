@@ -1,6 +1,5 @@
 import "dotenv/config";
 import express from "express";
-import helmet from "helmet";
 import rateLimit from "express-rate-limit";
 import { createServer } from "http";
 import net from "net";
@@ -15,7 +14,7 @@ import { startStatusUpdateJob } from "./qrStatusUpdater";
 import { initScheduledReportJobs } from "./scheduledReports";
 import { startAutomationScheduler } from "../dr-automation";
 import { ensureSchedules } from "../integration/temporal-client";
-import { handleMpesaCallback, handleAirtelCallback, handleTigoCallback } from "../webhooks/payment-callbacks";
+import { handleMpesaCallback, handleAirtelCallback, handleTigoCallback, handlePaystackCallback, handleFlutterwaveCallback } from "../webhooks/payment-callbacks";
 import { verifyWebhookSignature } from "../webhooks/verify-signature";
 import { smsInboundRouter } from "../webhooks/sms-inbound";
 import { gridProtocolRouter } from "../webhooks/grid-protocols";
@@ -29,6 +28,19 @@ import {
   createRateLimitStore,
   SharedCounterUnavailableError,
 } from "../services/rate-limit-store";
+import {
+  apiContentSecurityPolicy,
+  spaSecurityHeaders,
+  strictTransportSecurityHttpsOnly,
+} from "../security/headers";
+import { corsMiddleware } from "../security/cors";
+import {
+  authRateLimiter,
+  envRpm,
+  GLOBAL_LIMIT_RPM_ENV,
+  PAYMENT_LIMIT_RPM_ENV,
+} from "../security/rate-limit";
+import { jsonBodyParser, urlencodedBodyParser } from "../security/request-parsers";
 
 function isPortAvailable(port: number): Promise<boolean> {
   return new Promise(resolve => {
@@ -61,15 +73,29 @@ async function startServer() {
   // so production refuses to start without somewhere to keep shared counters.
   assertSharedCountersAvailable();
 
-  // Security headers via helmet defaults (X-Content-Type-Options,
-  // X-Frame-Options, Referrer-Policy, HSTS in prod, etc.). CSP is disabled
-  // here on purpose: client/index.html ships an inline service-worker
-  // registration script that a strict script-src would block, and the Vite
-  // dev server also injects inline scripts. Enforce a CSP at the nginx layer
-  // once the inline script is externalized.
-  app.use(helmet({ contentSecurityPolicy: false }));
+  // Never advertise the framework, even if the header chain below is
+  // reordered (helmet also strips it — defense in depth).
+  app.disable("x-powered-by");
 
-  // Global rate limit: 300 requests per 15 minutes per IP.
+  // Security headers (server/security/headers.ts): helmet defaults hardened
+  // with X-Frame-Options: DENY and Referrer-Policy
+  // strict-origin-when-cross-origin; an enforced CSP for the production SPA
+  // keyed to the hashed inline service-worker script (disabled only in
+  // development, where the Vite dev server injects inline scripts/eval); and
+  // HSTS emitted only for requests that actually arrived over HTTPS so local
+  // http development is never TLS-pinned.
+  app.use(spaSecurityHeaders());
+  app.use(strictTransportSecurityHttpsOnly());
+  // API responses are JSON and never legitimately rendered: enforce the
+  // strictest CSP on them in every environment.
+  app.use("/api", apiContentSecurityPolicy());
+
+  // Explicit CORS allowlist (server/security/cors.ts). Production with no
+  // CORS_ALLOWED_ORIGINS fails closed; development falls back to localhost.
+  app.use(corsMiddleware());
+
+  // Global rate limit: RATE_LIMIT_GLOBAL_RPM requests per minute per IP,
+  // enforced over a 15-minute window (default 20 rpm == 300 per 15 minutes).
   // /api/grid is excluded and limited separately: it carries machine traffic
   // (charge point heartbeats, meter values, Modbus polls) from a small number
   // of protocol services, and every request is HMAC-authenticated.
@@ -78,7 +104,7 @@ async function startServer() {
   // and says so in the log; the payment limiter below makes the opposite trade.
   const globalLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
-    limit: 300,
+    limit: envRpm(GLOBAL_LIMIT_RPM_ENV, 20) * 15,
     standardHeaders: true,
     legacyHeaders: false,
     message: { error: "RATE_LIMITED", message: "Too many requests, please try again later." },
@@ -107,13 +133,14 @@ async function startServer() {
   app.use("/api/grid", gridLimiter);
 
   // Stricter limit for payment webhooks and payment tRPC procedures:
-  // 30 requests per 15 minutes per IP. For webhooks it is chained after
-  // signature verification so the verify-first order is preserved.
+  // RATE_LIMIT_PAYMENT_RPM requests per minute per IP over a 15-minute
+  // window (default 2 rpm == 30 per 15 minutes). For webhooks it is chained
+  // after signature verification so the verify-first order is preserved.
   // Money paths fail closed: if the shared counter cannot be read, the request
   // is refused rather than admitted unmetered.
   const paymentLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
-    limit: 30,
+    limit: envRpm(PAYMENT_LIMIT_RPM_ENV, 2) * 15,
     standardHeaders: true,
     legacyHeaders: false,
     message: { error: "RATE_LIMITED", message: "Too many requests, please try again later." },
@@ -125,20 +152,19 @@ async function startServer() {
   });
   app.use("/api/trpc/payments", paymentLimiter);
 
-  // Body parsers. Default limit reduced to 1mb: file/image uploads in this
-  // platform go through S3 presigned URLs (see server/storage.ts), so no
-  // route needs a large JSON body. The `verify` hook captures the raw body
-  // bytes used by payment webhook signature verification.
-  app.use(
-    express.json({
-      limit: "1mb",
-      verify: (req, _res, buf) => {
-        (req as express.Request & { rawBody?: Buffer }).rawBody = buf;
-      },
-    })
-  );
-  app.use(express.urlencoded({ limit: "1mb", extended: true }));
-  // OAuth callback under /api/oauth/callback
+  // Body parsers (server/security/request-parsers.ts): explicit 1mb ceiling.
+  // File/image uploads in this platform go through S3 presigned URLs (see
+  // server/storage.ts), so no route needs a large JSON body. The parser's
+  // `verify` hook captures the raw body bytes used by payment webhook
+  // signature verification.
+  app.use(jsonBodyParser());
+  app.use(urlencodedBodyParser());
+
+  // OAuth callback under /api/oauth/callback, behind the auth rate limiter
+  // (RATE_LIMIT_AUTH_RPM, server/security/rate-limit.ts). A human signing in
+  // makes a handful of requests; sustained volume here is credential stuffing
+  // or token-exchange abuse.
+  app.use("/api/oauth", authRateLimiter());
   registerOAuthRoutes(app);
 
   // Health and readiness endpoints for Kubernetes
@@ -165,6 +191,9 @@ async function startServer() {
   app.post("/api/webhooks/mpesa", verifyWebhookSignature("mpesa"), paymentLimiter, handleMpesaCallback);
   app.post("/api/webhooks/airtel", verifyWebhookSignature("airtel"), paymentLimiter, handleAirtelCallback);
   app.post("/api/webhooks/tigo", verifyWebhookSignature("tigo"), paymentLimiter, handleTigoCallback);
+  // Paystack/Flutterwave verify signatures inside their handlers (different header/secret scheme); fail-closed.
+  app.post("/api/webhooks/paystack", paymentLimiter, handlePaystackCallback);
+  app.post("/api/webhooks/flutterwave", paymentLimiter, handleFlutterwaveCallback);
   // Africa's Talking inbound SMS (feature-phone command channel). The AT
   // callback is authenticated by the shared AT webhook secret when configured.
   app.use("/api/webhooks/sms/inbound", verifyWebhookSignature("africas_talking"), smsInboundRouter);
@@ -178,6 +207,14 @@ async function startServer() {
     createExpressMiddleware({
       router: appRouter,
       createContext,
+      // Internal errors are logged here with their stack; the client-facing
+      // response is sanitized by the errorFormatter in server/_core/trpc.ts
+      // (no stack traces or internals leak in production).
+      onError({ error, path }) {
+        if (error.code === "INTERNAL_SERVER_ERROR") {
+          console.error(`[tRPC] ${path ?? "<unknown>"} failed:`, error);
+        }
+      },
     })
   );
   // An unreadable shared counter on a money path is reported as the platform

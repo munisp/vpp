@@ -13,7 +13,7 @@ import { paystackService } from './paystack-service';
 import { flutterwaveService } from './flutterwave-service';
 import { getDb } from '../db';
 import { payments, paymentCredentials } from '../../drizzle/schema';
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { observing, requireCapability } from './degraded-operation';
 
 export type PaymentGateway = 'mpesa' | 'airtel_money' | 'tigo_pesa' | 'paystack' | 'flutterwave';
@@ -535,32 +535,53 @@ class PaymentGatewayService {
       const db = await getDb();
       if (!db) throw new Error('Database not available');
 
-      const paymentRecords = await db
-        .select()
-        .from(payments)
-        .where(eq(payments.id, paymentId))
-        .limit(1);
-
-      if (paymentRecords.length === 0) {
-        return {
-          success: false,
-          error: 'Payment not found',
-        };
-      }
-
-      const payment = paymentRecords[0];
-
-      if (payment.status !== 'completed') {
-        return {
-          success: false,
-          error: 'Only completed payments can be refunded',
-        };
-      }
-
       // Money leaving the platform needs a gateway that is answering: while an
       // outage is open, a reversal attempt would be recorded against a provider
       // known to be unreachable.
       await requireCapability('settlement_payout');
+
+      // ATOMIC CLAIM: the payment row is locked FOR UPDATE for the whole
+      // refund inside one transaction. A concurrent refund blocks on the lock
+      // and then observes the terminal status ('refunded') the first refund
+      // committed, so exactly one refund can ever pass the status check. The
+      // payments status enum has no 'refunding' state (schema is fixed), so
+      // the row lock IS the in-flight marker.
+      return await db.transaction(async (tx) => {
+        const locked = await tx.execute(sql`
+          SELECT id, status, amount, currency, "paymentMethod", "transactionId", "billingId", metadata
+          FROM payments
+          WHERE id = ${paymentId}
+          FOR UPDATE
+        `);
+        const payment = locked.rows[0] as
+          | {
+              id: number;
+              status: string;
+              amount: number;
+              currency: string;
+              paymentMethod: string;
+              transactionId: string | null;
+              billingId: number | null;
+              metadata: string | null;
+            }
+          | undefined;
+
+        if (!payment) {
+          return {
+            success: false,
+            error: 'Payment not found',
+          };
+        }
+
+        if (payment.status !== 'completed') {
+          return {
+            success: false,
+            error:
+              payment.status === 'refunded'
+                ? 'Payment is already refunded; a second refund is refused'
+                : `Only completed payments can be refunded (current status: ${payment.status})`,
+          };
+        }
 
       // Process refund through the appropriate gateway. A refund only succeeds
       // when the gateway confirms it; otherwise the payment is flagged for
@@ -624,8 +645,9 @@ class PaymentGatewayService {
 
       if (!refundResult.success) {
         // Gateway could not confirm the refund: flag for manual review, keep
-        // the payment status unchanged, and report the failure honestly.
-        await db
+        // the payment status unchanged ('completed' — the money is still the
+        // platform's obligation), and report the failure honestly.
+        await tx
           .update(payments)
           .set({
             metadata: JSON.stringify({
@@ -646,8 +668,10 @@ class PaymentGatewayService {
         };
       }
 
-      // Gateway confirmed the refund — safe to mark as refunded.
-      await db
+      // Gateway confirmed the refund — safe to mark as refunded. The commit of
+      // this update releases the row lock; a refund that was waiting on the
+      // lock then sees 'refunded' and is refused.
+      await tx
         .update(payments)
         .set({
           status: 'refunded',
@@ -672,6 +696,7 @@ class PaymentGatewayService {
         success: true,
         refundId: refundResult.refundId || refundId,
       };
+      });
     } catch (error: any) {
       console.error('[PaymentGateway] Refund error:', error);
       return {
@@ -813,26 +838,37 @@ class PaymentGatewayService {
       const db = await getDb();
       if (!db) throw new Error('Database not available');
 
-      let allPayments;
-      
-      if (userId) {
-        allPayments = await db
-          .select()
-          .from(payments)
-          .where(eq(payments.userId, userId));
-      } else {
-        allPayments = await db.select().from(payments);
-      }
+      // Aggregate in SQL: loading every payment row into memory to count
+      // them in JS does not scale with the payments table.
+      const rows = await db
+        .select({
+          status: payments.status,
+          count: sql<number>`count(*)::int`,
+          totalAmount: sql<number>`coalesce(sum(${payments.amount}), 0)::int`,
+        })
+        .from(payments)
+        .where(userId ? eq(payments.userId, userId) : undefined)
+        .groupBy(payments.status);
 
       const stats = {
-        total: allPayments.length,
-        completed: allPayments.filter(p => p.status === 'completed').length,
-        pending: allPayments.filter(p => p.status === 'pending').length,
-        failed: allPayments.filter(p => p.status === 'failed').length,
-        totalAmount: allPayments
-          .filter(p => p.status === 'completed')
-          .reduce((sum, p) => sum + p.amount, 0),
+        total: 0,
+        completed: 0,
+        pending: 0,
+        failed: 0,
+        totalAmount: 0,
       };
+      for (const row of rows) {
+        const n = Number(row.count);
+        stats.total += n;
+        if (row.status === 'completed') {
+          stats.completed = n;
+          stats.totalAmount = Number(row.totalAmount);
+        } else if (row.status === 'pending') {
+          stats.pending = n;
+        } else if (row.status === 'failed') {
+          stats.failed = n;
+        }
+      }
 
       return stats;
     } catch (error: any) {

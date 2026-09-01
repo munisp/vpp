@@ -117,11 +117,37 @@ class SimpleRegression {
   }
 }
 
+/**
+ * Region code -> marketPrices country. Only regions the platform actually
+ * operates in are mapped; anything else fails loudly, because silently
+ * defaulting an unknown region to one country's prices would produce a
+ * forecast from the wrong market without telling anyone.
+ */
+const REGION_TO_COUNTRY: Record<string, string> = {
+  NG: 'nigeria',
+  NIGERIA: 'nigeria',
+  TZ: 'tanzania',
+  TANZANIA: 'tanzania',
+};
+
+export function countryForRegion(region: string): string {
+  const key = region.trim().toUpperCase();
+  const country = REGION_TO_COUNTRY[key] ?? REGION_TO_COUNTRY[key.split('-')[0]];
+  if (!country) {
+    throw new Error(
+      `unsupported_region: '${region}' has no market price data mapping; supported regions: ${Object.keys(REGION_TO_COUNTRY).join(', ')}`
+    );
+  }
+  return country;
+}
+
 // Seasonal decomposition for time series
-class SeasonalModel {
+export class SeasonalModel {
   private hourlyAverages: Map<number, { mean: number; std: number }> = new Map();
   private dayOfWeekFactors: Map<number, number> = new Map();
   private trend: SimpleRegression = new SimpleRegression();
+  /** Number of history points the trend was fitted on (indices 0..n-1). */
+  private historyLength = 0;
 
   fit(data: HistoricalDataPoint[]): void {
     if (data.length === 0) return;
@@ -155,10 +181,11 @@ class SeasonalModel {
       this.dayOfWeekFactors.set(dow, dowMean / overallMean);
     }
 
-    // Fit trend
+    // Fit trend on the history indices 0..n-1
     const x = data.map((_, i) => i);
     const y = data.map(p => p.value);
     this.trend.fit(x, y);
+    this.historyLength = data.length;
   }
 
   predict(timestamp: Date, horizonIndex: number): ForecastQuantiles {
@@ -168,8 +195,11 @@ class SeasonalModel {
     const hourlyStats = this.hourlyAverages.get(hour) || { mean: 0, std: 0 };
     const dowFactor = this.dayOfWeekFactors.get(dow) || 1;
 
-    // Combine seasonal pattern with trend
-    const trendValue = this.trend.predict(horizonIndex);
+    // Combine seasonal pattern with trend. The trend was fitted on the history
+    // indices 0..n-1, so the first forecast step is index n — evaluating the
+    // trend at horizonIndex would extrapolate BACKWARD into the already-seen
+    // history and report the past as the future.
+    const trendValue = this.trend.predict(this.historyLength + horizonIndex);
     const seasonalValue = hourlyStats.mean * dowFactor;
     
     // Weight: more seasonal for near-term, more trend for long-term
@@ -679,7 +709,7 @@ export class ProbabilisticForecastingService {
     if (!db) return [];
 
     const startDate = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
-    const country = region.startsWith('NG') ? 'nigeria' : 'tanzania';
+    const country = countryForRegion(region);
 
     const result = await db.execute<SqlRow>(sql`
       SELECT timestamp, price as value FROM "marketPrices"

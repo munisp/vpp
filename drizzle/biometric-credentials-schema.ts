@@ -1,4 +1,5 @@
 import {
+  index,
   integer as int,
   pgTable,
   serial,
@@ -28,7 +29,10 @@ export const biometricCredentials = pgTable("biometric_credentials", {
   
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().$onUpdate(() => new Date()).notNull(),
-});
+}, (table) => [
+  // Credential lists per user (biometric router/db helpers)
+  index("biometric_credentials_user_idx").on(table.userId),
+]);
 
 export type BiometricCredential = typeof biometricCredentials.$inferSelect;
 export type InsertBiometricCredential = typeof biometricCredentials.$inferInsert;

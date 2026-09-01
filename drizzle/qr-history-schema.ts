@@ -1,4 +1,5 @@
 import {
+  index,
   decimal,
   integer as int,
   pgEnum,
@@ -54,7 +55,10 @@ export const qrCodeHistory = pgTable("qr_code_history", {
   
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().$onUpdate(() => new Date()).notNull(),
-});
+}, (table) => [
+  // Per-user QR history ordered newest-first (db-qr-history.ts)
+  index("qr_code_history_user_idx").on(table.userId, table.createdAt),
+]);
 
 export type QRCodeHistory = typeof qrCodeHistory.$inferSelect;
 export type InsertQRCodeHistory = typeof qrCodeHistory.$inferInsert;

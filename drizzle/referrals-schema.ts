@@ -1,4 +1,5 @@
 import {
+  index,
   integer as int,
   pgEnum,
   pgTable,
@@ -50,7 +51,11 @@ export const referrals = pgTable("referrals", {
   
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().$onUpdate(() => new Date()).notNull(),
-});
+}, (table) => [
+  // "My referrals" lists and pending-referral counts per referrer
+  // (db-referrals.ts)
+  index("referrals_referrer_idx").on(table.referrerId),
+]);
 
 export type Referral = typeof referrals.$inferSelect;
 export type InsertReferral = typeof referrals.$inferInsert;
@@ -79,7 +84,10 @@ export const referralRewards = pgTable("referral_rewards", {
   
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().$onUpdate(() => new Date()).notNull(),
-});
+}, (table) => [
+  // Reward history per user (db-referrals.ts)
+  index("referral_rewards_user_idx").on(table.userId),
+]);
 
 export type ReferralReward = typeof referralRewards.$inferSelect;
 export type InsertReferralReward = typeof referralRewards.$inferInsert;

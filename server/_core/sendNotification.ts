@@ -2,6 +2,20 @@ import webpush from 'web-push';
 import { getDb } from '../db';
 import { pushSubscriptions, notificationPreferences, users } from '../../drizzle/schema';
 import { eq } from 'drizzle-orm';
+import { sendEmail, type EmailOptions } from './emailService';
+
+/** Email preference columns a caller can bind an email category to. */
+export type EmailPreferenceKey =
+  | 'emailPaymentReceived'
+  | 'emailTradeExecuted'
+  | 'emailTradeFailed'
+  | 'emailSystemAlert'
+  | 'emailAchievementUnlocked'
+  | 'emailDREventReminder'
+  | 'emailDREventCreated'
+  | 'emailLeaderboardRankChange'
+  | 'emailWeeklySummary'
+  | 'emailMonthlySummary';
 
 // Configure web-push with VAPID keys
 if (process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY) {
@@ -64,6 +78,40 @@ function isWithinQuietHours(quietHoursStart: string, quietHoursEnd: string, user
 /**
  * Send push notification to a specific user
  */
+/**
+ * Send an email honoring the user's email preferences. The email* preference
+ * keys are stored in notificationPreferences and, until now, never read —
+ * every email went out regardless. A disabled category skips the send, and
+ * the skip is recorded (loud log + explicit result) instead of silently
+ * sending or silently dropping.
+ */
+export async function sendEmailNotification(
+  userId: number,
+  options: EmailOptions,
+  preferenceKey: EmailPreferenceKey = 'emailSystemAlert'
+): Promise<{ success: boolean; skipped?: 'preference_disabled'; reason?: string; messageId?: string; error?: string }> {
+  const db = await getDb();
+  if (!db) {
+    return { success: false, reason: 'Database not available' };
+  }
+
+  // Check the user's email preferences before sending anything.
+  const [prefs] = await db
+    .select()
+    .from(notificationPreferences)
+    .where(eq(notificationPreferences.userId, userId))
+    .limit(1);
+
+  if (prefs && !prefs[preferenceKey]) {
+    console.log(
+      `[sendNotification] Email to user ${userId} skipped: ${preferenceKey} is disabled (subject: ${options.subject})`
+    );
+    return { success: true, skipped: 'preference_disabled' };
+  }
+
+  return sendEmail(options);
+}
+
 export async function sendPushNotification(
   userId: number,
   payload: NotificationPayload,

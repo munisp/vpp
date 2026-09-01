@@ -6,6 +6,20 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
+// The refund path locks the payment row FOR UPDATE inside a transaction, so
+// the mock models that row at the raw-SQL level too.
+const paymentRow = {
+  id: 1,
+  userId: 1,
+  amount: 10000,
+  currency: 'TZS',
+  status: 'completed',
+  paymentMethod: 'mpesa',
+  transactionId: 'TEST123',
+  billingId: null,
+  metadata: '{}',
+};
+
 // Mock the database
 vi.mock('../db', () => ({
   getDb: vi.fn(() => Promise.resolve({
@@ -19,16 +33,11 @@ vi.mock('../db', () => ({
     select: vi.fn(() => ({
       from: vi.fn(() => ({
         where: vi.fn(() => ({
-          limit: vi.fn(() => Promise.resolve([{
-            id: 1,
-            userId: 1,
-            amount: 10000,
-            currency: 'TZS',
-            status: 'completed',
-            paymentMethod: 'mpesa',
-            transactionId: 'TEST123',
-            metadata: '{}',
-          }])),
+          limit: vi.fn(() => Promise.resolve([paymentRow])),
+          // getPaymentStats aggregates in SQL now.
+          groupBy: vi.fn(() => Promise.resolve([
+            { status: 'completed', count: 1, totalAmount: 10000 },
+          ])),
         })),
       })),
     })),
@@ -37,6 +46,18 @@ vi.mock('../db', () => ({
         where: vi.fn(() => Promise.resolve()),
       })),
     })),
+    // processRefund claims the payment inside a transaction: the tx client
+    // serves the locked row via execute() and records updates via update().
+    transaction: vi.fn(async (fn: (tx: any) => Promise<unknown>) =>
+      fn({
+        execute: vi.fn(() => Promise.resolve({ rows: [paymentRow] })),
+        update: vi.fn(() => ({
+          set: vi.fn(() => ({
+            where: vi.fn(() => Promise.resolve({ rowCount: 1 })),
+          })),
+        })),
+      })
+    ),
   })),
 }));
 

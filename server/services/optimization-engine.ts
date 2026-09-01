@@ -275,7 +275,12 @@ export class OptimizationEngine {
   ): Promise<{ setpoints: DispatchSetpoint[]; solver: string }> {
     const intervalsCount = Math.round((horizonHours * 60) / intervalMinutes);
     const contexts = Array.from({ length: intervalsCount }, (_, i) =>
-      this.getIntervalContext(new Date(scheduleStart.getTime() + i * intervalMinutes * 60000), forecasts, i)
+      this.getIntervalContext(
+        new Date(scheduleStart.getTime() + i * intervalMinutes * 60000),
+        forecasts,
+        i,
+        intervalMinutes
+      )
     );
 
     if (!forecasts.price) {
@@ -310,6 +315,21 @@ export class OptimizationEngine {
           );
           continue;
         }
+        // A battery sitting below its reserve must not 422 the whole fleet:
+        // the solver validates initial_soc against soc_min for the entire
+        // request in one shot, so one low battery would reject every asset.
+        // Constrain this asset instead — soc_min raised to its current SoC
+        // means it can charge back above the reserve but cannot discharge
+        // until then — and record the per-asset adjustment.
+        const minSocReserve = request.constraints?.minSocReserve ?? 10;
+        let socMinPercent = minSocReserve;
+        if (asset.currentSoc < minSocReserve) {
+          socMinPercent = asset.currentSoc;
+          warnings.push(
+            `Asset ${asset.assetId} (battery) at ${asset.currentSoc}% SoC is below the ${minSocReserve}% reserve: ` +
+              `its soc_min was raised to its current SoC, so it can charge but not discharge until it is back above the reserve`
+          );
+        }
         milpAssets.push({
           asset_id: String(asset.assetId),
           asset_type: 'battery',
@@ -318,7 +338,7 @@ export class OptimizationEngine {
             max_charge_w: Math.max(importW, 1),
             max_discharge_w: Math.max(exportW, 1),
             initial_soc_percent: asset.currentSoc,
-            soc_min_percent: request.constraints?.minSocReserve ?? 10,
+            soc_min_percent: socMinPercent,
             soc_max_percent: 95,
           },
         });
@@ -335,6 +355,15 @@ export class OptimizationEngine {
           generation: { available_w: available, curtailable: true },
         });
       }
+    }
+
+    // With nothing left to dispatch there is no plan to solve: fail loud here
+    // rather than letting the solver 422 an empty site with no explanation of
+    // which checks emptied it (the warnings above carry those reasons).
+    if (milpAssets.length === 0) {
+      throw new MilpOptimizerError(
+        'no dispatchable assets remain after eligibility, metering and SoC checks; refusing to request a fleet dispatch for an empty site'
+      );
     }
 
     const milpRequest: MilpDispatchRequest = {
@@ -529,7 +558,13 @@ export class OptimizationEngine {
         capacity: row.capacity,
         eligibility,
         currentPower: telemetry?.power || 0,
-        currentSoc: telemetry?.stateOfCharge ? telemetry.stateOfCharge / 100 : null,
+        // stateOfCharge is stored as percent * 100 (drizzle/schema.ts). A
+        // truly empty battery reads 0 — a real measurement, not a missing
+        // one — so only null/undefined means "unmeasured".
+        currentSoc:
+          telemetry?.stateOfCharge !== null && telemetry?.stateOfCharge !== undefined
+            ? telemetry.stateOfCharge / 100
+            : null,
         evidence,
       });
     }
@@ -677,7 +712,7 @@ export class OptimizationEngine {
       const intervalEnd = new Date(intervalStart.getTime() + intervalMinutes * 60000);
 
       // Get forecast values for this interval
-      const context = this.getIntervalContext(intervalStart, forecasts, i);
+      const context = this.getIntervalContext(intervalStart, forecasts, i, intervalMinutes);
 
       // Optimize each asset for this interval
       for (const asset of assets) {
@@ -706,11 +741,15 @@ export class OptimizationEngine {
           // Update battery SoC tracking (guaranteed present — null-SoC
           // batteries are excluded above, so no fabricated state here).
           // `assets.capacity` is already watt-hours for batteries (drizzle/schema.ts).
-          if (asset.assetType === 'battery') {
+          // The floor is the configured reserve: the export clamp above makes
+          // breaching it impossible, and the tracker must agree with that
+          // constraint rather than imposing its own hardcoded one.
+          if (asset.assetType === 'battery' && asset.capacity > 0) {
             const currentSoc = batterySoc.get(asset.assetId)!;
+            const minSoc = request.constraints?.minSocReserve ?? 10;
             const energyWh = (setpoint.targetPowerWatts * intervalMinutes) / 60;
             const socChange = (energyWh / asset.capacity) * 100;
-            batterySoc.set(asset.assetId, Math.max(10, Math.min(90, currentSoc - socChange)));
+            batterySoc.set(asset.assetId, Math.max(minSoc, Math.min(90, currentSoc - socChange)));
           }
         }
       }
@@ -725,12 +764,18 @@ export class OptimizationEngine {
   private getIntervalContext(
     timestamp: Date,
     forecasts: { load?: ForecastResult; price?: ForecastResult; emissions?: ForecastResult; solar?: ForecastResult },
-    intervalIndex: number
+    intervalIndex: number,
+    intervalMinutes: number
   ): IntervalContext {
-    // Find matching forecast points
+    // Find matching forecast points. Load and solar are forecast at the
+    // dispatch resolution; price and emissions are HOURLY (see getForecasts,
+    // which requests them at 60 minutes), so the hourly row for dispatch
+    // interval `i` is floor(i * intervalMinutes / 60) — not i/4, which only
+    // holds for 15-minute dispatch.
+    const hourlyIndex = Math.floor((intervalIndex * intervalMinutes) / 60);
     const loadPoint = forecasts.load?.points[intervalIndex];
-    const pricePoint = forecasts.price?.points[Math.floor(intervalIndex / 4)]; // Price is hourly
-    const emissionsPoint = forecasts.emissions?.points[Math.floor(intervalIndex / 4)];
+    const pricePoint = forecasts.price?.points[hourlyIndex];
+    const emissionsPoint = forecasts.emissions?.points[hourlyIndex];
     const solarPoint = forecasts.solar?.points[intervalIndex];
 
     // When no real price forecast exists we fall back to a static curve, but it
@@ -785,12 +830,20 @@ export class OptimizationEngine {
       maxImport = Math.min(maxImport, constraints.maxGridImport);
     }
 
-    // Apply SoC reserve constraint for batteries
+    // Apply SoC reserve constraint for batteries. The reserve is an energy
+    // budget, not a binary switch: a battery just above minSoc may export
+    // only the power that keeps it at or above the reserve at the end of
+    // this interval. `capacity` is watt-hours for batteries (drizzle/schema.ts)
+    // and currentSoc/minSoc are percents, so the exportable energy is
+    // (soc - minSoc)/100 * capacity Wh, and dividing by the interval length
+    // in hours turns it into watts. Below or at the reserve this clamps to
+    // zero — a true constraint result, not an assumed one.
     if (asset.assetType === 'battery' && currentSoc !== undefined) {
-      const minSoc = constraints?.minSocReserve || 20;
-      if (currentSoc <= minSoc) {
-        maxExport = 0; // Can't export if at minimum SoC
-      }
+      const minSoc = constraints?.minSocReserve ?? 20;
+      const intervalHours = intervalMinutes / 60;
+      const exportableWh = Math.max(0, ((currentSoc - minSoc) / 100) * asset.capacity);
+      const maxExportByReserve = intervalHours > 0 ? exportableWh / intervalHours : 0;
+      maxExport = Math.min(maxExport, maxExportByReserve);
       if (currentSoc >= 90) {
         maxImport = 0; // Can't import if at maximum SoC
       }

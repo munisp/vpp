@@ -42,6 +42,47 @@ cp config.example.toml config.toml   # secrets come from the environment
 cargo run --release -- config.toml
 ```
 
+## Tracing (OpenTelemetry)
+
+The poller keeps its JSON log output (`fmt` layer, `RUST_LOG`/`EnvFilter` as
+before) and can additionally export OTLP traces over gRPC. Configuration is
+entirely environmental, shared with the rest of the platform rollout:
+
+| Variable | Meaning | Default |
+|---|---|---|
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP gRPC (tonic) collector endpoint | **unset → telemetry disabled** |
+| `OTEL_SERVICE_NAME` | resource `service.name` | `modbus-poller` |
+| `OTEL_SERVICE_VERSION` | resource `service.version` | crate version |
+| `OTEL_ENVIRONMENT` | resource `deployment.environment.name` | unset (attribute omitted) |
+| `OTEL_TENANT_ID` | resource `tenant.id` | `default` |
+| `OTEL_SDK_DISABLED` | `true` disables the SDK outright | unset |
+
+With the endpoint unset (or the escape hatch set) the poller logs
+`telemetry disabled: reason ...` once at startup and runs exactly as before.
+The exporter connects lazily and batches in the background, so a dead or
+flapping collector shows up as export errors in the logs — never as a crash or
+a stalled poll cycle.
+
+Each poll cycle is a trace: a `modbus.poll_cycle` root span with a
+`modbus.poll_device` child per device (carrying `device.id` and the register
+address range) and a `modbus.publish` child per delivered batch. `warn!` /
+`error!` events (unreachable device, register failure, spool overflow, rejected
+publish) land on the active span.
+
+### Trace propagation
+
+`PlatformClient::publish` injects the current span context as a W3C
+`traceparent` header on the HMAC-signed `POST /api/grid/modbus/readings`, so
+the server's ingest span joins the edge trace. The header is unsigned metadata
+(like `content-type`), not part of the HMAC body. When telemetry is disabled
+the context is invalid and no header is sent.
+
+Downstream of the platform the model is payload-level: the MQTT→Fluvio bridge
+stamps `traceparent` into each record, the Fluvio SmartModules
+(`services/smartmodules/enrichment`, `.../anomaly-detection` — WASM guests that
+cannot run an OTLP exporter) preserve it verbatim, and consumers extract it to
+continue the trace.
+
 Verification:
 
 ```sh

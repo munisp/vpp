@@ -3,3 +3,7 @@ uvicorn[standard]==0.34.0
 pydantic==2.10.4
 pulp==2.9.0
 highspy==1.8.1
+opentelemetry-sdk==1.29.0
+opentelemetry-exporter-otlp-proto-grpc==1.29.0
+opentelemetry-instrumentation-fastapi==0.50b0
+prometheus-client==0.21.1

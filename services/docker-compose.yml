@@ -52,6 +52,14 @@ services:
       # NOTE: the fluvio transport shells out to the `fluvio` CLI, which must
       # be present in the bridge image (mqtt-fluvio-bridge/Dockerfile).
       - STREAM_TRANSPORT=fluvio
+      # OpenTelemetry contract: OTLP to the platform collector on the shared
+      # vpp-platform-net network (see observability/README.md). Prometheus
+      # metrics are served on :8080/metrics by the bridge itself.
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+      - OTEL_SERVICE_NAME=mqtt-fluvio-bridge
+      - OTEL_ENVIRONMENT=${OTEL_ENVIRONMENT:-development}
+      - OTEL_TENANT_ID=${OTEL_TENANT_ID:-default}
+      - OTEL_SDK_DISABLED=${OTEL_SDK_DISABLED:-false}
     volumes:
       - ./mqtt-fluvio-bridge/config:/root/config
       - ../mqtt/certs:/root/certs
@@ -75,6 +83,11 @@ services:
       - DB_USER=${DB_USER:-root}
       - DB_PASSWORD=${DB_PASSWORD}
       - DB_NAME=${DB_NAME:-vpp}
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+      - OTEL_SERVICE_NAME=fluvio-database-consumer
+      - OTEL_ENVIRONMENT=${OTEL_ENVIRONMENT:-development}
+      - OTEL_TENANT_ID=${OTEL_TENANT_ID:-default}
+      - OTEL_SDK_DISABLED=${OTEL_SDK_DISABLED:-false}
     volumes:
       - ./fluvio-consumers/logs:/app/logs
     networks:
@@ -93,6 +106,11 @@ services:
     environment:
       - FLUVIO_TOPIC=telemetry
       - WINDOW_SIZE_SECONDS=60
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+      - OTEL_SERVICE_NAME=fluvio-analytics-consumer
+      - OTEL_ENVIRONMENT=${OTEL_ENVIRONMENT:-development}
+      - OTEL_TENANT_ID=${OTEL_TENANT_ID:-default}
+      - OTEL_SDK_DISABLED=${OTEL_SDK_DISABLED:-false}
     volumes:
       - ./fluvio-consumers/logs:/app/logs
     networks:
@@ -141,11 +159,35 @@ services:
     networks:
       - vpp-network
 
+  # MySQL Exporter. This stack's database is MySQL on :3306 (see the
+  # consumers' DB_* env above); the previous scrape config targeted a
+  # postgres-exporter that never existed here. The DSN is a single
+  # overridable var and defaults to the same coordinates the consumers use.
+  mysqld-exporter:
+    image: prom/mysqld-exporter:latest
+    container_name: mysqld-exporter
+    ports:
+      - "9104:9104"
+    environment:
+      # Override MYSQLD_EXPORTER_DSN with the real credentials/host for the
+      # deployment, e.g. root:secret@(my-db-host:3306)/ — the default only
+      # matches a local dev MySQL with an exporter-readable account.
+      - DATA_SOURCE_NAME=${MYSQLD_EXPORTER_DSN:-root:exporter@(localhost:3306)/}
+    networks:
+      - vpp-network
+    restart: unless-stopped
+
 volumes:
   fluvio-data:
   prometheus-data:
   grafana-data:
 
 networks:
+  # Shared with the middleware/monitoring stacks so the platform Prometheus
+  # and OTel collector can reach mqtt-fluvio-bridge and the consumers by
+  # container name. Create once with:
+  #   docker network create vpp-platform-net
+  # (or boot docker-compose.middleware.yml first, which creates it).
   vpp-network:
-    driver: bridge
+    external: true
+    name: vpp-platform-net

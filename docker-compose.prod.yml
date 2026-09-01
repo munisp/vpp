@@ -69,6 +69,15 @@ services:
       # telemetry.raw is deliberately NOT here: the consumer is a landing
       # table, not a telemetry store, and telemetry volume belongs to Fluvio.
       EVENT_CONSUMER_TOPICS: ${EVENT_CONSUMER_TOPICS:-dr.events.created,forecasts.generated,optimization.runs,blockchain.anchors,edge.commands,ev.sessions,carbon.signals,community.allocations,mlops.training.runs,anomalies.detected,compliance.checks,der.capabilities.updated}
+      # OpenTelemetry contract (observability/README.md). Traces+metrics go to
+      # the central collector; OTEL_SERVICE_NAME is overridden per worker
+      # below. OTEL_SDK_DISABLED=true is the escape hatch.
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4317}
+      OTEL_SERVICE_NAME: vpp-server
+      OTEL_SERVICE_VERSION: ${OTEL_SERVICE_VERSION:-0.0.0}
+      OTEL_ENVIRONMENT: ${OTEL_ENVIRONMENT:-production}
+      OTEL_TENANT_ID: ${OTEL_TENANT_ID:-default}
+      OTEL_SDK_DISABLED: ${OTEL_SDK_DISABLED:-false}
     depends_on:
       - postgres
       - redis
@@ -120,6 +129,12 @@ services:
       OPTIMIZER_ENV: production
       OPTIMIZER_AUTH_TOKEN: ${OPTIMIZER_AUTH_TOKEN:?OPTIMIZER_AUTH_TOKEN is required (shared with vpp-server)}
       OPTIMIZER_SOLVER: ${OPTIMIZER_SOLVER:-}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4317}
+      OTEL_SERVICE_NAME: optimizer
+      OTEL_SERVICE_VERSION: ${OTEL_SERVICE_VERSION:-0.0.0}
+      OTEL_ENVIRONMENT: ${OTEL_ENVIRONMENT:-production}
+      OTEL_TENANT_ID: ${OTEL_TENANT_ID:-default}
+      OTEL_SDK_DISABLED: ${OTEL_SDK_DISABLED:-false}
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=5)\""]
       interval: 30s
@@ -142,6 +157,12 @@ services:
     environment:
       GRIDMODEL_ENV: production
       GRIDMODEL_AUTH_TOKEN: ${GRIDMODEL_AUTH_TOKEN:?GRIDMODEL_AUTH_TOKEN is required (shared with vpp-server)}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4317}
+      OTEL_SERVICE_NAME: gridmodel
+      OTEL_SERVICE_VERSION: ${OTEL_SERVICE_VERSION:-0.0.0}
+      OTEL_ENVIRONMENT: ${OTEL_ENVIRONMENT:-production}
+      OTEL_TENANT_ID: ${OTEL_TENANT_ID:-default}
+      OTEL_SDK_DISABLED: ${OTEL_SDK_DISABLED:-false}
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=5)\""]
       interval: 30s
@@ -175,6 +196,12 @@ services:
       GRID_PROTOCOLS_LISTEN: ":9100"
       PLATFORM_BASE_URL: http://vpp-server:3000
       GRID_PROTOCOL_SHARED_SECRET: ${GRID_PROTOCOL_SHARED_SECRET:?GRID_PROTOCOL_SHARED_SECRET is required (min 32 chars)}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4317}
+      OTEL_SERVICE_NAME: grid-protocols
+      OTEL_SERVICE_VERSION: ${OTEL_SERVICE_VERSION:-0.0.0}
+      OTEL_ENVIRONMENT: ${OTEL_ENVIRONMENT:-production}
+      OTEL_TENANT_ID: ${OTEL_TENANT_ID:-default}
+      OTEL_SDK_DISABLED: ${OTEL_SDK_DISABLED:-false}
     volumes:
       # Required: gridd exits if no protocol is enabled, and protocol
       # credentials/certificates live in this file, not in the image.
@@ -200,7 +227,12 @@ services:
     image: vpp/server:latest
     restart: unless-stopped
     command: ["tsx", "server/workflows/worker.ts"]
-    environment: *vpp-server-env
+    environment:
+      <<: *vpp-server-env
+      OTEL_SERVICE_NAME: payment-worker
+      # Per-worker Prometheus metrics endpoint (delivered with the TS worker
+      # OTel wiring): payment=9091, dr=9092, trading=9093, prepaid=9094.
+      METRICS_PORT: "9091"
     depends_on:
       - temporal
       - postgres
@@ -219,7 +251,10 @@ services:
     image: vpp/server:latest
     restart: unless-stopped
     command: ["tsx", "server/workflows/dr-worker.ts"]
-    environment: *vpp-server-env
+    environment:
+      <<: *vpp-server-env
+      OTEL_SERVICE_NAME: dr-worker-ts
+      METRICS_PORT: "9092"
     depends_on:
       - temporal
       - postgres
@@ -237,7 +272,10 @@ services:
     image: vpp/server:latest
     restart: unless-stopped
     command: ["tsx", "server/workflows/trading-worker.ts"]
-    environment: *vpp-server-env
+    environment:
+      <<: *vpp-server-env
+      OTEL_SERVICE_NAME: trading-worker
+      METRICS_PORT: "9093"
     depends_on:
       - temporal
       - postgres
@@ -255,7 +293,10 @@ services:
     image: vpp/server:latest
     restart: unless-stopped
     command: ["tsx", "server/workflows/prepaid-worker.ts"]
-    environment: *vpp-server-env
+    environment:
+      <<: *vpp-server-env
+      OTEL_SERVICE_NAME: prepaid-worker
+      METRICS_PORT: "9094"
     depends_on:
       - temporal
       - postgres
@@ -332,6 +373,21 @@ services:
     restart: unless-stopped
 
   kafka:
+    restart: unless-stopped
+
+  # Observability backbone (defined in docker-compose.middleware.yml /
+  # docker-compose.monitoring.yml; prod adds restart policy + environment).
+  otel-collector:
+    restart: unless-stopped
+    environment:
+      OTEL_TENANT_ID: ${OTEL_TENANT_ID:-default}
+      OTEL_ENVIRONMENT: production
+      OTEL_RUM_ALLOWED_ORIGIN: ${OTEL_RUM_ALLOWED_ORIGIN:-http://localhost:8080}
+
+  jaeger:
+    restart: unless-stopped
+
+  tigerbeetle-statsd:
     restart: unless-stopped
 
 volumes:

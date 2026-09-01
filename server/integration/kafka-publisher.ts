@@ -1,6 +1,24 @@
 import { kafka, KAFKA_TOPICS } from './kafka-config';
 import { Producer, ProducerRecord, RecordMetadata } from 'kafkajs';
 import { Counter, Histogram } from 'prom-client';
+import { context as otelContext, propagation } from '@opentelemetry/api';
+
+/**
+ * Current W3C trace context as Kafka message headers (traceparent/tracestate).
+ * Injected on every publish so consumers can continue the trace. When the
+ * kafkajs auto-instrumentation is active it additionally wraps the send in a
+ * producer span and stamps that span's context — the two never conflict
+ * (same trace); this explicit injection is the guarantee that context crosses
+ * even for publishes that happen outside an instrumented path (outbox relay).
+ * Consumer-side extraction lives in server/services/events/consumer.ts
+ * (withConsumeSpan): each consumed message is handled inside a CONSUMER span
+ * continuing this trace.
+ */
+export function currentTraceHeaders(): Record<string, string> {
+  const carrier: Record<string, string> = {};
+  propagation.inject(otelContext.active(), carrier);
+  return carrier;
+}
 
 // Prometheus metrics
 const kafkaMessagesPublished = new Counter({
@@ -86,7 +104,9 @@ export class KafkaEventPublisher {
     
     try {
       await this.connect();
-      
+
+      const traceHeaders = currentTraceHeaders();
+
       const record: ProducerRecord = {
         topic,
         messages: messages.map(msg => ({
@@ -96,6 +116,7 @@ export class KafkaEventPublisher {
             'content-type': 'application/json',
             'source': 'vpp-consumer-platform',
             'timestamp': Date.now().toString(),
+            ...traceHeaders,
             ...(msg.headers || {})
           }
         }))

@@ -1,0 +1,904 @@
+# =============================================================================
+# VPP Platform - EXTENDED components stack (NEW file, owned by extended-components)
+# Components: Mojaloop core, OpenSearch + Dashboards, Apache Sedona/Spark,
+#             GeoLibre, open-appsec, Novu
+#
+# Boot (after docker-compose.monitoring.yml has created the `monitoring`
+# network and the middleware/external-services stack has created `vpp-network`
+# with MinIO):
+#   docker compose -f docker-compose.monitoring.yml -f docker-compose.extended.yml up -d
+#
+# Network names default to compose-project-derived names (project "vpp"):
+#   vpp_monitoring, vpp_vpp-network
+# Override with MONITORING_NETWORK_NAME / VPP_NETWORK_NAME if your project
+# name differs. See extended/README.md.
+#
+# Secrets: see extended/.env.example and extended/novu/.env.example.
+# OPENSEARCH_INITIAL_ADMIN_PASSWORD, NOVU_JWT_SECRET, NOVU_STORE_ENCRYPTION_KEY,
+# NOVU_SECRET_KEY and NOVU_MONGO_PASSWORD are fail-loud (no insecure default).
+# =============================================================================
+
+networks:
+  # External: created by docker-compose.monitoring.yml (project vpp -> vpp_monitoring).
+  # Prometheus (vpp-prometheus) lives here and scrapes the targets listed in
+  # extended/prometheus-extended.yml.
+  ext-monitoring:
+    external: true
+    name: ${MONITORING_NETWORK_NAME:-vpp_monitoring}
+  # External: created by docker-compose.middleware.yml / docker-compose.external-services.yml.
+  # Hosts the existing MinIO lakehouse (hostname `minio`, port 9000).
+  ext-vpp:
+    external: true
+    name: ${VPP_NETWORK_NAME:-vpp_vpp-network}
+  # Private to this stack.
+  extended:
+    driver: bridge
+
+volumes:
+  opensearch-data:
+  moja-kafka-data:
+  moja-mysql-data:
+  moja-mysql-als-data:
+  moja-objstore-data:
+  geolibre-data:
+  appsec-config:
+  appsec-data:
+  appsec-logs:
+  appsec-smartsync-data:
+  appsec-postgres-data:
+  novu-mongodb-data:
+  novu-redis-data:
+  shm-volume:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+
+services:
+  # ===========================================================================
+  # 1. MOJALOOP CORE (credible compose subset, NOT the full helm hub)
+  #    central-ledger + ml-api-adapter + account-lookup-service +
+  #    quoting-service + transaction-requests-service + kafka/mongo/mysql
+  #    Configs vendored from the upstream repos (extended/mojaloop/*).
+  # ===========================================================================
+  kafka:
+    image: bitnamilegacy/kafka:3.5
+    restart: unless-stopped
+    environment:
+      ALLOW_PLAINTEXT_LISTENER: "yes"
+      KAFKA_CFG_LISTENERS: CONTROLLER://:9093,LISTENER_DOCKER://:29092,LISTENER_EXTERN://:9092
+      KAFKA_CFG_ADVERTISED_LISTENERS: LISTENER_DOCKER://kafka:29092,LISTENER_EXTERN://localhost:19092
+      KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,LISTENER_DOCKER:PLAINTEXT,LISTENER_EXTERN:PLAINTEXT
+      KAFKA_CFG_INTER_BROKER_LISTENER_NAME: LISTENER_DOCKER
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_CFG_MESSAGE_MAX_BYTES: 200000000
+      KAFKA_CFG_NODE_ID: 1
+      KAFKA_CFG_PROCESS_ROLES: broker,controller
+      KAFKA_CFG_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: 1@127.0.0.1:9093
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_ENABLE_KRAFT: "true"
+    ports:
+      - "19092:9092"
+    volumes:
+      - moja-kafka-data:/bitnami/kafka
+    networks:
+      - extended
+    healthcheck:
+      test: ["CMD", "/opt/bitnami/kafka/bin/kafka-broker-api-versions.sh", "--bootstrap-server", "kafka:29092"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 40s
+
+  kafka-init:
+    image: bitnamilegacy/kafka:3.5
+    restart: "no"
+    depends_on:
+      kafka:
+        condition: service_healthy
+    volumes:
+      - ./extended/mojaloop/kafka/provision-topics.sh:/opt/provision/provision-topics.sh:ro
+    command: bash /opt/provision/provision-topics.sh kafka 29092
+    networks:
+      - extended
+
+  objstore:
+    image: mongo:8.0.17
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - moja-objstore-data:/data/db
+    networks:
+      - extended
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 10s
+      retries: 6
+      start_period: 30s
+
+  mysql:
+    image: mysql/mysql-server:8.0
+    restart: unless-stopped
+    environment:
+      MYSQL_USER: central_ledger
+      MYSQL_PASSWORD: password
+      MYSQL_DATABASE: central_ledger
+      MYSQL_ALLOW_EMPTY_PASSWORD: "true"
+    ports:
+      - "3306:3306"
+    volumes:
+      - moja-mysql-data:/var/lib/mysql
+      - ./extended/mojaloop/sql-init-cl/:/docker-entrypoint-initdb.d/:ro
+    networks:
+      - extended
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
+
+  mysql-als:
+    image: mysql/mysql-server:8.0
+    restart: unless-stopped
+    environment:
+      MYSQL_USER: account_lookup
+      MYSQL_PASSWORD: password
+      MYSQL_DATABASE: account_lookup
+      MYSQL_ALLOW_EMPTY_PASSWORD: "true"
+    ports:
+      - "3307:3306"
+    volumes:
+      - moja-mysql-als-data:/var/lib/mysql
+      - ./extended/mojaloop/sql-init-als/:/docker-entrypoint-initdb.d/:ro
+    networks:
+      - extended
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
+
+  central-ledger:
+    image: mojaloop/central-ledger:v19.14.0
+    restart: unless-stopped
+    user: root
+    depends_on:
+      mysql:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      objstore:
+        condition: service_healthy
+    command:
+      - sh
+      - -c
+      - >-
+        sh /opt/wait-for/wait-for.sh mysql:3306 -t 240 &&
+        sh /opt/wait-for/wait-for.sh kafka:29092 -t 240 &&
+        sh /opt/wait-for/wait-for.sh objstore:27017 -t 240 &&
+        node dist/api/index.js
+    environment:
+      LOG_LEVEL: info
+    ports:
+      - "13001:3001"
+    volumes:
+      - ./extended/mojaloop/central-ledger/default.json:/opt/app/config/default.json:ro
+      - ./extended/mojaloop/wait-for:/opt/wait-for:ro
+    networks:
+      - extended
+      - ext-monitoring
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3001/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+
+  central-ledger-handlers:
+    image: mojaloop/central-ledger:v19.14.0
+    restart: unless-stopped
+    user: root
+    depends_on:
+      central-ledger:
+        condition: service_healthy
+    command:
+      - sh
+      - -c
+      - >-
+        sh /opt/wait-for/wait-for.sh central-ledger:3001 -t 240 &&
+        node dist/handlers/index.js handler --prepare --position --get --fulfil --timeout --admin
+    environment:
+      LOG_LEVEL: info
+    volumes:
+      - ./extended/mojaloop/central-ledger/default.json:/opt/app/config/default.json:ro
+      - ./extended/mojaloop/wait-for:/opt/wait-for:ro
+    networks:
+      - extended
+      - ext-monitoring
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3001/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+
+  ml-api-adapter:
+    image: mojaloop/ml-api-adapter:v16.10.1
+    restart: unless-stopped
+    user: root
+    depends_on:
+      kafka:
+        condition: service_healthy
+      central-ledger:
+        condition: service_healthy
+    command:
+      - sh
+      - -c
+      - >-
+        sh /opt/wait-for/wait-for.sh kafka:29092 -t 240 &&
+        node src/api/index.js
+    environment:
+      LOG_LEVEL: info
+    ports:
+      - "13000:3000"
+    volumes:
+      - ./extended/mojaloop/ml-api-adapter/default.json:/opt/app/config/default.json:ro
+      - ./extended/mojaloop/wait-for:/opt/wait-for:ro
+    networks:
+      - extended
+      - ext-monitoring
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3000/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+
+  ml-api-adapter-handler:
+    image: mojaloop/ml-api-adapter:v16.10.1
+    restart: unless-stopped
+    user: root
+    depends_on:
+      ml-api-adapter:
+        condition: service_healthy
+    command:
+      - sh
+      - -c
+      - node src/handlers/index.js handler --notification
+    environment:
+      LOG_LEVEL: info
+    volumes:
+      - ./extended/mojaloop/ml-api-adapter/default.json:/opt/app/config/default.json:ro
+    networks:
+      - extended
+      - ext-monitoring
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3000/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+
+  account-lookup-service:
+    image: mojaloop/account-lookup-service:v17.16.2
+    restart: unless-stopped
+    depends_on:
+      mysql-als:
+        condition: service_healthy
+      central-ledger:
+        condition: service_healthy
+    command:
+      - sh
+      - -c
+      - >-
+        sh /opt/wait-for/wait-for.sh mysql-als:3306 -t 240 &&
+        node src/index.js server
+    environment:
+      LOG_LEVEL: info
+    ports:
+      - "14001:4001"
+      - "14002:4002"
+    volumes:
+      - ./extended/mojaloop/account-lookup-service/default.json:/opt/app/config/default.json:ro
+      - ./extended/mojaloop/wait-for:/opt/wait-for:ro
+    networks:
+      - extended
+      - ext-monitoring
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:4001/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+
+  account-lookup-service-handlers:
+    image: mojaloop/account-lookup-service:v17.16.2
+    restart: unless-stopped
+    depends_on:
+      account-lookup-service:
+        condition: service_healthy
+    command:
+      - sh
+      - -c
+      - node src/handlers/index.js handlers --timeout
+    environment:
+      LOG_LEVEL: info
+    volumes:
+      - ./extended/mojaloop/account-lookup-service/default.json:/opt/app/config/default.json:ro
+    networks:
+      - extended
+      - ext-monitoring
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:4003/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+
+  quoting-service:
+    image: mojaloop/quoting-service:v17.14.4
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+      central-ledger:
+        condition: service_healthy
+    command:
+      - sh
+      - -c
+      - >-
+        sh /opt/wait-for/wait-for.sh mysql:3306 -t 240 &&
+        sh /opt/wait-for/wait-for.sh kafka:29092 -t 240 &&
+        node src/index.js
+    environment:
+      LOG_LEVEL: info
+    ports:
+      - "13002:3002"
+      - "13003:3003"
+    volumes:
+      - ./extended/mojaloop/quoting-service/default.json:/opt/app/config/default.json:ro
+      - ./extended/mojaloop/wait-for:/opt/wait-for:ro
+    networks:
+      - extended
+      - ext-monitoring
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3002/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+
+  quoting-service-handlers:
+    image: mojaloop/quoting-service:v17.14.4
+    restart: unless-stopped
+    depends_on:
+      quoting-service:
+        condition: service_healthy
+    command:
+      - sh
+      - -c
+      - node src/handlers/index.js handler --quotes --bulk_quotes --fx_quotes
+    environment:
+      LOG_LEVEL: info
+    volumes:
+      - ./extended/mojaloop/quoting-service/default.json:/opt/app/config/default.json:ro
+    networks:
+      - extended
+      - ext-monitoring
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3003/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+
+  transaction-requests-service:
+    image: mojaloop/transaction-requests-service:v14.4.9
+    restart: unless-stopped
+    depends_on:
+      central-ledger:
+        condition: service_healthy
+    command:
+      - sh
+      - -c
+      - >-
+        sh /opt/wait-for/wait-for.sh central-ledger:3001 -t 240 &&
+        node src/index.js api
+    environment:
+      LOG_LEVEL: info
+    ports:
+      - "14003:4003"
+    volumes:
+      - ./extended/mojaloop/transaction-requests-service/default.json:/opt/app/config/default.json:ro
+      - ./extended/mojaloop/wait-for:/opt/wait-for:ro
+    networks:
+      - extended
+      - ext-monitoring
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:4003/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+
+  # ===========================================================================
+  # 2. OPENSEARCH (single node) + DASHBOARDS + Prometheus exporter plugin
+  #    The opensearch service builds extended/opensearch/Dockerfile
+  #    (opensearch:3.8.0 + prometheus-exporter 3.8.0.0, version-locked pair).
+  #    SECURITY: demo config. OPENSEARCH_INITIAL_ADMIN_PASSWORD is REQUIRED
+  #    (OpenSearch refuses to boot without/weak password -> fail loud).
+  # ===========================================================================
+  opensearch:
+    build:
+      context: ./extended/opensearch
+    image: vpp-extended/opensearch:3.8.0-prom
+    restart: unless-stopped
+    environment:
+      cluster.name: vpp-opensearch
+      discovery.type: single-node
+      bootstrap.memory_lock: "true"
+      ES_JAVA_OPTS: -Xms1g -Xmx1g
+      OPENSEARCH_INITIAL_ADMIN_PASSWORD: "${OPENSEARCH_INITIAL_ADMIN_PASSWORD:?Set OPENSEARCH_INITIAL_ADMIN_PASSWORD (strong, 8+ chars, upper/lower/digit/special)}"
+      DISABLE_INSTALL_DEMO_CONFIG: "false"
+      DISABLE_SECURITY_PLUGIN: "false"
+      # Keep index-level metric cardinality sane for Prometheus
+      # (dotted env vars are appended to opensearch.yml by the entrypoint):
+      prometheus.indices: "false"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    ports:
+      - "9200:9200"
+      - "9600:9600"
+    volumes:
+      - opensearch-data:/usr/share/opensearch/data
+    networks:
+      - extended
+      - ext-monitoring
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sku admin:$${OPENSEARCH_INITIAL_ADMIN_PASSWORD} https://localhost:9200/_cluster/health | grep -vq '\"status\":\"red\"'"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 90s
+
+  opensearch-dashboards:
+    image: opensearchproject/opensearch-dashboards:3.8.0
+    restart: unless-stopped
+    environment:
+      OPENSEARCH_HOSTS: '["https://opensearch:9200"]'
+    ports:
+      - "5601:5601"
+    networks:
+      - extended
+    depends_on:
+      opensearch:
+        condition: service_healthy
+
+  # ===========================================================================
+  # 3. APACHE SEDONA lakehouse runtime
+  #    Sedona is a Spark library (not a server): this is a real Spark 3.5.9
+  #    standalone master+worker; the Sedona jars (1.9.1, Spark 3.5 / Scala 2.12
+  #    / Java 11 per the official compatibility matrix) are pulled by the
+  #    smoke job via --packages. Object storage is the EXISTING MinIO on the
+  #    vpp-network (LAKEHOUSE_ENDPOINT / LAKEHOUSE_BUCKET, same env names the
+  #    orchestrator uses).
+  # ===========================================================================
+  spark-master:
+    image: apache/spark:3.5.9-scala2.12-java11-python3-ubuntu
+    restart: unless-stopped
+    command: /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master --host spark-master --port 7077 --webui-port 8080
+    environment:
+      SPARK_NO_DAEMONIZE: "true"
+    ports:
+      - "7077:7077"
+      - "18080:8080"
+    volumes:
+      - ./extended/sedona/metrics.properties:/opt/spark/conf/metrics.properties:ro
+    networks:
+      - extended
+      - ext-monitoring
+      - ext-vpp
+    healthcheck:
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/localhost/8080 && echo ok >&3"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  spark-worker:
+    image: apache/spark:3.5.9-scala2.12-java11-python3-ubuntu
+    restart: unless-stopped
+    command: /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker --webui-port 8081 spark://spark-master:7077
+    environment:
+      SPARK_NO_DAEMONIZE: "true"
+      SPARK_WORKER_MEMORY: 2G
+      SPARK_WORKER_CORES: "2"
+    ports:
+      - "18081:8081"
+    volumes:
+      - ./extended/sedona/metrics.properties:/opt/spark/conf/metrics.properties:ro
+    networks:
+      - extended
+      - ext-monitoring
+      - ext-vpp
+    depends_on:
+      spark-master:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/localhost/8081 && echo ok >&3"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  # One-shot Sedona spatial smoke job (not started by default):
+  #   docker compose -f docker-compose.extended.yml --profile smoke up sedona-smoke
+  sedona-smoke:
+    image: apache/spark:3.5.9-scala2.12-java11-python3-ubuntu
+    profiles: ["smoke"]
+    restart: "no"
+    command: >
+      /opt/spark/bin/spark-submit
+      --master spark://spark-master:7077
+      --packages org.apache.sedona:sedona-spark-shaded-3.5_2.12:1.9.1,org.datasyslab:geotools-wrapper:1.9.1-33.5,org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.262
+      --conf spark.jars.ivy=/tmp/.ivy
+      /opt/smoke/sedona_smoke.py
+    environment:
+      SPARK_MASTER_URL: spark://spark-master:7077
+      # Same env names as the orchestrator lakehouse config (orchestrator/config/config.go):
+      LAKEHOUSE_ENDPOINT: ${LAKEHOUSE_ENDPOINT:-http://minio:9000}
+      LAKEHOUSE_BUCKET: ${LAKEHOUSE_BUCKET:-vpp-data}
+      LAKEHOUSE_ACCESS_KEY: ${MINIO_ROOT_USER:-minioadmin}
+      LAKEHOUSE_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    volumes:
+      - ./extended/sedona/smoke:/opt/smoke:ro
+    networks:
+      - extended
+      - ext-vpp
+    depends_on:
+      spark-master:
+        condition: service_healthy
+      spark-worker:
+        condition: service_healthy
+
+  # ===========================================================================
+  # 4. GEOLIBRE (opengeos/GeoLibre)
+  #    What it actually is: a client-side, browser-first GIS app (MapLibre GL +
+  #    DuckDB-WASM + deck.gl; Tauri desktop/mobile variants). It is NOT a
+  #    backend service and exposes no server-side metrics. The honest runnable
+  #    artifact is the OFFICIAL published web image (nginx + bundled Python
+  #    conversion sidecar), run here with sharing/collab turned off for a
+  #    private, self-contained deployment. Integration point for the platform:
+  #    embed it (GEOLIBRE_EMBED_ORIGINS) or link it as the geospatial workbench
+  #    alongside the Sedona/lakehouse stack. Mount geodata into /data to make
+  #    it available to the conversion sidecar.
+  # ===========================================================================
+  geolibre:
+    image: ghcr.io/opengeos/geolibre:latest
+    restart: unless-stopped
+    environment:
+      # Self-contained: disable the hosted share/collab servers.
+      GEOLIBRE_SHARE_URL: "off"
+      GEOLIBRE_CONVERSION_ROOTS: /data
+    ports:
+      - "8180:80"
+    volumes:
+      - geolibre-data:/data
+    networks:
+      - extended
+
+  # ===========================================================================
+  # 5. OPEN-APPSEC (WAF) - agent + NGINX attachment, locally managed
+  #    Mirrors the official deployment/docker-compose/nginx stack from
+  #    github.com/openappsec/openappsec with the "standalone" profile services
+  #    (smartsync, shared-storage, tuning, postgres) included so the agent is
+  #    fully functional WITHOUT a SaaS WebUI token. The nginx vhost is a
+  #    placeholder (204) - wire proxy_pass to APISIX/another upstream later.
+  #    Set APPSEC_AGENT_TOKEN to connect to https://my.openappsec.io instead.
+  # ===========================================================================
+  appsec-agent:
+    image: ghcr.io/openappsec/agent:${APPSEC_VERSION:-latest}
+    restart: unless-stopped
+    ipc: host
+    environment:
+      SHARED_STORAGE_HOST: appsec-shared-storage
+      LEARNING_HOST: appsec-smartsync
+      TUNING_HOST: appsec-tuning-svc
+      user_email: ${APPSEC_USER_EMAIL:-}
+      AGENT_TOKEN: ${APPSEC_AGENT_TOKEN:-}
+      autoPolicyLoad: ${APPSEC_AUTO_POLICY_LOAD:-false}
+      registered_server: "NGINX"
+    volumes:
+      - appsec-config:/etc/cp/conf
+      - appsec-data:/etc/cp/data
+      - appsec-logs:/var/log/nano_agent
+      - ./extended/openappsec/localconfig:/ext/appsec
+      - shm-volume:/dev/shm/check-point
+    command: /cp-nano-agent
+    networks:
+      - extended
+    depends_on:
+      - appsec-shared-storage
+
+  appsec-nginx:
+    image: ghcr.io/openappsec/nginx-attachment:${APPSEC_VERSION:-latest}
+    restart: unless-stopped
+    ipc: host
+    volumes:
+      - ./extended/openappsec/nginx:/etc/nginx/conf.d:ro
+      - shm-volume:/dev/shm/check-point
+    ports:
+      - "8088:80"
+      - "8443:443"
+    networks:
+      - extended
+    depends_on:
+      - appsec-agent
+
+  appsec-smartsync:
+    image: ghcr.io/openappsec/smartsync:${APPSEC_VERSION:-latest}
+    restart: unless-stopped
+    environment:
+      SHARED_STORAGE_HOST: appsec-shared-storage
+    networks:
+      - extended
+    depends_on:
+      - appsec-shared-storage
+
+  appsec-shared-storage:
+    image: ghcr.io/openappsec/smartsync-shared-files:${APPSEC_VERSION:-latest}
+    restart: unless-stopped
+    ipc: host
+    user: root
+    volumes:
+      - appsec-smartsync-data:/db:z
+    networks:
+      - extended
+
+  appsec-tuning-svc:
+    image: ghcr.io/openappsec/smartsync-tuning:${APPSEC_VERSION:-latest}
+    restart: unless-stopped
+    environment:
+      SHARED_STORAGE_HOST: appsec-shared-storage
+      QUERY_DB_PASSWORD: ${APPSEC_DB_PASSWORD:-appsec-local-dev}
+      QUERY_DB_HOST: appsec-db
+      QUERY_DB_USER: ${APPSEC_DB_USER:-postgres}
+    volumes:
+      - appsec-config:/etc/cp/conf
+    networks:
+      - extended
+    depends_on:
+      - appsec-shared-storage
+      - appsec-db
+
+  appsec-db:
+    image: postgres:18
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: ${APPSEC_DB_PASSWORD:-appsec-local-dev}
+      POSTGRES_USER: ${APPSEC_DB_USER:-postgres}
+    volumes:
+      - appsec-postgres-data:/var/lib/postgresql/data
+    networks:
+      - extended
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ===========================================================================
+  # 6. NOVU (self-hosted notification platform, v3.19.0)
+  #    api + worker + ws + dashboard, dedicated MongoDB and Redis (Novu
+  #    requires its own Redis logical DBs for BullMQ + cache; do NOT point it
+  #    at the platform redis which requires AUTH).
+  #    Attachment storage reuses the existing MinIO lakehouse on vpp-network
+  #    (S3_LOCAL_STACK acts as the custom S3 endpoint; create bucket
+  #    `novu-local` in MinIO once - see README).
+  #    Secrets: NOVU_JWT_SECRET / NOVU_STORE_ENCRYPTION_KEY / NOVU_SECRET_KEY /
+  #    NOVU_MONGO_PASSWORD are fail-loud. See extended/novu/.env.example.
+  #    Platform-side adapter env (for the TS coder): NOVU_API_KEY (from the
+  #    Novu dashboard) + NOVU_BACKEND_URL=http://localhost:3100.
+  # ===========================================================================
+  novu-mongodb:
+    image: mongo:8.0.17
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: root
+      MONGO_INITDB_ROOT_PASSWORD: "${NOVU_MONGO_PASSWORD:?Set NOVU_MONGO_PASSWORD}"
+    volumes:
+      - novu-mongodb-data:/data/db
+    networks:
+      - extended
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--username", "root", "--password", "${NOVU_MONGO_PASSWORD}", "--eval", "db.adminCommand('ping').ok"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  novu-redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - novu-redis-data:/data
+    networks:
+      - extended
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  novu-api:
+    image: ghcr.io/novuhq/novu/api:3.19.0
+    restart: unless-stopped
+    depends_on:
+      novu-mongodb:
+        condition: service_healthy
+      novu-redis:
+        condition: service_healthy
+    environment:
+      NODE_ENV: ${NOVU_NODE_ENV:-production}
+      API_ROOT_URL: ${NOVU_API_ROOT_URL:-http://localhost:3100}
+      PORT: 3000
+      FRONT_BASE_URL: ${NOVU_FRONT_BASE_URL:-http://localhost:4200}
+      MONGO_URL: mongodb://root:${NOVU_MONGO_PASSWORD}@novu-mongodb:27017/novu-db?authSource=admin
+      MONGO_MIN_POOL_SIZE: 5
+      MONGO_MAX_POOL_SIZE: 10
+      MONGO_AUTO_CREATE_INDEXES: "true"
+      REDIS_HOST: novu-redis
+      REDIS_PORT: 6379
+      REDIS_DB_INDEX: 2
+      REDIS_CACHE_SERVICE_PORT: 6379
+      S3_LOCAL_STACK: ${NOVU_S3_ENDPOINT:-http://minio:9000}
+      S3_BUCKET_NAME: ${NOVU_S3_BUCKET:-novu-local}
+      S3_REGION: ${NOVU_S3_REGION:-us-east-1}
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minioadmin}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      JWT_SECRET: "${NOVU_JWT_SECRET:?Set NOVU_JWT_SECRET (openssl rand -hex 32)}"
+      STORE_ENCRYPTION_KEY: "${NOVU_STORE_ENCRYPTION_KEY:?Set NOVU_STORE_ENCRYPTION_KEY (openssl rand -hex 16, exactly 32 chars)}"
+      NOVU_SECRET_KEY: "${NOVU_SECRET_KEY:?Set NOVU_SECRET_KEY (openssl rand -hex 32)}"
+      SUBSCRIBER_WIDGET_JWT_EXPIRATION_TIME: 15d
+      IS_API_IDEMPOTENCY_ENABLED: "false"
+      IS_API_RATE_LIMITING_ENABLED: "false"
+      IS_NEW_MESSAGES_API_RESPONSE_ENABLED: "true"
+      IS_V2_ENABLED: "true"
+      IS_SELF_HOSTED: "true"
+      NEW_RELIC_ENABLED: "false"
+      SENTRY_DSN: ""
+    ports:
+      - "3100:3000"
+    networks:
+      - extended
+      - ext-vpp
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:$${PORT}/v1/health-check || exit 1"]
+      interval: 20s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  novu-worker:
+    image: ghcr.io/novuhq/novu/worker:3.19.0
+    restart: unless-stopped
+    depends_on:
+      novu-mongodb:
+        condition: service_healthy
+      novu-redis:
+        condition: service_healthy
+    environment:
+      NODE_ENV: ${NOVU_NODE_ENV:-production}
+      PORT: 3004
+      MONGO_URL: mongodb://root:${NOVU_MONGO_PASSWORD}@novu-mongodb:27017/novu-db?authSource=admin
+      MONGO_MIN_POOL_SIZE: 5
+      MONGO_MAX_POOL_SIZE: 10
+      REDIS_HOST: novu-redis
+      REDIS_PORT: 6379
+      REDIS_DB_INDEX: 2
+      REDIS_CACHE_SERVICE_PORT: 6379
+      S3_LOCAL_STACK: ${NOVU_S3_ENDPOINT:-http://minio:9000}
+      S3_BUCKET_NAME: ${NOVU_S3_BUCKET:-novu-local}
+      S3_REGION: ${NOVU_S3_REGION:-us-east-1}
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minioadmin}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      STORE_ENCRYPTION_KEY: ${NOVU_STORE_ENCRYPTION_KEY}
+      SUBSCRIBER_WIDGET_JWT_EXPIRATION_TIME: 15d
+      API_ROOT_URL: http://novu-api:3000
+      BROADCAST_QUEUE_CHUNK_SIZE: 100
+      MULTICAST_QUEUE_CHUNK_SIZE: 100
+      IS_EMAIL_INLINE_CSS_DISABLED: "false"
+      IS_USE_MERGED_DIGEST_ID_ENABLED: "false"
+      NEW_RELIC_ENABLED: "false"
+      SENTRY_DSN: ""
+    networks:
+      - extended
+      - ext-vpp
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:$${PORT:-3004}/v1/health-check || exit 1"]
+      interval: 20s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
+
+  novu-ws:
+    image: ghcr.io/novuhq/novu/ws:3.19.0
+    restart: unless-stopped
+    depends_on:
+      novu-mongodb:
+        condition: service_healthy
+      novu-redis:
+        condition: service_healthy
+    environment:
+      NODE_ENV: ${NOVU_NODE_ENV:-production}
+      PORT: 3002
+      MONGO_URL: mongodb://root:${NOVU_MONGO_PASSWORD}@novu-mongodb:27017/novu-db?authSource=admin
+      MONGO_MIN_POOL_SIZE: 5
+      MONGO_MAX_POOL_SIZE: 10
+      REDIS_HOST: novu-redis
+      REDIS_PORT: 6379
+      REDIS_DB_INDEX: 2
+      JWT_SECRET: ${NOVU_JWT_SECRET}
+      NEW_RELIC_ENABLED: "false"
+    ports:
+      - "3102:3002"
+    networks:
+      - extended
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:$${PORT}/v1/health-check || exit 1"]
+      interval: 20s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
+
+  novu-dashboard:
+    image: ghcr.io/novuhq/novu/dashboard:3.19.0
+    restart: unless-stopped
+    depends_on:
+      novu-api:
+        condition: service_healthy
+      novu-worker:
+        condition: service_healthy
+    environment:
+      VITE_API_HOSTNAME: ${NOVU_API_ROOT_URL:-http://localhost:3100}
+      VITE_WEBSOCKET_HOSTNAME: ${NOVU_WS_HOSTNAME:-http://localhost:3102}
+    ports:
+      - "4200:4000"
+    networks:
+      - extended
+
+  # Novu has no native Prometheus endpoint -> infra-level exporters instead.
+  novu-redis-exporter:
+    image: oliver006/redis_exporter:v1.67.0
+    restart: unless-stopped
+    environment:
+      REDIS_ADDR: novu-redis:6379
+    networks:
+      - extended
+      - ext-monitoring
+    depends_on:
+      novu-redis:
+        condition: service_healthy
+
+  novu-mongodb-exporter:
+    image: percona/mongodb_exporter:0.44.0
+    restart: unless-stopped
+    command:
+      - --mongodb.uri=mongodb://root:${NOVU_MONGO_PASSWORD}@novu-mongodb:27017/admin?directConnection=true
+      - --collect-all
+    networks:
+      - extended
+      - ext-monitoring
+    depends_on:
+      novu-mongodb:
+        condition: service_healthy

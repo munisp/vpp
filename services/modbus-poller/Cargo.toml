@@ -18,7 +18,16 @@ tokio-modbus = { version = "0.17.0", default-features = false, features = ["tcp"
 tokio-serial = "5.4.4"
 toml = "0.8.14"
 tracing = "0.1.40"
-tracing-subscriber = { version = "0.3.18", features = ["env-filter", "json"] }
+tracing-subscriber = { version = "0.3.18", features = ["env-filter", "json", "registry"] }
+
+# OpenTelemetry: a matched set — tracing-opentelemetry 0.29 is built against
+# opentelemetry / opentelemetry-sdk / opentelemetry-otlp / opentelemetry-http
+# 0.28 and works with the pinned tracing 0.1.40.
+opentelemetry = "0.28"
+opentelemetry_sdk = "0.28"
+opentelemetry-otlp = { version = "0.28", default-features = false, features = ["grpc-tonic", "trace"] }
+opentelemetry-http = "0.28"
+tracing-opentelemetry = "0.29"
 
 [dev-dependencies]
 tokio-modbus = { version = "0.17.0", default-features = false, features = ["tcp", "rtu", "server", "tcp-server"] }

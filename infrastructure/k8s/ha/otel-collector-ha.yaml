@@ -1,0 +1,228 @@
+# OTel Collector HA — monitoring namespace.
+#
+# This is what makes the OTLP target in permify-ha.yaml
+# (`otel-collector.monitoring.svc.cluster.local:4317`) resolve. Permify pushes
+# traces+metrics over OTLP; every other in-cluster service can do the same by
+# pointing OTEL_EXPORTER_OTLP_ENDPOINT at
+# http://otel-collector.monitoring.svc.cluster.local:4317.
+#
+# The pipeline mirrors observability/otel-collector-config.yaml (compose
+# variant) with two deliberate differences:
+#   1. The prometheus/infra receiver is dropped — kafka-exporter et al. are
+#      compose-side services. In-cluster exporters should carry
+#      prometheus.io/scrape pod annotations and be scraped by the in-cluster
+#      Prometheus directly, or be added here as jobs when they exist.
+#   2. The Jaeger endpoint is the in-cluster Service (see jaeger-ha.yaml).
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: monitoring
+  labels:
+    app.kubernetes.io/name: monitoring
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-collector-config
+  namespace: monitoring
+data:
+  config.yaml: |
+    extensions:
+      health_check:
+        endpoint: 0.0.0.0:13133
+
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+          http:
+            endpoint: 0.0.0.0:4318
+            cors:
+              allowed_origins:
+                - ${env:OTEL_RUM_ALLOWED_ORIGIN}
+              allowed_headers:
+                - Content-Type
+                - Traceparent
+                - Tracestate
+                - Baggage
+
+    processors:
+      memory_limiter:
+        check_interval: 1s
+        limit_percentage: 75
+        spike_limit_percentage: 15
+      resource/tenant:
+        attributes:
+          - key: tenant.id
+            value: ${env:OTEL_TENANT_ID}
+            action: upsert
+          - key: deployment.environment
+            value: ${env:OTEL_ENVIRONMENT}
+            action: upsert
+      batch:
+        timeout: 5s
+        send_batch_size: 1024
+        send_batch_max_size: 2048
+
+    exporters:
+      otlp/jaeger:
+        endpoint: jaeger.monitoring.svc.cluster.local:4317
+        tls:
+          insecure: true
+      prometheus:
+        endpoint: 0.0.0.0:8889
+        resource_to_telemetry_conversion:
+          enabled: true
+        metric_expiration: 10m
+      debug:
+        verbosity: basic
+        sampling_initial: 5
+        sampling_thereafter: 200
+
+    service:
+      extensions: [health_check]
+      telemetry:
+        logs:
+          level: info
+        metrics:
+          address: 0.0.0.0:8888
+          level: detailed
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors: [memory_limiter, resource/tenant, batch]
+          exporters: [otlp/jaeger, debug]
+        metrics:
+          receivers: [otlp]
+          processors: [memory_limiter, resource/tenant, batch]
+          exporters: [prometheus]
+        logs:
+          receivers: [otlp]
+          processors: [memory_limiter, resource/tenant, batch]
+          exporters: [debug]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: otel-collector
+  namespace: monitoring
+  labels:
+    app: otel-collector
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: otel-collector
+  template:
+    metadata:
+      labels:
+        app: otel-collector
+      annotations:
+        # In-cluster Prometheus scrapes the collector's own pipeline
+        # telemetry; the :8889 re-export is scraped via the Service.
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8888"
+        prometheus.io/path: /metrics
+    spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app
+                      operator: In
+                      values:
+                        - otel-collector
+                topologyKey: kubernetes.io/hostname
+      containers:
+        - name: otel-collector
+          image: otel/opentelemetry-collector:0.116.0
+          args: ["--config=/etc/otelcol/config.yaml"]
+          ports:
+            - containerPort: 4317
+              name: otlp-grpc
+            - containerPort: 4318
+              name: otlp-http
+            - containerPort: 8888
+              name: telemetry
+            - containerPort: 8889
+              name: prom-export
+            - containerPort: 13133
+              name: health
+          env:
+            - name: OTEL_TENANT_ID
+              value: "default"
+            - name: OTEL_ENVIRONMENT
+              value: "production"
+            # Browser origin allowed to POST OTLP/HTTP (CORS). Set to the
+            # public app origin, e.g. https://app.example.com
+            - name: OTEL_RUM_ALLOWED_ORIGIN
+              value: "http://localhost:8080"
+          resources:
+            requests:
+              memory: 256Mi
+              cpu: 250m
+            limits:
+              memory: 512Mi
+              cpu: "1"
+          volumeMounts:
+            - name: config
+              mountPath: /etc/otelcol
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 13133
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 13133
+            initialDelaySeconds: 5
+            periodSeconds: 5
+      volumes:
+        - name: config
+          configMap:
+            name: otel-collector-config
+---
+# Cluster-internal OTLP + metrics endpoints. This Service name is exactly what
+# permify-ha.yaml references: otel-collector.monitoring.svc.cluster.local:4317.
+apiVersion: v1
+kind: Service
+metadata:
+  name: otel-collector
+  namespace: monitoring
+  labels:
+    app: otel-collector
+spec:
+  selector:
+    app: otel-collector
+  ports:
+    - name: otlp-grpc
+      port: 4317
+      targetPort: 4317
+    - name: otlp-http
+      port: 4318
+      targetPort: 4318
+    - name: telemetry
+      port: 8888
+      targetPort: 8888
+    - name: prom-export
+      port: 8889
+      targetPort: 8889
+  type: ClusterIP
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: otel-collector-pdb
+  namespace: monitoring
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: otel-collector

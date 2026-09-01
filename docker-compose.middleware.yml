@@ -71,15 +71,21 @@ services:
       - temporal-postgresql
     ports:
       - "7233:7233"
+      - "8000:8000"
     environment:
       - DB=postgresql
       - DB_PORT=5432
       - POSTGRES_USER=temporal
       - POSTGRES_PWD=temporal
       - POSTGRES_SEEDS=temporal-postgresql
+      # Uses the dynamicconfig baked into the auto-setup image (the previous
+      # ./middleware/temporal/dynamicconfig mount pointed at a directory that
+      # does not exist in this repo).
       - DYNAMIC_CONFIG_FILE_PATH=config/dynamicconfig/development-sql.yaml
-    volumes:
-      - ./middleware/temporal/dynamicconfig:/etc/temporal/config/dynamicconfig
+      # Temporal 1.22 serves Prometheus metrics at http://temporal:8000/metrics
+      # when PROMETHEUS_ENDPOINT is set. Scraped by Prometheus (job
+      # temporal-server) and by the OTel collector prometheus/infra receiver.
+      - PROMETHEUS_ENDPOINT=0.0.0.0:8000
     networks:
       - vpp-network
 
@@ -129,6 +135,10 @@ services:
       KC_DB_PASSWORD: keycloak
       KC_HOSTNAME_STRICT: 'false'
       KC_HTTP_ENABLED: 'true'
+      # Expose /health and /metrics on the HTTP port (Keycloak 23 serves them
+      # on 8080; the 9000 management interface only exists in KC >= 25).
+      KC_HEALTH_ENABLED: 'true'
+      KC_METRICS_ENABLED: 'true'
     depends_on:
       - keycloak-postgresql
     networks:
@@ -162,6 +172,17 @@ services:
       - PERMIFY_DATABASE_ENGINE=postgres
       - PERMIFY_DATABASE_URI=postgres://permify:permify@permify-postgresql:5432/permify?sslmode=disable
       - PERMIFY_LOG_LEVEL=info
+      # Permify has NO Prometheus endpoint. It pushes traces and metrics over
+      # OTLP to the collector (same wiring as infrastructure/k8s/ha/permify-ha.yaml);
+      # the collector re-exports the metrics at otel-collector:8889.
+      - PERMIFY_TRACER_ENABLED=true
+      - PERMIFY_TRACER_EXPORTER=otlp
+      - PERMIFY_TRACER_ENDPOINT=otel-collector:4317
+      - PERMIFY_TRACER_INSECURE=true
+      - PERMIFY_METER_ENABLED=true
+      - PERMIFY_METER_EXPORTER=otlp
+      - PERMIFY_METER_ENDPOINT=otel-collector:4317
+      - PERMIFY_METER_INSECURE=true
     depends_on:
       - permify-postgresql
     networks:
@@ -191,9 +212,15 @@ services:
       - "9080:9080"
       - "9091:9091"
       - "9443:9443"
-    volumes:
-      - ./middleware/apisix/config.yaml:/usr/local/apisix/conf/config.yaml:ro
-      - ./middleware/apisix/apisix.yaml:/usr/local/apisix/conf/apisix.yaml:ro
+    # The previous mounts pointed at ./middleware/apisix/* which does not exist
+    # in this repo. APISIX's image-default conf/config.yaml is etcd-backed and
+    # already lists the `prometheus` plugin, which serves
+    # http://apisix:9080/apisix/prometheus/metrics (scraped by Prometheus and
+    # the OTel collector). Routes are managed via the Admin API (:9091) /
+    # infrastructure/k8s/ha/apisix-ha.yaml in k8s; the reference standalone
+    # config infrastructure/apisix-config.yaml is NOT mounted here because its
+    # upstreams (consumer-platform, nextgen-api, kafka-rest) don't exist in
+    # this stack.
     depends_on:
       - etcd
     networks:
@@ -221,13 +248,32 @@ services:
     image: ghcr.io/tigerbeetle/tigerbeetle:latest
     hostname: tigerbeetle
     container_name: vpp-tigerbeetle
-    command: start --addresses=0.0.0.0:3000 /var/lib/tigerbeetle/0_0.tigerbeetle
+    # TigerBeetle has NO Prometheus/HTTP metrics endpoint. Its only metrics
+    # output is StatsD (DogStatsD format), and --statsd requires a literal
+    # IP:port (no DNS), which is why tigerbeetle-statsd below pins
+    # 172.31.255.10 on this network. See observability/README.md.
+    command: start --experimental --statsd=172.31.255.10:9125 --addresses=0.0.0.0:3000 /var/lib/tigerbeetle/0_0.tigerbeetle
     ports:
       - "3001:3000"
     volumes:
       - tigerbeetle-data:/var/lib/tigerbeetle
     networks:
       - vpp-network
+    depends_on:
+      - tigerbeetle-statsd
+
+  # Turns TigerBeetle's StatsD/DogStatsD stream (tb.* metrics, tagged
+  # cluster/replica) into a Prometheus endpoint at :9102/metrics. Scraped as
+  # job `tigerbeetle`. The fixed IP is required by tigerbeetle's --statsd flag.
+  tigerbeetle-statsd:
+    image: prom/statsd-exporter:v0.26.1
+    hostname: tigerbeetle-statsd
+    container_name: vpp-tigerbeetle-statsd
+    ports:
+      - "9102:9102"
+    networks:
+      vpp-network:
+        ipv4_address: 172.31.255.10
 
   # ============================================================================
   # MinIO (Lakehouse Storage)
@@ -277,56 +323,51 @@ services:
       - vpp-network
 
   # ============================================================================
-  # Monitoring
+  # Observability (traces). Metrics (Prometheus/Grafana/Alertmanager/exporters)
+  # live in docker-compose.monitoring.yml — the duplicate prometheus/grafana
+  # services that used to be here mounted ./middleware/prometheus and
+  # ./middleware/grafana, directories that never existed in this repo, so they
+  # could never start. Run the monitoring compose alongside this one instead.
   # ============================================================================
-  prometheus:
-    image: prom/prometheus:latest
-    hostname: prometheus
-    container_name: vpp-prometheus
-    ports:
-      - "9090:9090"
-    volumes:
-      - ./middleware/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
-      - prometheus-data:/prometheus
-    command:
-      - '--config.file=/etc/prometheus/prometheus.yml'
-      - '--storage.tsdb.path=/prometheus'
-    networks:
-      - vpp-network
 
-  grafana:
-    image: grafana/grafana:latest
-    hostname: grafana
-    container_name: vpp-grafana
-    ports:
-      - "3002:3000"
-    environment:
-      - GF_SECURITY_ADMIN_PASSWORD=admin
-      - GF_USERS_ALLOW_SIGN_UP=false
-    volumes:
-      - grafana-data:/var/lib/grafana
-      - ./middleware/grafana/dashboards:/etc/grafana/provisioning/dashboards
-      - ./middleware/grafana/datasources:/etc/grafana/provisioning/datasources
-    depends_on:
-      - prometheus
-    networks:
-      - vpp-network
-
+  # Trace backend. All-in-one >= 1.35 with COLLECTOR_OTLP_ENABLED=true accepts
+  # OTLP/gRPC on 4317 — that is what the otel-collector's otlp/jaeger exporter
+  # targets. UI on 16686. The legacy jaeger-agent/zipkin ports were removed:
+  # nothing in this repo speaks those protocols.
   jaeger:
-    image: jaegertracing/all-in-one:latest
+    image: jaegertracing/all-in-one:1.62.0
     hostname: jaeger
     container_name: vpp-jaeger
     ports:
-      - "5775:5775/udp"
-      - "6831:6831/udp"
-      - "6832:6832/udp"
-      - "5778:5778"
       - "16686:16686"
-      - "14268:14268"
-      - "14250:14250"
-      - "9411:9411"
     environment:
-      - COLLECTOR_ZIPKIN_HOST_PORT=:9411
+      - COLLECTOR_OTLP_ENABLED=true
+    networks:
+      - vpp-network
+
+  # Central OTel collector: OTLP in (gRPC 4317 / HTTP 4318 with CORS for
+  # browser RUM), traces -> jaeger:4317, metrics re-exported on :8889,
+  # own pipeline telemetry on :8888. Config: observability/otel-collector-config.yaml.
+  otel-collector:
+    image: otel/opentelemetry-collector:0.116.0
+    hostname: otel-collector
+    container_name: vpp-otel-collector
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    environment:
+      OTEL_TENANT_ID: ${OTEL_TENANT_ID:-default}
+      OTEL_ENVIRONMENT: ${OTEL_ENVIRONMENT:-development}
+      OTEL_RUM_ALLOWED_ORIGIN: ${OTEL_RUM_ALLOWED_ORIGIN:-http://localhost:8080}
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+      - "8888:8888"
+      - "8889:8889"
+    volumes:
+      - ./observability/otel-collector-config.yaml:/etc/otelcol-contrib/config.yaml:ro
+    depends_on:
+      - jaeger
+    # No healthcheck: the collector image is scratch-based (no shell/wget).
+    # Liveness is observable via the health_check extension on :13133.
     networks:
       - vpp-network
 
@@ -341,9 +382,17 @@ volumes:
   tigerbeetle-data:
   minio-data:
   fluvio-data:
-  prometheus-data:
-  grafana-data:
 
 networks:
+  # Fixed name + fixed subnet: the other compose stacks (monitoring, services)
+  # join this network as `external` so Prometheus, the OTel collector and the
+  # IoT pipeline can resolve each other's container names across stacks, and
+  # tigerbeetle-statsd can pin 172.31.255.10 (tigerbeetle --statsd needs a
+  # literal IP). If the network already exists without these labels, recreate:
+  #   docker network rm vpp-platform-net && docker compose -f docker-compose.middleware.yml up -d
   vpp-network:
+    name: vpp-platform-net
     driver: bridge
+    ipam:
+      config:
+        - subnet: 172.31.255.0/24

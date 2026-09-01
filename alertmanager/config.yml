@@ -1,130 +1,149 @@
+# Alertmanager — VPP Platform
+#
+# Secrets are NOT inline. Every credential is read from a mounted file
+# (Alertmanager *_file options, re-read on config reload):
+#   /etc/alertmanager/secrets/slack_webhook_url      Slack Incoming Webhook URL
+#   /etc/alertmanager/secrets/pagerduty_routing_key  PagerDuty Events API v2 routing key
+#   /etc/alertmanager/secrets/watchdog_webhook_url   DeadMansSwitch webhook (e.g. healthchecks.io)
+#   /etc/alertmanager/secrets/smtp_auth_password     SMTP password (only if you add email receivers)
+# The compose service mounts ./alertmanager/secrets at that path. Replace the
+# placeholder contents with real values, or point the mount at a secrets
+# manager volume. See observability/README.md "Alerting secrets" for the
+# alternative envsubst-rendered variant (config.yml.tmpl).
+
 global:
   resolve_timeout: 5m
-  smtp_smarthost: 'smtp.example.com:587'
-  smtp_from: 'alerts@vpp-platform.com'
-  smtp_auth_username: 'alerts@vpp-platform.com'
-  smtp_auth_password: 'your-smtp-password'
 
-# Templates for notifications
-templates:
-  - '/etc/alertmanager/templates/*.tmpl'
-
-# Route tree for alerts
 route:
-  group_by: ['alertname', 'cluster', 'service']
+  group_by: ['alertname', 'component', 'service_name']
   group_wait: 10s
-  group_interval: 10s
+  group_interval: 5m
   repeat_interval: 12h
-  receiver: 'default'
-  
+  receiver: 'slack-general'
+
   routes:
-    # Critical alerts go to PagerDuty
+    # DeadMansSwitch: the Watchdog alert fires 24/7; if it stops reaching the
+    # external webhook, that service pages us — silent pipeline death is caught.
+    - match:
+        alertname: Watchdog
+      receiver: 'watchdog'
+      group_by: ['alertname']
+      group_wait: 0s
+      group_interval: 1m
+      repeat_interval: 1m
+
+    # Critical -> PagerDuty, and continue so it also lands in Slack.
     - match:
         severity: critical
       receiver: 'pagerduty'
       continue: true
-    
-    # Warning alerts go to Slack
-    - match:
-        severity: warning
-      receiver: 'slack'
-    
-    # Kafka alerts
+
+    # Component-specialized Slack channels.
     - match:
         component: kafka
       receiver: 'slack-kafka'
       group_wait: 30s
-    
-    # Redis alerts
     - match:
         component: redis
       receiver: 'slack-redis'
       group_wait: 30s
-    
-    # Temporal alerts
     - match:
         component: temporal
       receiver: 'slack-temporal'
       group_wait: 30s
+    - match:
+        component: observability
+      receiver: 'slack-observability'
+      group_wait: 30s
 
-# Inhibition rules
+    # Everything else (warnings, availability, SLO) -> general channel.
+    - match:
+        severity: warning
+      receiver: 'slack-general'
+
 inhibit_rules:
-  # Inhibit warning if critical is firing
+  # A firing critical suppresses the warning of the same alert on the same target.
   - source_match:
       severity: 'critical'
     target_match:
       severity: 'warning'
-    equal: ['alertname', 'cluster', 'service']
+    equal: ['alertname', 'instance']
 
-# Notification receivers
+  # When the collector is down, drop the derivative pipeline alerts — they
+  # cannot be evaluated meaningfully while telemetry is absent.
+  - source_match:
+      alertname: 'OtelCollectorDown'
+    target_match:
+      component: 'observability'
+    equal: ['component']
+
 receivers:
-  # Default receiver (email)
-  - name: 'default'
-    email_configs:
-      - to: 'ops-team@vpp-platform.com'
-        headers:
-          Subject: '[VPP Alert] {{ .GroupLabels.alertname }}'
-        html: |
-          <h3>Alert: {{ .GroupLabels.alertname }}</h3>
-          <p><strong>Severity:</strong> {{ .CommonLabels.severity }}</p>
-          <p><strong>Summary:</strong> {{ .CommonAnnotations.summary }}</p>
-          <p><strong>Description:</strong> {{ .CommonAnnotations.description }}</p>
-          <p><strong>Time:</strong> {{ .StartsAt }}</p>
-
-  # Slack receiver (general)
-  - name: 'slack'
+  - name: 'slack-general'
     slack_configs:
-      - api_url: 'https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK'
+      - api_url_file: /etc/alertmanager/secrets/slack_webhook_url
         channel: '#vpp-alerts'
-        title: '{{ .GroupLabels.alertname }}'
+        title: '[{{ .CommonLabels.severity | toUpper }}] {{ .GroupLabels.alertname }}'
         text: |
-          *Severity:* {{ .CommonLabels.severity }}
           *Summary:* {{ .CommonAnnotations.summary }}
           *Description:* {{ .CommonAnnotations.description }}
+          *Component:* {{ .CommonLabels.component }}{{ if .CommonLabels.service_name }}  *Service:* {{ .CommonLabels.service_name }}{{ end }}
         send_resolved: true
 
-  # Slack receiver (Kafka)
   - name: 'slack-kafka'
     slack_configs:
-      - api_url: 'https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK'
+      - api_url_file: /etc/alertmanager/secrets/slack_webhook_url
         channel: '#vpp-kafka-alerts'
-        title: 'Kafka Alert: {{ .GroupLabels.alertname }}'
+        title: 'Kafka: {{ .GroupLabels.alertname }}'
         text: |
-          *Severity:* {{ .CommonLabels.severity }}
           *Summary:* {{ .CommonAnnotations.summary }}
           *Description:* {{ .CommonAnnotations.description }}
         send_resolved: true
 
-  # Slack receiver (Redis)
   - name: 'slack-redis'
     slack_configs:
-      - api_url: 'https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK'
+      - api_url_file: /etc/alertmanager/secrets/slack_webhook_url
         channel: '#vpp-redis-alerts'
-        title: 'Redis Alert: {{ .GroupLabels.alertname }}'
+        title: 'Redis: {{ .GroupLabels.alertname }}'
         text: |
-          *Severity:* {{ .CommonLabels.severity }}
           *Summary:* {{ .CommonAnnotations.summary }}
           *Description:* {{ .CommonAnnotations.description }}
         send_resolved: true
 
-  # Slack receiver (Temporal)
   - name: 'slack-temporal'
     slack_configs:
-      - api_url: 'https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK'
+      - api_url_file: /etc/alertmanager/secrets/slack_webhook_url
         channel: '#vpp-temporal-alerts'
-        title: 'Temporal Alert: {{ .GroupLabels.alertname }}'
+        title: 'Temporal: {{ .GroupLabels.alertname }}'
         text: |
-          *Severity:* {{ .CommonLabels.severity }}
           *Summary:* {{ .CommonAnnotations.summary }}
           *Description:* {{ .CommonAnnotations.description }}
         send_resolved: true
 
-  # PagerDuty receiver (critical alerts)
+  - name: 'slack-observability'
+    slack_configs:
+      - api_url_file: /etc/alertmanager/secrets/slack_webhook_url
+        channel: '#vpp-observability-alerts'
+        title: 'Observability: {{ .GroupLabels.alertname }}'
+        text: |
+          *Summary:* {{ .CommonAnnotations.summary }}
+          *Description:* {{ .CommonAnnotations.description }}
+        send_resolved: true
+
   - name: 'pagerduty'
     pagerduty_configs:
-      - service_key: 'YOUR_PAGERDUTY_SERVICE_KEY'
+      - routing_key_file: /etc/alertmanager/secrets/pagerduty_routing_key
         description: '{{ .CommonAnnotations.summary }}'
+        severity: '{{ .CommonLabels.severity }}'
         details:
-          severity: '{{ .CommonLabels.severity }}'
-          description: '{{ .CommonAnnotations.description }}'
           alertname: '{{ .GroupLabels.alertname }}'
+          component: '{{ .CommonLabels.component }}'
+          description: '{{ .CommonAnnotations.description }}'
+
+  # DeadMansSwitch target. Point watchdog_webhook_url at a dead-man's-switch
+  # service (healthchecks.io, PagerDuty Dead Man's Snitch, or an internal
+  # endpoint that alerts on missing pings).
+  - name: 'watchdog'
+    webhook_configs:
+      - url_file: /etc/alertmanager/secrets/watchdog_webhook_url
+        send_resolved: false
+        max_alerts: 1

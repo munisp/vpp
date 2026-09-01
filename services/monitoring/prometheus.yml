@@ -46,7 +46,8 @@ scrape_configs:
     static_configs:
       - targets: ['node-exporter:9100']
 
-  # PostgreSQL Exporter
-  - job_name: 'postgres'
+  # MySQL Exporter (this stack's database is MySQL on :3306; the old
+  # postgres-exporter target had no backing service and was always down)
+  - job_name: 'mysql'
     static_configs:
-      - targets: ['postgres-exporter:9187']
+      - targets: ['mysqld-exporter:9104']

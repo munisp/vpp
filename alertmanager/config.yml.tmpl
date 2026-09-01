@@ -1,0 +1,127 @@
+# Alternative Alertmanager config for teams that inject secrets via
+# environment variables instead of mounted secret files. Render before use:
+#
+#   envsubst < alertmanager/config.yml.tmpl > alertmanager/config.rendered.yml
+#   # and mount config.rendered.yml as /etc/alertmanager/config.yml
+#
+# Required env: SLACK_WEBHOOK_URL, PAGERDUTY_ROUTING_KEY, WATCHDOG_WEBHOOK_URL,
+#               ALERT_EMAIL_TO, SMTP_SMARTHOST, SMTP_FROM, SMTP_AUTH_USERNAME,
+#               SMTP_AUTH_PASSWORD
+# The live config (config.yml) uses *_file secret mounts and is the default.
+
+global:
+  resolve_timeout: 5m
+  smtp_smarthost: '${SMTP_SMARTHOST}'
+  smtp_from: '${SMTP_FROM}'
+  smtp_auth_username: '${SMTP_AUTH_USERNAME}'
+  smtp_auth_password: '${SMTP_AUTH_PASSWORD}'
+
+route:
+  group_by: ['alertname', 'component', 'service_name']
+  group_wait: 10s
+  group_interval: 5m
+  repeat_interval: 12h
+  receiver: 'default'
+  routes:
+    - match:
+        alertname: Watchdog
+      receiver: 'watchdog'
+      group_by: ['alertname']
+      group_wait: 0s
+      group_interval: 1m
+      repeat_interval: 1m
+    - match:
+        severity: critical
+      receiver: 'pagerduty'
+      continue: true
+    - match:
+        component: kafka
+      receiver: 'slack-kafka'
+      group_wait: 30s
+    - match:
+        component: redis
+      receiver: 'slack-redis'
+      group_wait: 30s
+    - match:
+        component: temporal
+      receiver: 'slack-temporal'
+      group_wait: 30s
+    - match:
+        component: observability
+      receiver: 'slack-observability'
+      group_wait: 30s
+    - match:
+        severity: warning
+      receiver: 'slack-general'
+
+inhibit_rules:
+  - source_match:
+      severity: 'critical'
+    target_match:
+      severity: 'warning'
+    equal: ['alertname', 'instance']
+  - source_match:
+      alertname: 'OtelCollectorDown'
+    target_match:
+      component: 'observability'
+    equal: ['component']
+
+receivers:
+  - name: 'default'
+    email_configs:
+      - to: '${ALERT_EMAIL_TO}'
+        send_resolved: true
+
+  - name: 'slack-general'
+    slack_configs:
+      - api_url: '${SLACK_WEBHOOK_URL}'
+        channel: '#vpp-alerts'
+        title: '[{{ .CommonLabels.severity | toUpper }}] {{ .GroupLabels.alertname }}'
+        text: |
+          *Summary:* {{ .CommonAnnotations.summary }}
+          *Description:* {{ .CommonAnnotations.description }}
+        send_resolved: true
+
+  - name: 'slack-kafka'
+    slack_configs:
+      - api_url: '${SLACK_WEBHOOK_URL}'
+        channel: '#vpp-kafka-alerts'
+        title: 'Kafka: {{ .GroupLabels.alertname }}'
+        text: '{{ .CommonAnnotations.description }}'
+        send_resolved: true
+
+  - name: 'slack-redis'
+    slack_configs:
+      - api_url: '${SLACK_WEBHOOK_URL}'
+        channel: '#vpp-redis-alerts'
+        title: 'Redis: {{ .GroupLabels.alertname }}'
+        text: '{{ .CommonAnnotations.description }}'
+        send_resolved: true
+
+  - name: 'slack-temporal'
+    slack_configs:
+      - api_url: '${SLACK_WEBHOOK_URL}'
+        channel: '#vpp-temporal-alerts'
+        title: 'Temporal: {{ .GroupLabels.alertname }}'
+        text: '{{ .CommonAnnotations.description }}'
+        send_resolved: true
+
+  - name: 'slack-observability'
+    slack_configs:
+      - api_url: '${SLACK_WEBHOOK_URL}'
+        channel: '#vpp-observability-alerts'
+        title: 'Observability: {{ .GroupLabels.alertname }}'
+        text: '{{ .CommonAnnotations.description }}'
+        send_resolved: true
+
+  - name: 'pagerduty'
+    pagerduty_configs:
+      - routing_key: '${PAGERDUTY_ROUTING_KEY}'
+        description: '{{ .CommonAnnotations.summary }}'
+        severity: '{{ .CommonLabels.severity }}'
+
+  - name: 'watchdog'
+    webhook_configs:
+      - url: '${WATCHDOG_WEBHOOK_URL}'
+        send_resolved: false
+        max_alerts: 1

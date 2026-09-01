@@ -18,6 +18,8 @@ import (
 	"strings"
 	"time"
 
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+
 	"github.com/vpp/grid-protocols/internal/ocpp16"
 	"github.com/vpp/grid-protocols/internal/openadr"
 	"github.com/vpp/grid-protocols/internal/sep2"
@@ -51,7 +53,18 @@ func NewClient(cfg Config) (*Client, error) {
 	if timeout <= 0 {
 		timeout = 15 * time.Second
 	}
-	return &Client{baseURL: base, secret: []byte(cfg.SharedSecret), http: &http.Client{Timeout: timeout}}, nil
+	return &Client{
+		baseURL: base,
+		secret:  []byte(cfg.SharedSecret),
+		http: &http.Client{
+			Timeout: timeout,
+			// otelhttp's transport starts a client span per call and injects the
+			// W3C traceparent header, so the server's /api/grid/* handlers join
+			// the trace that began at the OCPP action or admin request. With the
+			// SDK disabled it passes requests through unchanged.
+			Transport: otelhttp.NewTransport(http.DefaultTransport),
+		},
+	}, nil
 }
 
 func (c *Client) post(ctx context.Context, path string, payload any, out any) error {

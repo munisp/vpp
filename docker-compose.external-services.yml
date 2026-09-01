@@ -34,10 +34,13 @@ services:
       - POSTGRES_PWD=temporal
       - POSTGRES_SEEDS=temporal-postgresql
       - DYNAMIC_CONFIG_FILE_PATH=config/dynamicconfig/development-sql.yaml
+      # Temporal 1.22 Prometheus metrics at http://localhost:8000/metrics
+      - PROMETHEUS_ENDPOINT=0.0.0.0:8000
     ports:
       - "7233:7233"
-    volumes:
-      - ./temporal-config:/etc/temporal/config/dynamicconfig
+      - "8000:8000"
+    # The ./temporal-config mount was removed: that directory does not exist in
+    # this repo, and the auto-setup image ships development-sql.yaml in-image.
     networks:
       - vpp-network
     healthcheck:

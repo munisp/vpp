@@ -5,6 +5,10 @@
  * It should be run as a separate process for scalability.
  */
 
+// OTel init must run before anything else loads (auto-instrumentation hooks).
+// This worker has no HTTP server: its Prometheus exporter listens on
+// OTEL_PROMETHEUS_PORT, default 9091 (see server/_core/telemetry.ts).
+import { temporalWorkerTelemetry, withTelemetryShutdown } from '../_core/telemetry';
 import { NativeConnection, Worker } from '@temporalio/worker';
 import * as activities from './payment-activities';
 
@@ -25,6 +29,9 @@ async function run() {
     activities,
     maxConcurrentActivityTaskExecutions: 10,
     maxConcurrentWorkflowTaskExecutions: 100,
+    // OTel workflow/activity interceptors + workflow span sink (undefined
+    // when telemetry is disabled, e.g. OTEL_SDK_DISABLED=true).
+    ...(await temporalWorkerTelemetry()),
   });
 
   console.log('[Temporal Worker] Worker created for task queue: payment-processing');
@@ -43,10 +50,12 @@ run().catch((err) => {
 // Graceful shutdown
 process.on('SIGTERM', async () => {
   console.log('[Temporal Worker] Received SIGTERM, shutting down gracefully...');
+  await withTelemetryShutdown();
   process.exit(0);
 });
 
 process.on('SIGINT', async () => {
   console.log('[Temporal Worker] Received SIGINT, shutting down gracefully...');
+  await withTelemetryShutdown();
   process.exit(0);
 });

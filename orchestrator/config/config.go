@@ -5,17 +5,17 @@ import (
 )
 
 type Config struct {
-	Temporal     TemporalConfig
-	Kafka        KafkaConfig
-	Dapr         DaprConfig
-	Fluvio       FluvioConfig
-	Keycloak     KeycloakConfig
-	Permify      PermifyConfig
-	Redis        RedisConfig
-	APISix       APISixConfig
-	TigerBeetle  TigerBeetleConfig
-	Lakehouse    LakehouseConfig
-	Database     DatabaseConfig
+	Temporal    TemporalConfig
+	Kafka       KafkaConfig
+	Dapr        DaprConfig
+	Fluvio      FluvioConfig
+	Keycloak    KeycloakConfig
+	Permify     PermifyConfig
+	Redis       RedisConfig
+	APISix      APISixConfig
+	TigerBeetle TigerBeetleConfig
+	Lakehouse   LakehouseConfig
+	Database    DatabaseConfig
 }
 
 type TemporalConfig struct {

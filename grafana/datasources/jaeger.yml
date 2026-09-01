@@ -1,0 +1,22 @@
+apiVersion: 1
+
+datasources:
+  - name: Jaeger
+    uid: jaeger
+    type: jaeger
+    access: proxy
+    url: http://jaeger:16686
+    editable: true
+    jsonData:
+      # Trace -> metrics correlation: jump from a span's service to the
+      # Prometheus datasource.
+      tracesToMetrics:
+        datasourceUid: prometheus
+        queries:
+          - name: "Request rate"
+            query: "sum(rate(http_server_request_duration_seconds_count{service_name=\"$${__span.tags[\"service.name\"]}\"}[5m]))"
+      nodeGraph:
+        enabled: true
+      spanBar:
+        type: "Tag"
+        tag: "otel.status_code"

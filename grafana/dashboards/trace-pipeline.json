@@ -1,0 +1,99 @@
+{
+  "uid": "vpp-trace-pipeline",
+  "title": "OTel Trace Pipeline (Collector -> Jaeger)",
+  "description": "Collector self-telemetry from otel-collector:8888 (job otel-collector-internal): ingestion, drops, export to Jaeger, and collector resource usage.",
+  "tags": ["vpp", "otel", "collector", "jaeger"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": {"from": "now-1h", "to": "now"},
+  "panels": [
+    {
+      "id": 1,
+      "title": "Spans received: accepted vs refused (spans/s)",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"x": 0, "y": 0, "w": 12, "h": 8},
+      "targets": [
+        {"refId": "A", "expr": "sum(rate(otelcol_receiver_accepted_spans[5m]))", "legendFormat": "accepted"},
+        {"refId": "B", "expr": "sum(rate(otelcol_receiver_refused_spans[5m]))", "legendFormat": "refused (dropped at ingest)"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "ops"}, "overrides": []}
+    },
+    {
+      "id": 2,
+      "title": "Spans exported to Jaeger: sent vs failed (spans/s)",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"x": 12, "y": 0, "w": 12, "h": 8},
+      "targets": [
+        {"refId": "A", "expr": "sum(rate(otelcol_exporter_sent_spans[5m]))", "legendFormat": "sent"},
+        {"refId": "B", "expr": "sum(rate(otelcol_exporter_send_failed_spans[5m]))", "legendFormat": "send_failed (lost)"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "ops"}, "overrides": []}
+    },
+    {
+      "id": 3,
+      "title": "Trace drop ratio (%)",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"x": 0, "y": 8, "w": 12, "h": 8},
+      "targets": [
+        {"refId": "A", "expr": "100 * (sum(rate(otelcol_receiver_refused_spans[5m])) + sum(rate(otelcol_exporter_send_failed_spans[5m]))) / sum(rate(otelcol_receiver_accepted_spans[5m]))", "legendFormat": "drop ratio"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "percent", "min": 0, "thresholds": {"steps": [{"color": "green", "value": 0}, {"color": "red", "value": 1}]}}, "overrides": []}
+    },
+    {
+      "id": 4,
+      "title": "Metric points received (points/s)",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"x": 12, "y": 8, "w": 12, "h": 8},
+      "targets": [
+        {"refId": "A", "expr": "sum(rate(otelcol_receiver_accepted_metric_points[5m]))", "legendFormat": "accepted"},
+        {"refId": "B", "expr": "sum(rate(otelcol_receiver_refused_metric_points[5m]))", "legendFormat": "refused"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "ops"}, "overrides": []}
+    },
+    {
+      "id": 5,
+      "title": "Collector memory RSS (bytes)",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"x": 0, "y": 16, "w": 12, "h": 8},
+      "targets": [{"refId": "A", "expr": "otelcol_process_memory_rss", "legendFormat": "{{instance}}"}],
+      "fieldConfig": {"defaults": {"unit": "bytes"}, "overrides": []}
+    },
+    {
+      "id": 6,
+      "title": "Batch processor avg batch size (spans/metrics)",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"x": 12, "y": 16, "w": 12, "h": 8},
+      "targets": [{"refId": "A", "expr": "sum(rate(otelcol_processor_batch_batch_send_size_sum[5m])) / sum(rate(otelcol_processor_batch_batch_send_size_count[5m]))", "legendFormat": "avg batch size"}],
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []}
+    },
+    {
+      "id": 7,
+      "title": "Export queue / retry pressure",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"x": 0, "y": 24, "w": 12, "h": 8},
+      "targets": [
+        {"refId": "A", "expr": "sum(otelcol_exporter_queue_size)", "legendFormat": "queue size"},
+        {"refId": "B", "expr": "sum(otelcol_exporter_queue_capacity)", "legendFormat": "queue capacity"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []}
+    },
+    {
+      "id": 8,
+      "title": "Scrape failures of infra receiver (up==0 within collector scrape)",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"x": 12, "y": 24, "w": 12, "h": 8},
+      "targets": [{"refId": "A", "expr": "up{job=\"otel-collector\"} == 0", "legendFormat": "collector re-export down"}],
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []}
+    }
+  ]
+}

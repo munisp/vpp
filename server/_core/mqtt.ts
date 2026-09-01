@@ -5,9 +5,18 @@
  */
 
 import mqtt from 'mqtt';
+import {
+  context as otelContext,
+  propagation,
+  SpanKind,
+  SpanStatusCode,
+  trace,
+} from '@opentelemetry/api';
 import { getDb } from '../db';
 import { telemetry, assets } from '../../drizzle/schema';
 import { eq } from 'drizzle-orm';
+
+const mqttTracer = trace.getTracer('vpp-mqtt');
 
 // MQTT Configuration
 const MQTT_BROKER_URL = process.env.MQTT_BROKER_URL || 'mqtt://localhost:1883';
@@ -224,16 +233,42 @@ class MQTTService {
     const topic = `${TOPIC_PREFIX}/${userId}/${assetId}/command/${command}`;
     const message = JSON.stringify(payload);
 
+    // Producer span per publish; W3C trace context rides in MQTT v5 user
+    // properties so subscribers that understand it can continue the trace.
+    // mqtt.js only serializes `properties` on MQTT5 sessions — on 3.1.1
+    // brokers the field is dropped on the floor, harmlessly.
+    const span = mqttTracer.startSpan(`mqtt.publish ${topic}`, {
+      kind: SpanKind.PRODUCER,
+      attributes: {
+        'messaging.system': 'mqtt',
+        'messaging.destination.name': topic,
+        'messaging.operation': 'publish',
+      },
+    });
+    const userProperties: Record<string, string> = {};
+    otelContext.with(trace.setSpan(otelContext.active(), span), () =>
+      propagation.inject(otelContext.active(), userProperties)
+    );
+
     return new Promise((resolve, reject) => {
-      this.client!.publish(topic, message, { qos: 1 }, (err) => {
-        if (err) {
-          console.error(`[MQTT] Failed to publish command to ${topic}:`, err);
-          reject(err);
-        } else {
-          console.log(`[MQTT] Published command to ${topic}`);
-          resolve();
+      this.client!.publish(
+        topic,
+        message,
+        { qos: 1, properties: { userProperties } },
+        (err) => {
+          if (err) {
+            span.recordException(err);
+            span.setStatus({ code: SpanStatusCode.ERROR, message: err.message });
+            span.end();
+            console.error(`[MQTT] Failed to publish command to ${topic}:`, err);
+            reject(err);
+          } else {
+            span.end();
+            console.log(`[MQTT] Published command to ${topic}`);
+            resolve();
+          }
         }
-      });
+      );
     });
   }
 

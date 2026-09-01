@@ -1,5 +1,10 @@
-fluvio==0.14.0
+# 0.16.x ships binary wheels; 0.14.0 does not, and its source build needs a
+# Rust toolchain the Dockerfile does not provide.
+fluvio==0.16.0
 psycopg2-binary==2.9.9
 python-dotenv==1.0.0
 pydantic==2.5.0
 loguru==0.7.2
+prometheus-client==0.21.1
+opentelemetry-sdk==1.29.0
+opentelemetry-exporter-otlp-proto-grpc==1.29.0

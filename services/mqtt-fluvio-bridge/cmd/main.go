@@ -2,8 +2,11 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"os/signal"
 	"sync"
@@ -13,14 +16,26 @@ import (
 	mqtt_client "github.com/eclipse/paho.mqtt.golang"
 	"github.com/sirupsen/logrus"
 	"github.com/vpp/mqtt-fluvio-bridge/config"
+	"github.com/vpp/mqtt-fluvio-bridge/internal/metrics"
 	"github.com/vpp/mqtt-fluvio-bridge/internal/models"
 	"github.com/vpp/mqtt-fluvio-bridge/internal/mqtt"
 	"github.com/vpp/mqtt-fluvio-bridge/internal/stream"
+	"github.com/vpp/mqtt-fluvio-bridge/internal/telemetry"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
+// tracer is safe to resolve at package scope: the global provider delegates,
+// so spans created before telemetry.Setup binds the SDK stay no-op until then.
+var tracer = otel.Tracer("github.com/vpp/mqtt-fluvio-bridge/cmd")
+
 // message pairs telemetry with the MQTT topic it arrived on, which selects the
-// destination stream topic.
+// destination stream topic. ctx carries the receive span context so the
+// produce span and the propagated traceparent join the same trace.
 type message struct {
+	ctx         context.Context
 	sourceTopic string
 	telemetry   *models.TelemetryData
 }
@@ -59,6 +74,20 @@ func main() {
 
 	logger.Info("Starting MQTT-Fluvio Bridge")
 
+	// Telemetry never blocks startup: with no OTLP endpoint configured it
+	// disables itself (loudly), and an unreachable collector only costs
+	// background retries. Its state is reported on /healthz.
+	tele := telemetry.Setup("mqtt-fluvio-bridge", func(format string, args ...any) {
+		logger.Warnf(format, args...)
+	})
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := tele.Shutdown(shutdownCtx); err != nil {
+			logger.Warnf("telemetry shutdown failed: %v", err)
+		}
+	}()
+
 	// Create bridge
 	bridge, err := NewBridge(cfg, logger)
 	if err != nil {
@@ -69,6 +98,16 @@ func main() {
 	if err := bridge.Start(); err != nil {
 		logger.Fatalf("Failed to start bridge: %v", err)
 	}
+
+	// Serve Prometheus metrics and health. This is the scrape target the
+	// monitoring stack has always pointed at (mqtt-fluvio-bridge:8080); it
+	// used to be dead because StartMetricsServer was never called.
+	go func() {
+		logger.Infof("Metrics server listening on %s (/metrics, /healthz)", cfg.Bridge.MetricsAddr)
+		if err := metrics.StartMetricsServer(cfg.Bridge.MetricsAddr, healthzHandler(bridge, tele)); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logger.Errorf("Metrics server failed: %v", err)
+		}
+	}()
 
 	// Wait for termination signal
 	sigCh := make(chan os.Signal, 1)
@@ -160,11 +199,27 @@ func (b *Bridge) Stop() {
 
 func (b *Bridge) createMessageHandler() mqtt_client.MessageHandler {
 	return func(client mqtt_client.Client, msg mqtt_client.Message) {
+		// One consumer span per MQTT message; its context rides the queued
+		// message into the worker, which parents the produce span to it and
+		// propagates it as traceparent on the published record.
+		ctx, span := tracer.Start(context.Background(), "mqtt.receive",
+			trace.WithSpanKind(trace.SpanKindConsumer),
+			trace.WithAttributes(
+				attribute.String("messaging.system", "mqtt"),
+				attribute.String("messaging.destination.name", msg.Topic()),
+				attribute.Int("messaging.message.payload_size_bytes", len(msg.Payload())),
+			),
+		)
+		defer span.End()
+
 		b.logger.Debugf("Received MQTT message from topic: %s", msg.Topic())
+		metrics.MQTTMessagesReceived.WithLabelValues(msg.Topic()).Inc()
 
 		// Parse telemetry data
 		telemetry, err := models.FromJSON(msg.Payload())
 		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "unparseable telemetry payload")
 			b.logger.Errorf("Failed to parse telemetry data: %v", err)
 			return
 		}
@@ -172,6 +227,9 @@ func (b *Bridge) createMessageHandler() mqtt_client.MessageHandler {
 		// Validate if enabled
 		if b.config.Bridge.EnableValidation {
 			if err := telemetry.Validate(); err != nil {
+				span.RecordError(err)
+				span.SetStatus(codes.Error, "telemetry validation failed")
+				metrics.ValidationErrors.WithLabelValues("field_range").Inc()
 				b.logger.Errorf("Invalid telemetry data: %v", err)
 				return
 			}
@@ -179,10 +237,12 @@ func (b *Bridge) createMessageHandler() mqtt_client.MessageHandler {
 
 		// Send to worker pool
 		select {
-		case b.messageCh <- message{sourceTopic: msg.Topic(), telemetry: telemetry}:
+		case b.messageCh <- message{ctx: ctx, sourceTopic: msg.Topic(), telemetry: telemetry}:
+			metrics.WorkerQueueSize.Set(float64(len(b.messageCh)))
 		case <-b.ctx.Done():
 			return
 		default:
+			span.SetStatus(codes.Error, "worker queue full, message dropped")
 			b.logger.Warn("Message channel full, dropping message")
 		}
 	}
@@ -190,6 +250,9 @@ func (b *Bridge) createMessageHandler() mqtt_client.MessageHandler {
 
 func (b *Bridge) worker(id int) {
 	defer b.wg.Done()
+
+	metrics.ActiveWorkers.Inc()
+	defer metrics.ActiveWorkers.Dec()
 
 	b.logger.Infof("Worker %d started", id)
 
@@ -204,6 +267,7 @@ func (b *Bridge) worker(id int) {
 				b.logger.Infof("Worker %d: message channel closed", id)
 				return
 			}
+			metrics.WorkerQueueSize.Set(float64(len(b.messageCh)))
 
 			if err := b.processTelemetry(msg); err != nil {
 				b.logger.Errorf("Worker %d: failed to process telemetry: %v", id, err)
@@ -216,9 +280,25 @@ func (b *Bridge) processTelemetry(msg message) error {
 	// Resolve the destination topic from the MQTT topic the record arrived on
 	topic := resolveTopic(b.config, msg.sourceTopic)
 
+	started := time.Now()
+
+	// Producer span, child of the receive span: its context is what the stream
+	// producers inject as traceparent (Kafka headers, Fluvio payload envelope).
+	ctx, span := tracer.Start(msg.ctx, "stream.produce",
+		trace.WithSpanKind(trace.SpanKindProducer),
+		trace.WithAttributes(
+			attribute.String("messaging.system", string(b.stream.Transport())),
+			attribute.String("messaging.destination.name", topic),
+			attribute.String("device.id", msg.telemetry.DeviceID),
+		),
+	)
+	defer span.End()
+
 	// Convert to JSON
 	payload, err := msg.telemetry.ToJSON()
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return fmt.Errorf("failed to serialize telemetry: %w", err)
 	}
 
@@ -226,16 +306,50 @@ func (b *Bridge) processTelemetry(msg message) error {
 	key := msg.telemetry.DeviceID
 
 	// Publish with timeout
-	ctx, cancel := context.WithTimeout(b.ctx, 5*time.Second)
+	sendCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	if err := b.stream.Send(ctx, topic, key, payload); err != nil {
+	if err := b.stream.Send(sendCtx, topic, key, payload); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		metrics.FluvioPublishErrors.WithLabelValues(topic, "publish").Inc()
 		return fmt.Errorf("failed to publish to %s topic %s: %w", b.stream.Transport(), topic, err)
 	}
+
+	metrics.FluvioMessagesPublished.WithLabelValues(topic).Inc()
+	metrics.MessageProcessingDuration.WithLabelValues(msg.sourceTopic).Observe(time.Since(started).Seconds())
 
 	b.logger.Debugf("Published telemetry from device %s to %s topic %s",
 		msg.telemetry.DeviceID, b.stream.Transport(), topic)
 	return nil
+}
+
+// healthzHandler reports liveness with the two things an operator checks here:
+// whether the telemetry pipeline is exporting, and whether the MQTT broker
+// connection (which auto-reconnects) is currently up.
+func healthzHandler(b *Bridge, tele *telemetry.Telemetry) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		connected := b.mqtt.IsConnected()
+		if connected {
+			metrics.MQTTConnectionStatus.Set(1)
+		} else {
+			metrics.MQTTConnectionStatus.Set(0)
+		}
+
+		status := "ok"
+		code := http.StatusOK
+		if !connected {
+			status = "degraded"
+			code = http.StatusServiceUnavailable
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(code)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"status":    status,
+			"mqtt":      map[string]any{"connected": connected},
+			"telemetry": tele.Status(),
+		})
+	}
 }
 
 // resolveTopic maps an MQTT topic to its configured stream topic, honouring MQTT

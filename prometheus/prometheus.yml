@@ -1,5 +1,16 @@
 # Prometheus Configuration for VPP Platform
-# Version: v21.0
+#
+# All targets are container DNS names on the shared network `vpp-platform-net`
+# (created by docker-compose.middleware.yml) or this stack's `monitoring`
+# network. No target here is aspirational: each endpoint either already exists
+# (exporters, temporal with PROMETHEUS_ENDPOINT, keycloak with
+# KC_METRICS_ENABLED, apisix prometheus plugin, otel-collector) or is being
+# delivered in this wave by the service coders per the agreed contract
+# (vpp-server /metrics, worker metrics 9091-9094, mqtt-fluvio-bridge :8080,
+# grid-protocols :9100, optimizer :8000, fluvio consumers :8000).
+#
+# Permify is deliberately absent: it has no Prometheus endpoint and pushes
+# OTLP to the collector; its metrics are re-exported at otel-collector:8889.
 
 global:
   scrape_interval: 15s
@@ -8,73 +19,148 @@ global:
     cluster: 'vpp-platform'
     environment: 'production'
 
-# Alertmanager configuration
 alerting:
   alertmanagers:
     - static_configs:
         - targets:
-            - 'localhost:9093'
+            - 'alertmanager:9093'
 
-# Load rules once and periodically evaluate them
 rule_files:
   - 'alerts/*.yml'
 
-# Scrape configurations
 scrape_configs:
-  # VPP Web Server metrics
-  - job_name: 'vpp-web'
-    static_configs:
-      - targets: ['localhost:3000']
-    metrics_path: '/metrics'
-    scrape_interval: 10s
-    scrape_timeout: 5s
-
-  # Temporal Worker metrics
-  - job_name: 'temporal-worker'
-    static_configs:
-      - targets: ['localhost:9091']
-    scrape_interval: 10s
-    scrape_timeout: 5s
-
-  # Redis metrics (via redis_exporter)
-  - job_name: 'redis'
-    static_configs:
-      - targets: ['localhost:9121']
-    scrape_interval: 10s
-    scrape_timeout: 5s
-
-  # Kafka metrics (via kafka_exporter)
-  - job_name: 'kafka'
-    static_configs:
-      - targets: ['localhost:9308']
-    scrape_interval: 15s
-    scrape_timeout: 10s
-
-  # Node Exporter (system metrics)
-  - job_name: 'node'
-    static_configs:
-      - targets: ['localhost:9100']
-    scrape_interval: 15s
-    scrape_timeout: 10s
-
-  # Prometheus self-monitoring
+  # --------------------------------------------------------------------------
+  # Observability backbone
+  # --------------------------------------------------------------------------
   - job_name: 'prometheus'
     static_configs:
-      - targets: ['localhost:9090']
+      - targets: ['prometheus:9090']
     scrape_interval: 30s
 
-  # Temporal Server metrics (if available)
+  # Collector re-export: every OTel metric from every instrumented service,
+  # plus the infra exporters the collector scrapes. Labels include
+  # service_name and tenant_id (resource_to_telemetry_conversion).
+  - job_name: 'otel-collector'
+    static_configs:
+      - targets: ['otel-collector:8889']
+    scrape_interval: 15s
+
+  # Collector's own pipeline telemetry (otelcol_receiver_accepted_spans,
+  # otelcol_receiver_refused_spans, otelcol_exporter_sent_spans, ...).
+  - job_name: 'otel-collector-internal'
+    static_configs:
+      - targets: ['otel-collector:8888']
+    scrape_interval: 15s
+
+  # --------------------------------------------------------------------------
+  # Application services
+  # --------------------------------------------------------------------------
+  # VPP TS server (Express/tRPC). /metrics is delivered by the TS coder.
+  - job_name: 'vpp-web'
+    static_configs:
+      - targets: ['vpp-server:3000']
+    metrics_path: '/metrics'
+    scrape_interval: 10s
+    scrape_timeout: 5s
+
+  # TypeScript Temporal workers — per-worker prom endpoints (TS coder).
+  - job_name: 'temporal-workers'
+    static_configs:
+      - targets: ['payment-worker:9091']
+        labels: {worker: payment}
+      - targets: ['dr-worker:9092']
+        labels: {worker: dr}
+      - targets: ['trading-worker:9093']
+        labels: {worker: trading}
+      - targets: ['prepaid-worker:9094']
+        labels: {worker: prepaid}
+    metrics_path: '/metrics'
+    scrape_interval: 10s
+    scrape_timeout: 5s
+
+  # Dispatch optimizer (FastAPI) — /metrics delivered by the Python coder.
+  - job_name: 'optimizer'
+    static_configs:
+      - targets: ['optimizer:8000']
+    metrics_path: '/metrics'
+    scrape_interval: 15s
+
+  # Grid protocol daemon (Go) — /metrics on its main listen port (Go coder).
+  - job_name: 'grid-protocols'
+    static_configs:
+      - targets: ['grid-protocols:9100']
+    metrics_path: '/metrics'
+    scrape_interval: 15s
+
+  # MQTT->Fluvio bridge (Go) — metrics server on :8080 (Go coder).
+  - job_name: 'mqtt-fluvio-bridge'
+    static_configs:
+      - targets: ['mqtt-fluvio-bridge:8080']
+    metrics_path: '/metrics'
+    scrape_interval: 15s
+
+  # Fluvio consumers (Python) — /metrics on :8000 each (Python coder).
+  - job_name: 'fluvio-consumers'
+    static_configs:
+      - targets: ['database-consumer:8000']
+        labels: {consumer: database}
+      - targets: ['analytics-consumer:8000']
+        labels: {consumer: analytics}
+    metrics_path: '/metrics'
+    scrape_interval: 15s
+
+  # --------------------------------------------------------------------------
+  # Infrastructure
+  # --------------------------------------------------------------------------
+  - job_name: 'redis'
+    static_configs:
+      - targets: ['redis-exporter:9121']
+    scrape_interval: 10s
+    scrape_timeout: 5s
+
+  - job_name: 'kafka'
+    static_configs:
+      - targets: ['kafka-exporter:9308']
+    scrape_interval: 15s
+    scrape_timeout: 10s
+
+  - job_name: 'postgres'
+    static_configs:
+      - targets: ['postgres-exporter:9187']
+    scrape_interval: 15s
+
+  - job_name: 'node'
+    static_configs:
+      - targets: ['node-exporter:9100']
+    scrape_interval: 15s
+    scrape_timeout: 10s
+
+  # Temporal server 1.22: PROMETHEUS_ENDPOINT=0.0.0.0:8000 in compose.
   - job_name: 'temporal-server'
     static_configs:
-      - targets: ['localhost:7233']
+      - targets: ['temporal:8000']
     metrics_path: '/metrics'
     scrape_interval: 15s
     scrape_timeout: 10s
 
-  # Keycloak metrics (if metrics enabled)
+  # Keycloak 23: KC_METRICS_ENABLED=true serves /metrics on the HTTP port.
   - job_name: 'keycloak'
     static_configs:
-      - targets: ['localhost:8080']
+      - targets: ['keycloak:8080']
     metrics_path: '/metrics'
     scrape_interval: 30s
     scrape_timeout: 10s
+
+  # APISIX prometheus plugin (enabled in the default plugin list).
+  - job_name: 'apisix'
+    static_configs:
+      - targets: ['apisix:9080']
+    metrics_path: '/apisix/prometheus/metrics'
+    scrape_interval: 15s
+
+  # TigerBeetle has no HTTP metrics endpoint; it emits StatsD/DogStatsD which
+  # the tigerbeetle-statsd sidecar exposes here as tb_* metrics.
+  - job_name: 'tigerbeetle'
+    static_configs:
+      - targets: ['tigerbeetle-statsd:9102']
+    scrape_interval: 15s

@@ -4,8 +4,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Result};
 use hmac::{Hmac, Mac};
+use opentelemetry::global;
+use opentelemetry_http::HeaderInjector;
 use serde::Serialize;
 use sha2::Sha256;
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct Reading {
@@ -64,6 +67,7 @@ impl PlatformClient {
             .header("content-type", "application/json")
             .header("x-grid-timestamp", &timestamp)
             .header("x-grid-signature", signature)
+            .headers(trace_context_headers())
             .body(body)
             .send()
             .await?;
@@ -78,6 +82,18 @@ impl PlatformClient {
         }
         Ok(())
     }
+}
+
+/// W3C trace-context headers for the current span, so the ingest endpoint can
+/// continue the edge trace. With telemetry disabled (or called outside any
+/// span) the context is invalid and the propagator injects nothing.
+fn trace_context_headers() -> reqwest::header::HeaderMap {
+    let mut headers = reqwest::header::HeaderMap::new();
+    let context = tracing::Span::current().context();
+    global::get_text_map_propagator(|propagator| {
+        propagator.inject_context(&context, &mut HeaderInjector(&mut headers));
+    });
+    headers
 }
 
 /// Signs a request body the same way the Go grid protocol service does.
@@ -109,6 +125,47 @@ mod tests {
         assert!(
             PlatformClient::new("https://vpp.example.com", "short", Duration::from_secs(5))
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn no_traceparent_without_an_active_sampled_span() {
+        assert!(trace_context_headers().get("traceparent").is_none());
+    }
+
+    #[test]
+    fn traceparent_reflects_the_current_span() {
+        use opentelemetry::trace::{SpanContext, TraceContextExt};
+        use opentelemetry_sdk::propagation::TraceContextPropagator;
+        use opentelemetry_sdk::trace::SdkTracerProvider;
+        use tracing_subscriber::layer::SubscriberExt;
+
+        global::set_text_map_propagator(TraceContextPropagator::new());
+        let provider = SdkTracerProvider::builder()
+            .with_sampler(opentelemetry_sdk::trace::Sampler::AlwaysOn)
+            .build();
+        let tracer = opentelemetry::trace::TracerProvider::tracer(&provider, "test");
+        let subscriber =
+            tracing_subscriber::registry().with(tracing_opentelemetry::layer().with_tracer(tracer));
+        let _default = tracing::subscriber::set_default(subscriber);
+
+        let span = tracing::info_span!("test.poll");
+        let _entered = span.enter();
+
+        let headers = trace_context_headers();
+        let traceparent = headers
+            .get("traceparent")
+            .expect("sampled span must inject traceparent")
+            .to_str()
+            .expect("traceparent is ascii");
+        let span_context: SpanContext = span.context().span().span_context().clone();
+        assert_eq!(
+            traceparent,
+            format!(
+                "00-{}-{}-01",
+                span_context.trace_id(),
+                span_context.span_id()
+            )
         );
     }
 }

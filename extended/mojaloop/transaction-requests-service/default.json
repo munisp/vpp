@@ -1,0 +1,54 @@
+{
+  "HUB_PARTICIPANT": {
+    "ID": 1,
+    "NAME": "Hub"
+  },
+  "PORT": 4003,
+  "ENDPOINT_CACHE_CONFIG": {
+    "expiresIn": 180000,
+    "generateTimeout": 30000
+  },
+  "PROTOCOL_VERSIONS": {
+    "CONTENT": {
+      "DEFAULT": "1.1",
+      "VALIDATELIST": [
+        "1.1",
+        "1.0"
+      ]
+    },
+    "ACCEPT": {
+      "DEFAULT": "1",
+      "VALIDATELIST": [
+        "1",
+        "1.0",
+        "1.1"
+      ]
+    }
+  },
+  "SWITCH_ENDPOINT": "http://central-ledger:3001",
+  "ENDPOINT_SECURITY": {
+    "JWS": {
+      "JWS_VALIDATE": false,
+      "JWS_VERIFICATION_KEYS_DIRECTORY": "secrets/jwsVerificationKeys"
+    }
+  },
+  "ERROR_HANDLING": {
+    "includeCauseExtension": true,
+    "truncateExtensions": true
+  },
+  "INSTRUMENTATION": {
+    "METRICS": {
+      "DISABLED": false,
+      "labels": {
+        "eventId": "*"
+      },
+      "config": {
+        "timeout": 5000,
+        "prefix": "moja_trs_",
+        "defaultLabels": {
+          "serviceName": "transaction-requests"
+        }
+      }
+    }
+  }
+}

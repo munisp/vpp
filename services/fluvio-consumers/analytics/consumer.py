@@ -15,14 +15,21 @@ from fluvio import Fluvio, Offset
 from loguru import logger
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from common import metrics
+from common import telemetry as otel
 from common.models import TelemetryData
 
 
 class AnalyticsConsumer:
     def __init__(self):
         load_dotenv()
-        
+
+        # OTel tracing: honours OTEL_SDK_DISABLED / OTEL_EXPORTER_OTLP_ENDPOINT,
+        # logs "telemetry disabled: <reason>" loudly when off, never raises.
+        otel.init_telemetry("fluvio-analytics-consumer")
+
         self.fluvio_topic = os.getenv("FLUVIO_TOPIC", "telemetry")
+        self.fluvio_partition = int(os.getenv("FLUVIO_PARTITION", "0"))
         self.window_size = int(os.getenv("WINDOW_SIZE_SECONDS", "60"))  # 1 minute windows
         
         self.fluvio = None
@@ -70,6 +77,9 @@ class AnalyticsConsumer:
             by_asset[item.asset_id].append(item)
         
         logger.info(f"Window {window_key}: Processing {len(data)} records from {len(by_asset)} assets")
+        metrics.window_aggregations.inc()
+        metrics.records_per_window.observe(len(data))
+        metrics.active_windows.set(len(self.windows))
         
         for asset_id, records in by_asset.items():
             avg_power = sum(r.power for r in records) / len(records)
@@ -111,24 +121,43 @@ class AnalyticsConsumer:
         try:
             # Parse JSON payload
             data = json.loads(record.value())
-            
+
             # Validate and parse telemetry
             telemetry = TelemetryData(**data)
-            
-            # Add to time window
-            self.add_to_window(telemetry)
-            
-            # Periodically flush old windows
-            if (datetime.now() - self.last_flush).seconds >= self.window_size:
-                self.flush_old_windows()
-            
+
+            # Continue the trace stamped into the payload envelope by the
+            # mqtt-fluvio-bridge when present.
+            with otel.consume_span(
+                record,
+                topic=self.fluvio_topic,
+                partition=self.fluvio_partition,
+                payload=data,
+            ):
+                # Add to time window
+                self.add_to_window(telemetry)
+
+                # Periodically flush old windows
+                if (datetime.now() - self.last_flush).seconds >= self.window_size:
+                    self.flush_old_windows()
+            metrics.messages_processed.labels(consumer="analytics-consumer").inc()
+
         except Exception as e:
             logger.error(f"Failed to process message: {e}")
+            metrics.processing_errors.labels(
+                consumer="analytics-consumer", error_type=type(e).__name__
+            ).inc()
     
     def run(self):
         """Main consumer loop"""
         logger.info("Starting analytics consumer")
-        
+
+        # Prometheus scrape target: analytics-consumer:8000/metrics
+        try:
+            metrics.start_metrics_server(int(os.getenv("METRICS_PORT", "8000")))
+            logger.info(f"Metrics server on :{os.getenv('METRICS_PORT', '8000')}/metrics")
+        except Exception as e:
+            logger.error(f"Metrics server failed to start (continuing without it): {e}")
+
         try:
             self.connect_fluvio()
             

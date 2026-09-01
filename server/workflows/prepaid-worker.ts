@@ -6,6 +6,9 @@
  * trading.
  */
 
+// OTel init must run before anything else loads (auto-instrumentation hooks).
+// Prometheus metrics listener defaults to :9094 (see server/_core/telemetry.ts).
+import { temporalWorkerTelemetry, withTelemetryShutdown } from '../_core/telemetry';
 import { NativeConnection, Worker } from '@temporalio/worker';
 import * as activities from './prepaid-issuance-activities';
 import { TASK_QUEUES } from '../integration/temporal-config';
@@ -27,6 +30,8 @@ async function run() {
     activities,
     maxConcurrentActivityTaskExecutions: 20,
     maxConcurrentWorkflowTaskExecutions: 100,
+    // OTel workflow/activity interceptors + workflow span sink.
+    ...(await temporalWorkerTelemetry()),
   });
 
   console.log(`[Prepaid Worker] Worker created for task queue: ${PREPAID_TASK_QUEUE}`);
@@ -38,12 +43,14 @@ run().catch((err) => {
   process.exit(1);
 });
 
-process.on('SIGTERM', () => {
+process.on('SIGTERM', async () => {
   console.log('[Prepaid Worker] Received SIGTERM, shutting down gracefully...');
+  await withTelemetryShutdown();
   process.exit(0);
 });
 
-process.on('SIGINT', () => {
+process.on('SIGINT', async () => {
   console.log('[Prepaid Worker] Received SIGINT, shutting down gracefully...');
+  await withTelemetryShutdown();
   process.exit(0);
 });

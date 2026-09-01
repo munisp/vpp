@@ -8,13 +8,16 @@ mod decode;
 mod platform;
 mod poller;
 mod spool;
+mod telemetry;
 
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use tokio::time::{interval, MissedTickBehavior};
-use tracing::{error, info, warn};
+use tracing::{error, info, info_span, warn, Instrument};
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
 
 use crate::config::Config;
@@ -23,12 +26,27 @@ use crate::spool::Spool;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .json()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
+    // The existing JSON fmt output stays; an OTel layer is layered on when
+    // telemetry is enabled (see telemetry.rs for the env contract).
+    let otel = telemetry::init();
+    tracing_subscriber::registry()
+        .with(otel.layer)
+        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+        .with(tracing_subscriber::fmt::layer().json())
         .init();
+    match otel.status {
+        telemetry::Status::Enabled {
+            endpoint,
+            service_name,
+        } => info!(
+            service.name = %service_name,
+            otlp.endpoint = %endpoint,
+            "telemetry enabled: exporting OTLP traces over gRPC"
+        ),
+        telemetry::Status::Disabled { reason } => {
+            warn!("telemetry disabled: reason {reason}")
+        }
+    }
 
     let path = std::env::args()
         .nth(1)
@@ -57,10 +75,16 @@ async fn main() -> Result<()> {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
                 info!("shutting down");
+                if let Some(telemetry) = otel.telemetry {
+                    telemetry.shutdown();
+                }
                 return Ok(());
             }
             _ = ticker.tick() => {
-                poll_once(&config, &client, &mut spool).await;
+                // Root span of the cycle's trace: device polls and publishes
+                // below are its children.
+                let span = info_span!("modbus.poll_cycle", devices = config.devices.len());
+                poll_once(&config, &client, &mut spool).instrument(span).await;
             }
         }
     }
@@ -77,31 +101,55 @@ async fn poll_once(config: &Config, client: &PlatformClient, spool: &mut Spool) 
     };
 
     for device in &config.devices {
-        let mut context = match poller::connect(device, config.request_timeout()).await {
-            Ok(context) => context,
-            Err(err) => {
-                warn!(device = %device.id, error = %format!("{err:#}"), "device unreachable");
-                continue;
-            }
-        };
-
-        let (readings, failures) =
-            poller::poll_device(&mut context, device, config.request_timeout(), now_ms).await;
-        for failure in &failures {
-            warn!(device = %device.id, error = %format!("{failure:#}"), "register read failed");
-        }
-        let dropped = spool.push(readings);
-        if dropped > 0 {
-            error!(
-                device = %device.id,
-                dropped,
-                dropped_total = spool.dropped_total(),
-                "spool is full: readings discarded, the meter history now has a hole"
-            );
-        }
+        // One span per device per poll cycle: register range attributes make
+        // the span useful on its own, and every warn!/error! below lands on it
+        // as a span event.
+        let span = info_span!(
+            "modbus.poll_device",
+            device.id = %device.id,
+            modbus.register_count = device.registers.len(),
+            modbus.address_min = device.registers.iter().map(|r| r.address).min().unwrap_or(0),
+            modbus.address_max = device.registers.iter().map(|r| r.address).max().unwrap_or(0),
+        );
+        poll_device_cycle(device, config, spool, now_ms)
+            .instrument(span)
+            .await;
     }
 
     drain(config, client, spool, held_before).await;
+}
+
+/// Reads every register of one device. Failures are reported on the span, not
+/// smoothed over: an unreachable device or a failed register is visible in the
+/// trace exactly as it is in the logs.
+async fn poll_device_cycle(
+    device: &config::DeviceConfig,
+    config: &Config,
+    spool: &mut Spool,
+    now_ms: i64,
+) {
+    let mut context = match poller::connect(device, config.request_timeout()).await {
+        Ok(context) => context,
+        Err(err) => {
+            warn!(device = %device.id, error = %format!("{err:#}"), "device unreachable");
+            return;
+        }
+    };
+
+    let (readings, failures) =
+        poller::poll_device(&mut context, device, config.request_timeout(), now_ms).await;
+    for failure in &failures {
+        warn!(device = %device.id, error = %format!("{failure:#}"), "register read failed");
+    }
+    let dropped = spool.push(readings);
+    if dropped > 0 {
+        error!(
+            device = %device.id,
+            dropped,
+            dropped_total = spool.dropped_total(),
+            "spool is full: readings discarded, the meter history now has a hole"
+        );
+    }
 }
 
 /// Delivers what the poller is holding, oldest first. Readings stay in the spool
@@ -113,7 +161,10 @@ async fn drain(config: &Config, client: &PlatformClient, spool: &mut Spool, held
     while !spool.is_empty() {
         let batch: Vec<Reading> = spool.take(config.publish_batch_size);
         let count = batch.len();
-        match client.publish(&batch).await {
+        // The publish span is what the server joins: publish() injects the
+        // current span context as a W3C `traceparent` header on the POST.
+        let span = info_span!("modbus.publish", modbus.batch_readings = count);
+        match client.publish(&batch).instrument(span).await {
             Ok(()) => delivered += count,
             Err(err) => {
                 let dropped = spool.requeue(batch);

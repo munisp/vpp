@@ -1,0 +1,164 @@
+# OpenTelemetry Collector — VPP Platform central observability backbone.
+#
+# Signals:
+#   traces : OTLP (gRPC :4317, HTTP :4318)  -> batch -> Jaeger (otlp/jaeger)
+#   metrics: OTLP (service SDKs)            -> prometheus exporter :8889
+#   metrics: infra exporters (prometheus/infra receiver) -> :8889
+#   logs   : OTLP                           -> debug (sampled; no log backend deployed)
+#
+# Env consumed by this file (set on the collector container):
+#   OTEL_TENANT_ID           deployment tenant label, stamped as resource attr tenant.id (default "default")
+#   OTEL_RUM_ALLOWED_ORIGIN  browser origin allowed to POST OTLP/HTTP to :4318 (CORS)
+#
+# Note on permify: permify exposes NO Prometheus endpoint; it pushes OTLP
+# (tracer + meter exporters) straight to :4317, so its metrics arrive through
+# the `metrics` pipeline below. Do not add a permify scrape job here.
+# Note on TigerBeetle: no HTTP metrics endpoint exists; TigerBeetle emits
+# StatsD (DogStatsD) which a statsd-exporter sidecar turns into /metrics —
+# that sidecar is the `tigerbeetle` scrape job below.
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+        cors:
+          # Browser RUM posts OTLP/HTTP JSON here; without CORS the browser blocks it.
+          allowed_origins:
+            - ${env:OTEL_RUM_ALLOWED_ORIGIN}
+            - http://localhost:8080
+            - http://localhost:3000
+          allowed_headers:
+            - Content-Type
+            - Traceparent
+            - Tracestate
+            - Baggage
+
+  # Infrastructure exporters. These endpoints exist in the compose stacks:
+  #   kafka-exporter:9308    danielqsj/kafka-exporter   (docker-compose.monitoring.yml)
+  #   redis-exporter:9121    oliver006/redis_exporter   (docker-compose.monitoring.yml)
+  #   node-exporter:9100     prom/node-exporter         (docker-compose.monitoring.yml)
+  #   postgres-exporter:9187 prometheuscommunity/postgres-exporter (docker-compose.monitoring.yml)
+  #   temporal:8000          temporalio/auto-setup with PROMETHEUS_ENDPOINT=0.0.0.0:8000
+  #   keycloak:8080          KC_METRICS_ENABLED=true -> /metrics on the HTTP port (KC 23)
+  #   apisix:9080            prometheus plugin, default export uri /apisix/prometheus/metrics
+  #   tigerbeetle-statsd:9102  prom/statsd-exporter fed by tigerbeetle --experimental --statsd=
+  prometheus/infra:
+    config:
+      global:
+        scrape_interval: 15s
+        scrape_timeout: 10s
+      scrape_configs:
+        - job_name: kafka-exporter
+          static_configs:
+            - targets: ['kafka-exporter:9308']
+        - job_name: redis-exporter
+          static_configs:
+            - targets: ['redis-exporter:9121']
+        - job_name: node-exporter
+          static_configs:
+            - targets: ['node-exporter:9100']
+        - job_name: postgres-exporter
+          static_configs:
+            - targets: ['postgres-exporter:9187']
+        - job_name: temporal-server
+          static_configs:
+            - targets: ['temporal:8000']
+        - job_name: keycloak
+          metrics_path: /metrics
+          scrape_interval: 30s
+          static_configs:
+            - targets: ['keycloak:8080']
+        - job_name: apisix
+          metrics_path: /apisix/prometheus/metrics
+          static_configs:
+            - targets: ['apisix:9080']
+        - job_name: tigerbeetle
+          static_configs:
+            - targets: ['tigerbeetle-statsd:9102']
+
+processors:
+  # First in every pipeline: refuse data before OOMing the collector.
+  memory_limiter:
+    check_interval: 1s
+    limit_percentage: 75
+    spike_limit_percentage: 15
+
+  # Deployment-level tenant attribution. Services also set tenant.id
+  # themselves from OTEL_TENANT_ID (belt and braces); upsert keeps theirs.
+  resource/tenant:
+    attributes:
+      - key: tenant.id
+        value: ${env:OTEL_TENANT_ID}
+        action: upsert
+      - key: deployment.environment
+        value: ${env:OTEL_ENVIRONMENT}
+        action: upsert
+
+  batch:
+    timeout: 5s
+    send_batch_size: 1024
+    send_batch_max_size: 2048
+
+extensions:
+  # Liveness/readiness endpoint for compose healthchecks and k8s probes.
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+exporters:
+  # Jaeger all-in-one >= 1.35 with COLLECTOR_OTLP_ENABLED=true receives OTLP/gRPC on 4317.
+  otlp/jaeger:
+    endpoint: jaeger:4317
+    tls:
+      insecure: true
+
+  # Everything metrics-related is re-exposed here for the platform Prometheus.
+  # resource_to_telemetry_conversion turns service.name / tenant.id into labels
+  # (service_name, tenant_id) so dashboards and alerts can slice by service+tenant.
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    resource_to_telemetry_conversion:
+      enabled: true
+    metric_expiration: 10m
+
+  # Sampled so a busy pipeline cannot flood stdout. Prod posture is "nearly
+  # off": after the first 5 series/items per signal, 1 in 200 is logged.
+  debug:
+    verbosity: basic
+    sampling_initial: 5
+    sampling_thereafter: 200
+
+service:
+  extensions: [health_check]
+  telemetry:
+    logs:
+      level: info
+    metrics:
+      # Collector's own pipeline health (otelcol_receiver_accepted_spans,
+      # otelcol_receiver_refused_spans, otelcol_exporter_sent_spans,
+      # otelcol_exporter_send_failed_spans, ...) — scraped by Prometheus
+      # as job `otel-collector-internal`.
+      address: 0.0.0.0:8888
+      level: detailed
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, resource/tenant, batch]
+      exporters: [otlp/jaeger, debug]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, resource/tenant, batch]
+      exporters: [prometheus]
+    metrics/infra:
+      receivers: [prometheus/infra]
+      processors: [memory_limiter, batch]
+      exporters: [prometheus]
+    # No log backend is deployed in this stack. Logs are accepted (so SDKs do
+    # not error) and echoed 1-in-200 via debug. Point exporters: [otlphttp/loki]
+    # or similar here when a log backend is introduced.
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, resource/tenant, batch]
+      exporters: [debug]

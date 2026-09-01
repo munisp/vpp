@@ -6,7 +6,11 @@ import { createRoot } from "react-dom/client";
 import superjson from "superjson";
 import App from "./App";
 import { getLoginUrl } from "./const";
+import { initWebTelemetry } from "./lib/telemetry-web";
 import "./index.css";
+
+// Browser RUM: no-op unless VITE_OTEL_COLLECTOR_URL is set (fail-quiet).
+initWebTelemetry();
 
 const queryClient = new QueryClient();
 

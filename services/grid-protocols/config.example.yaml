@@ -72,3 +72,13 @@ matter:
   # device performs. Leave this off outside a development fabric: those
   # acknowledgements are indistinguishable from a dispatched load.
   allow_test_nodes: false
+
+# OpenTelemetry (environment variables, not YAML):
+#   OTEL_EXPORTER_OTLP_ENDPOINT  OTLP gRPC collector, e.g. http://localhost:4317.
+#                                Unset = telemetry disabled (logged loudly at boot);
+#                                an unreachable collector never blocks startup.
+#   OTEL_SERVICE_NAME            default "grid-protocols"
+#   OTEL_SERVICE_VERSION / OTEL_ENVIRONMENT / OTEL_TENANT_ID (default "default")
+#   OTEL_SDK_DISABLED=true       escape hatch: force no-op telemetry
+# Metrics (OTel Prometheus exporter) are served at GET :9100/metrics,
+# health incl. telemetry status at GET :9100/healthz.

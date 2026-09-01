@@ -12,7 +12,35 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/sirupsen/logrus"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/trace"
 )
+
+// Instrumentation is resolved lazily on the first inbound call so it binds to
+// the providers gridd installs at boot; before that (or with the SDK disabled)
+// every handle here is a no-op.
+var (
+	tracer = otel.Tracer("github.com/vpp/grid-protocols/internal/ocppj")
+
+	metricsOnce   sync.Once
+	actionsTotal  metric.Int64Counter
+	dispatchTimer metric.Float64Histogram
+)
+
+func instruments() (metric.Int64Counter, metric.Float64Histogram) {
+	metricsOnce.Do(func() {
+		meter := otel.Meter("github.com/vpp/grid-protocols/internal/ocppj")
+		actionsTotal, _ = meter.Int64Counter("ocpp.actions.total",
+			metric.WithDescription("OCPP actions received from charge points, by action and dispatch result"))
+		dispatchTimer, _ = meter.Float64Histogram("ocpp.dispatch.duration.seconds",
+			metric.WithDescription("Time spent dispatching an OCPP action to the platform"),
+			metric.WithUnit("s"))
+	})
+	return actionsTotal, dispatchTimer
+}
 
 // ErrNotConnected is returned when a command targets a charge point that has no
 // open WebSocket session. Commands are never buffered and reported as sent: the
@@ -192,7 +220,34 @@ func (s *Session) deliver(uniqueID string, frame *Frame) {
 }
 
 func (s *Session) handleCall(ctx context.Context, call *Call) {
+	// One server span per OCPP action, around the dispatch to the platform.
+	// The span context rides ctx into the platform client, whose transport
+	// injects it as traceparent on the HTTPS call to the server.
+	ctx, span := tracer.Start(ctx, "ocpp "+call.Action,
+		trace.WithSpanKind(trace.SpanKindServer),
+		trace.WithAttributes(
+			attribute.String("ocpp.action", call.Action),
+			attribute.String("ocpp.charge_point_id", s.chargePointID),
+			attribute.String("ocpp.unique_id", call.UniqueID),
+			attribute.String("messaging.system", "ocpp"),
+		),
+	)
+	defer span.End()
+
+	actions, timer := instruments()
+	actionAttr := attribute.String("ocpp.action", call.Action)
+	started := time.Now()
+
 	payload, err := s.handler.Dispatch(ctx, s.chargePointID, call)
+	result := "ok"
+	if err != nil {
+		result = "error"
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+	}
+	actions.Add(ctx, 1, metric.WithAttributes(actionAttr, attribute.String("result", result)))
+	timer.Record(ctx, time.Since(started).Seconds(), metric.WithAttributes(actionAttr))
+
 	if err != nil {
 		code := ErrInternalError
 		var callErr *CallError

@@ -3,6 +3,7 @@ package stream
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os/exec"
@@ -11,6 +12,9 @@ import (
 
 	"github.com/sirupsen/logrus"
 	"github.com/vpp/mqtt-fluvio-bridge/config"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // keySeparator splits key from value on `fluvio produce` stdin. ASCII unit
@@ -78,6 +82,7 @@ func (p *FluvioProducer) SendBatch(ctx context.Context, topic string, records []
 
 	var stdin bytes.Buffer
 	for _, record := range records {
+		record.Value = withTraceContext(ctx, record.Value)
 		if err := validateRecord(record); err != nil {
 			return err
 		}
@@ -153,6 +158,41 @@ func (p *FluvioProducer) run(ctx context.Context, stdin []byte, args ...string) 
 		return stdout.String(), err
 	}
 	return stdout.String(), nil
+}
+
+// traceEnvelope carries the W3C trace context inside the record payload.
+// `fluvio produce` has no record-header support, so the context is stamped
+// into a JSON envelope instead: downstream SmartModules (and the consumers
+// behind them) read traceparent/tracestate from the envelope and continue the
+// trace that started at the MQTT message. This is the documented propagation
+// path for the Fluvio transport; the Kafka transport uses real record headers.
+type traceEnvelope struct {
+	Traceparent string          `json:"traceparent"`
+	Tracestate  string          `json:"tracestate,omitempty"`
+	Payload     json.RawMessage `json:"payload"`
+}
+
+// withTraceContext wraps a JSON record value in the trace envelope carrying
+// ctx's span context. Without a valid span context the value passes through
+// unchanged, so a disabled SDK produces exactly the pre-tracing payload shape.
+func withTraceContext(ctx context.Context, value []byte) []byte {
+	if !trace.SpanContextFromContext(ctx).IsValid() {
+		return value
+	}
+	carrier := propagation.MapCarrier{}
+	otel.GetTextMapPropagator().Inject(ctx, carrier)
+	if carrier.Get("traceparent") == "" {
+		return value
+	}
+	envelope, err := json.Marshal(traceEnvelope{
+		Traceparent: carrier.Get("traceparent"),
+		Tracestate:  carrier.Get("tracestate"),
+		Payload:     json.RawMessage(value),
+	})
+	if err != nil {
+		return value
+	}
+	return envelope
 }
 
 func validateRecord(record Record) error {

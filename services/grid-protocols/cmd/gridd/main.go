@@ -7,17 +7,27 @@ package main
 import (
 	"context"
 	"crypto/subtle"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/sirupsen/logrus"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
+	metricnoop "go.opentelemetry.io/otel/metric/noop"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/vpp/grid-protocols/config"
 	"github.com/vpp/grid-protocols/internal/admin"
@@ -29,6 +39,7 @@ import (
 	"github.com/vpp/grid-protocols/internal/openadr"
 	"github.com/vpp/grid-protocols/internal/platform"
 	"github.com/vpp/grid-protocols/internal/sep2"
+	"github.com/vpp/grid-protocols/internal/telemetry"
 )
 
 func main() {
@@ -52,6 +63,20 @@ func run(configPath string, logger *logrus.Logger) error {
 		logger.SetLevel(level)
 	}
 
+	// Telemetry never blocks startup: with no OTLP endpoint configured it
+	// disables itself (loudly), and an unreachable collector only costs
+	// background retries. Its state is reported on /healthz.
+	tele := telemetry.Setup("grid-protocols", func(format string, args ...any) {
+		logger.Warnf(format, args...)
+	})
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := tele.Shutdown(shutdownCtx); err != nil {
+			logger.WithError(err).Warn("telemetry shutdown failed")
+		}
+	}()
+
 	client, err := platform.NewClient(platform.Config{
 		BaseURL:      cfg.Platform.BaseURL,
 		SharedSecret: cfg.Platform.SharedSecret,
@@ -69,6 +94,18 @@ func run(configPath string, logger *logrus.Logger) error {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	})
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"status":    "ok",
+			"telemetry": tele.Status(),
+		})
+	})
+	// INFRA scrapes this exact path. The OTel Prometheus exporter registers
+	// into the default registry, so one handler serves both the SDK metrics
+	// (request spans' counters, OCPP action counters) and the Go collector.
+	mux.Handle("/metrics", promhttp.Handler())
 
 	errs := make(chan error, 4)
 
@@ -223,7 +260,7 @@ func run(configPath string, logger *logrus.Logger) error {
 
 	server := &http.Server{
 		Addr:              cfg.Listen,
-		Handler:           mux,
+		Handler:           tracingHandler(mux),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	go func() {
@@ -244,6 +281,95 @@ func run(configPath string, logger *logrus.Logger) error {
 
 	shutdown(server, logger)
 	return ctx.Err()
+}
+
+// tracingHandler wraps the mux with one server span per request. The span is
+// named and tagged with a low-cardinality route (charge point identities are
+// collapsed) rather than the raw path. /metrics is not traced: scrapes would
+// drown the request traces the operator actually reads.
+func tracingHandler(mux *http.ServeMux) http.Handler {
+	return otelhttp.NewHandler(routeTagging(stableSemconvMetrics(mux)), "gridd",
+		otelhttp.WithSpanNameFormatter(func(_ string, r *http.Request) string {
+			return r.Method + " " + routePattern(r)
+		}),
+		otelhttp.WithFilter(func(r *http.Request) bool {
+			return r.URL.Path != "/metrics"
+		}),
+		// otelhttp v0.49 still measures with the legacy http.server.duration
+		// metric; that series is suppressed because the platform's dashboards
+		// are built on the stable semconv histogram recorded by
+		// stableSemconvMetrics below.
+		otelhttp.WithMeterProvider(metricnoop.NewMeterProvider()),
+	)
+}
+
+var (
+	httpDurationOnce sync.Once
+	httpDuration     metric.Float64Histogram
+)
+
+func httpDurationHistogram() metric.Float64Histogram {
+	httpDurationOnce.Do(func() {
+		httpDuration, _ = otel.Meter("github.com/vpp/grid-protocols/cmd/gridd").Float64Histogram(
+			"http.server.request.duration",
+			metric.WithDescription("Duration of HTTP server requests."),
+			metric.WithUnit("s"),
+		)
+	})
+	return httpDuration
+}
+
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (r *statusRecorder) WriteHeader(code int) {
+	r.status = code
+	r.ResponseWriter.WriteHeader(code)
+}
+
+// stableSemconvMetrics records the OTel stable HTTP semantic-convention
+// server histogram, exported to Prometheus as
+// http_server_request_duration_seconds_* with labels http_request_method,
+// http_response_status_code, http_route (plus service_name and tenant.id
+// from the exporter's resource constant labels). /metrics scrapes are not
+// measured.
+func stableSemconvMetrics(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/metrics" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		started := time.Now()
+		recorder := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(recorder, r)
+		httpDurationHistogram().Record(r.Context(), time.Since(started).Seconds(),
+			metric.WithAttributes(
+				attribute.String("http.request.method", r.Method),
+				attribute.Int("http.response.status_code", recorder.status),
+				attribute.String("http.route", routePattern(r)),
+			))
+	})
+}
+
+// routeTagging stamps the normalised route onto the request span as
+// http.route, so backends can group by route instead of raw path.
+func routeTagging(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		span := trace.SpanFromContext(r.Context())
+		span.SetAttributes(attribute.String("http.route", routePattern(r)))
+		next.ServeHTTP(w, r)
+	})
+}
+
+// routePattern collapses the one high-cardinality path this service serves:
+// /ocpp/<chargePointId>. Everything else is already a fixed literal.
+func routePattern(r *http.Request) string {
+	if rest, ok := strings.CutPrefix(r.URL.Path, "/ocpp/"); ok && rest != "" {
+		return "/ocpp/{chargePointId}"
+	}
+	return r.URL.Path
 }
 
 func shutdown(server *http.Server, logger *logrus.Logger) {

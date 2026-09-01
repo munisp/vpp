@@ -5,6 +5,9 @@
  * It should be run as a separate process for scalability.
  */
 
+// OTel init must run before anything else loads (auto-instrumentation hooks).
+// Prometheus metrics listener defaults to :9093 (see server/_core/telemetry.ts).
+import { temporalWorkerTelemetry, withTelemetryShutdown } from '../_core/telemetry';
 import { NativeConnection, Worker } from '@temporalio/worker';
 import { tradingActivities } from './trading-activities';
 
@@ -31,6 +34,8 @@ async function run() {
     activities: tradingActivities,
     maxConcurrentActivityTaskExecutions: 50,
     maxConcurrentWorkflowTaskExecutions: 200,
+    // OTel workflow/activity interceptors + workflow span sink.
+    ...(await temporalWorkerTelemetry()),
   });
 
   console.log('[Trading Worker] Worker created for task queue: trading-execution');
@@ -49,10 +54,12 @@ run().catch((err) => {
 // Graceful shutdown
 process.on('SIGTERM', async () => {
   console.log('[Trading Worker] Received SIGTERM, shutting down gracefully...');
+  await withTelemetryShutdown();
   process.exit(0);
 });
 
 process.on('SIGINT', async () => {
   console.log('[Trading Worker] Received SIGINT, shutting down gracefully...');
+  await withTelemetryShutdown();
   process.exit(0);
 });

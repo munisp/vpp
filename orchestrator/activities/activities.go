@@ -1009,8 +1009,8 @@ func (a *Activities) SendPushNotificationActivity(ctx context.Context, userID st
 func (a *Activities) TriggerHapticFeedbackActivity(ctx context.Context, userID string, pattern string) error {
 	// Send haptic feedback event
 	event := map[string]interface{}{
-		"userID":  userID,
-		"pattern": pattern,
+		"userID":    userID,
+		"pattern":   pattern,
 		"timestamp": time.Now(),
 	}
 

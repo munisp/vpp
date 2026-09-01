@@ -81,6 +81,10 @@ type BridgeConfig struct {
 	BufferSize       int    `yaml:"buffer_size"`
 	EnableValidation bool   `yaml:"enable_validation"`
 	LogLevel         string `yaml:"log_level"`
+	// MetricsAddr is the listen address of the Prometheus metrics and health
+	// server (GET /metrics, GET /healthz). Empty means :8080, which is the
+	// target the monitoring stack scrapes.
+	MetricsAddr string `yaml:"metrics_addr"`
 }
 
 // LoadConfig loads configuration from file and environment variables
@@ -135,6 +139,12 @@ func LoadConfig(configPath string) (*Config, error) {
 	}
 	if password := os.Getenv("KAFKA_SASL_PASSWORD"); password != "" {
 		config.Kafka.SASLPassword = password
+	}
+	if addr := os.Getenv("METRICS_ADDR"); addr != "" {
+		config.Bridge.MetricsAddr = addr
+	}
+	if config.Bridge.MetricsAddr == "" {
+		config.Bridge.MetricsAddr = ":8080"
 	}
 
 	if err := config.Validate(); err != nil {

@@ -12,7 +12,7 @@ import os
 
 from typing import Annotated
 
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, Response
 from fastapi.responses import JSONResponse
 
 from .design import run_design_study
@@ -33,12 +33,17 @@ from .schemas import (
 )
 from .solvers import SolverUnavailable, available_solvers, resolve_solver_name
 from .stochastic import solve_stochastic
+from . import telemetry
 
 logging.basicConfig(
     level=os.environ.get("OPTIMIZER_LOG_LEVEL", "INFO"),
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+# Tracer provider first: initialisation honours OTEL_SDK_DISABLED and a
+# missing OTEL_EXPORTER_OTLP_ENDPOINT, and never raises.
+telemetry.init_telemetry()
 
 app = FastAPI(
     title="VPP dispatch optimizer",
@@ -48,6 +53,11 @@ app = FastAPI(
         "stochastic with CVaR, rolling-horizon MPC, and multi-site coordination."
     ),
 )
+
+# Auto-instrumentation creates a server span per request and extracts the W3C
+# tracecontext headers (traceparent/tracestate) the TypeScript caller injects,
+# so its trace continues here.
+telemetry.instrument_app(app)
 
 # Shared secret between the Node server and this service. Enforced whenever set;
 # in production the caller is expected to set it.
@@ -87,6 +97,26 @@ async def _value_error(_request, exc: ValueError) -> JSONResponse:
     return JSONResponse(status_code=400, content={"detail": str(exc)})
 
 
+@app.middleware("http")
+async def _request_metrics(request, call_next):
+    response = await call_next(request)
+    if request.url.path != "/metrics":
+        telemetry.HTTP_REQUESTS.labels(
+            method=request.method,
+            endpoint=request.url.path,
+            status=str(response.status_code),
+        ).inc()
+    return response
+
+
+@app.get("/metrics", include_in_schema=False)
+def metrics() -> Response:
+    """Prometheus scrape endpoint (optimizer:8000/metrics)."""
+    from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+
 @app.get("/health")
 def health() -> dict[str, object]:
     """Report solver availability. Unhealthy when no MILP solver is installed."""
@@ -98,6 +128,7 @@ def health() -> dict[str, object]:
         "status": "ok",
         "solver": solver,
         "available_solvers": available_solvers(),
+        "telemetry": telemetry.status(),
     }
 
 
@@ -122,7 +153,9 @@ def optimize_dispatch(
     x_optimizer_token: Annotated[str | None, Header()] = None,
 ) -> DispatchResponse:
     _authorise(x_optimizer_token)
-    result = solve_dispatch(request)
+    with telemetry.solve_span("dispatch") as span_attrs:
+        result = solve_dispatch(request)
+        span_attrs.update(telemetry.result_attributes(result))
     _check(result, result.status)
     return result
 
@@ -133,7 +166,9 @@ def optimize_stochastic(
     x_optimizer_token: Annotated[str | None, Header()] = None,
 ) -> StochasticResponse:
     _authorise(x_optimizer_token)
-    result = solve_stochastic(request)
+    with telemetry.solve_span("stochastic") as span_attrs:
+        result = solve_stochastic(request)
+        span_attrs.update(telemetry.result_attributes(result))
     _check(result, result.status)
     return result
 
@@ -144,7 +179,9 @@ def optimize_mpc(
     x_optimizer_token: Annotated[str | None, Header()] = None,
 ) -> MPCResponse:
     _authorise(x_optimizer_token)
-    result = run_mpc(request)
+    with telemetry.solve_span("mpc") as span_attrs:
+        result = run_mpc(request)
+        span_attrs.update(telemetry.result_attributes(result))
     _check(result, result.status)
     return result
 
@@ -165,7 +202,10 @@ def design_study(
     """
 
     _authorise(x_optimizer_token)
-    return run_design_study(request)
+    with telemetry.solve_span("design") as span_attrs:
+        result = run_design_study(request)
+        span_attrs.update(telemetry.result_attributes(result))
+    return result
 
 
 @app.post("/optimize/coordinate", response_model=CoordinationResponse)
@@ -174,6 +214,8 @@ def optimize_coordinate(
     x_optimizer_token: Annotated[str | None, Header()] = None,
 ) -> CoordinationResponse:
     _authorise(x_optimizer_token)
-    result = coordinate(request)
+    with telemetry.solve_span("coordinate") as span_attrs:
+        result = coordinate(request)
+        span_attrs.update(telemetry.result_attributes(result))
     _check(result, result.status)
     return result

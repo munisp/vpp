@@ -26,10 +26,33 @@
 
 import type { Consumer, EachBatchPayload } from 'kafkajs';
 import { sql } from 'drizzle-orm';
+import {
+  SpanKind,
+  SpanStatusCode,
+  context as otelContext,
+  propagation,
+  trace,
+  type Span,
+} from '@opentelemetry/api';
 import { kafka } from '../../integration/kafka-config';
 import { getDb } from '../../db';
 import { eventDeadLetters } from '../../../drizzle/event-stream-schema';
 import { brokerConfigured } from './outbox';
+
+/**
+ * The receiving half of the W3C trace-context contract. The publisher
+ * (server/integration/kafka-publisher.ts) injects `traceparent`/`tracestate`
+ * onto every message; each consumed message is handled inside a CONSUMER span
+ * that continues that trace. With the SDK disabled (NODE_ENV=test or
+ * OTEL_SDK_DISABLED) the API calls below are inert no-ops and the handler
+ * runs exactly as before.
+ *
+ * The tracer is resolved lazily per message, not cached at module scope: a
+ * module-scope `trace.getTracer()` captures a proxy whose delegate is only
+ * wired if the global provider registers on the same @opentelemetry/api
+ * instance — which is not guaranteed (tests load the api twice), and lazy
+ * resolution always follows the current global provider.
+ */
 
 /**
  * Which topics this deployment consumes. Deliberately explicit rather than a
@@ -100,6 +123,60 @@ function headerValue(message: RawMessage, name: string): string | undefined {
   return typeof raw === 'string' ? raw : raw.toString('utf8');
 }
 
+/** Kafka headers as a plain string carrier for the W3C propagator. */
+function carrierFromHeaders(message: RawMessage): Record<string, string> {
+  const carrier: Record<string, string> = {};
+  for (const [name, raw] of Object.entries(message.headers ?? {})) {
+    if (raw === undefined || raw === null) continue;
+    carrier[name] = typeof raw === 'string' ? raw : raw.toString('utf8');
+  }
+  return carrier;
+}
+
+/**
+ * Run `handler` inside a CONSUMER span that continues the trace the producer
+ * stamped on the message. Exported so the propagation behaviour is pinned by
+ * a test without a broker or a database in the loop. The span records and
+ * rethrows handler failures, so a batch that cannot be stored still surfaces
+ * exactly the error it always did.
+ */
+export async function withConsumeSpan<T>(
+  topic: string,
+  partition: number,
+  message: RawMessage,
+  groupId: string,
+  handler: () => Promise<T>
+): Promise<T> {
+  const extracted = propagation.extract(otelContext.active(), carrierFromHeaders(message));
+  const offset = Number(message.offset);
+  const span: Span = trace.getTracer('vpp-event-consumer').startSpan(
+    'messaging.kafka.consume',
+    {
+      kind: SpanKind.CONSUMER,
+      attributes: {
+        'messaging.system': 'kafka',
+        'messaging.destination.name': topic,
+        'messaging.destination.partition.id': String(partition),
+        ...(Number.isSafeInteger(offset) ? { 'messaging.kafka.message.offset': offset } : {}),
+        'messaging.kafka.consumer.group': groupId,
+      },
+    },
+    extracted
+  );
+  try {
+    return await otelContext.with(trace.setSpan(extracted, span), handler);
+  } catch (error) {
+    span.recordException(error instanceof Error ? error : String(error));
+    span.setStatus({
+      code: SpanStatusCode.ERROR,
+      message: error instanceof Error ? error.message : String(error),
+    });
+    throw error;
+  } finally {
+    span.end();
+  }
+}
+
 /**
  * The identity used to deduplicate. The producer's `event-key` header is
  * preferred, then the message key; a foreign producer that sets neither falls
@@ -126,6 +203,51 @@ function readPayloadEventId(message: RawMessage): string | undefined {
   }
 }
 
+type Db = NonNullable<Awaited<ReturnType<typeof getDb>>>;
+type StoreOutcome = 'stored' | 'duplicate' | 'deadLetter';
+
+/** Store one message; the body of the batch loop, unchanged. */
+async function storeOne(
+  db: Db,
+  topic: string,
+  partition: number,
+  message: RawMessage
+): Promise<StoreOutcome> {
+  const eventKey = identityFor(topic, partition, message);
+  let payload: unknown;
+  try {
+    payload = JSON.parse(String(message.value));
+    if (payload === null || typeof payload !== 'object') {
+      throw new Error(`event body is ${payload === null ? 'null' : typeof payload}, not an object`);
+    }
+  } catch (error) {
+    // Unparseable: keep the raw bytes as a dead letter rather than dropping the
+    // event or storing something that is not what the producer sent.
+    await db.insert(eventDeadLetters).values({
+      side: 'consume',
+      topic,
+      eventKey,
+      payload: { raw: String(message.value).slice(0, 4000) },
+      reason: `This event could not be read: ${error instanceof Error ? error.message : String(error)}`.slice(0, 1000),
+      attempts: 1,
+    });
+    return 'deadLetter';
+  }
+
+  const producedAt = message.timestamp ? new Date(Number(message.timestamp)) : null;
+  const inserted = await db.execute(sql`
+    INSERT INTO event_inbox (topic, event_key, partition, message_offset, payload, produced_at)
+    VALUES (
+      ${topic}, ${eventKey}, ${partition}, ${message.offset}::bigint,
+      ${JSON.stringify(payload)}::jsonb,
+      ${producedAt && Number.isFinite(producedAt.getTime()) ? producedAt : null}
+    )
+    ON CONFLICT (topic, event_key) DO NOTHING
+    RETURNING id
+  `);
+  return inserted.rows.length > 0 ? 'stored' : 'duplicate';
+}
+
 /**
  * Store one batch. Exported so the storing logic is tested against a real
  * database without a broker in the loop.
@@ -141,43 +263,15 @@ export async function storeBatch(
   let stored = 0;
   let duplicates = 0;
   let deadLettered = 0;
+  const groupId = GROUP_ID();
 
   for (const message of messages) {
-    const eventKey = identityFor(topic, partition, message);
-    let payload: unknown;
-    try {
-      payload = JSON.parse(String(message.value));
-      if (payload === null || typeof payload !== 'object') {
-        throw new Error(`event body is ${payload === null ? 'null' : typeof payload}, not an object`);
-      }
-    } catch (error) {
-      // Unparseable: keep the raw bytes as a dead letter rather than dropping the
-      // event or storing something that is not what the producer sent.
-      await db.insert(eventDeadLetters).values({
-        side: 'consume',
-        topic,
-        eventKey,
-        payload: { raw: String(message.value).slice(0, 4000) },
-        reason: `This event could not be read: ${error instanceof Error ? error.message : String(error)}`.slice(0, 1000),
-        attempts: 1,
-      });
-      deadLettered += 1;
-      continue;
-    }
-
-    const producedAt = message.timestamp ? new Date(Number(message.timestamp)) : null;
-    const inserted = await db.execute(sql`
-      INSERT INTO event_inbox (topic, event_key, partition, message_offset, payload, produced_at)
-      VALUES (
-        ${topic}, ${eventKey}, ${partition}, ${message.offset}::bigint,
-        ${JSON.stringify(payload)}::jsonb,
-        ${producedAt && Number.isFinite(producedAt.getTime()) ? producedAt : null}
-      )
-      ON CONFLICT (topic, event_key) DO NOTHING
-      RETURNING id
-    `);
-    if (inserted.rows.length > 0) stored += 1;
-    else duplicates += 1;
+    const outcome = await withConsumeSpan(topic, partition, message, groupId, () =>
+      storeOne(db, topic, partition, message)
+    );
+    if (outcome === 'stored') stored += 1;
+    else if (outcome === 'duplicate') duplicates += 1;
+    else deadLettered += 1;
   }
 
   return { received: messages.length, stored, duplicates, deadLettered };

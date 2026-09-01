@@ -33,11 +33,28 @@ labels a decision as unchecked and the second refuses it.
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `GET` | `/health` | Liveness and the engine version |
+| `GET` | `/health` | Liveness, the engine version, and the telemetry status |
+| `GET` | `/metrics` | Prometheus scrape endpoint |
 | `POST` | `/feasibility` | Power flow, limit check and hosting capacity for a network, its loads/generation, and candidate changes |
 
 Authentication is the `x-gridmodel-token` header, checked against
 `GRIDMODEL_AUTH_TOKEN`.
+
+## Telemetry
+
+Same OpenTelemetry env contract as the optimizer: set
+`OTEL_EXPORTER_OTLP_ENDPOINT` (OTLP gRPC) to enable traces + metrics; when
+unset the service logs `telemetry disabled: <reason>` and runs fine.
+`OTEL_SDK_DISABLED=true` is the escape hatch. `OTEL_SERVICE_NAME` defaults to
+`gridmodel`; `OTEL_TENANT_ID` becomes the `tenant.id` resource attribute
+(default `default`). The service sets `OTEL_SEMCONV_STABILITY_OPT_IN=http` if
+unset so the FastAPI instrumentor emits the stable
+`http.server.request.duration` metric (seconds). Incoming W3C `traceparent`
+headers from the TypeScript caller are honoured automatically; each
+`/feasibility` call wraps its evaluation in a `pandapower.runpp` child span
+(status, violation count). `/health` reports `telemetry: {enabled, reason?}`;
+`/metrics` serves Prometheus text (`gridmodel_http_requests_total`,
+`gridmodel_evaluation_duration_seconds`).
 
 ## Hosting capacity
 

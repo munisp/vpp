@@ -1,0 +1,86 @@
+# Jaeger (all-in-one) — in-cluster trace backend for the OTel collector.
+#
+# Suitable for dev/staging and small production footprints: all-in-one keeps
+# spans in memory (BADGER or memory store depending on image defaults), so
+# this is NOT durable trace storage. For durable production traces, point the
+# collector's otlp/jaeger exporter at a Jaeger collector backed by
+# Elasticsearch/Cassandra (jaeger-operator) or swap the exporter for
+# otlphttp -> Grafana Tempo. The Service name/port stays the contract either
+# way: jaeger.monitoring.svc.cluster.local:4317 (OTLP gRPC in).
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jaeger
+  namespace: monitoring
+  labels:
+    app: jaeger
+spec:
+  replicas: 1
+  strategy:
+    # Single-writer store: avoid concurrent all-in-one replicas.
+    type: Recreate
+  selector:
+    matchLabels:
+      app: jaeger
+  template:
+    metadata:
+      labels:
+        app: jaeger
+    spec:
+      containers:
+        - name: jaeger
+          image: jaegertracing/all-in-one:1.62.0
+          env:
+            - name: COLLECTOR_OTLP_ENABLED
+              value: "true"
+          ports:
+            - containerPort: 4317
+              name: otlp-grpc
+            - containerPort: 4318
+              name: otlp-http
+            - containerPort: 16686
+              name: ui
+            - containerPort: 16685
+              name: grpc-query
+          resources:
+            requests:
+              memory: 256Mi
+              cpu: 250m
+            limits:
+              memory: 1Gi
+              cpu: "1"
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 16686
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 16686
+            initialDelaySeconds: 10
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: jaeger
+  namespace: monitoring
+  labels:
+    app: jaeger
+spec:
+  selector:
+    app: jaeger
+  ports:
+    - name: otlp-grpc
+      port: 4317
+      targetPort: 4317
+    - name: otlp-http
+      port: 4318
+      targetPort: 4318
+    - name: ui
+      port: 16686
+      targetPort: 16686
+  type: ClusterIP

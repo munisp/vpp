@@ -1,72 +1,254 @@
 # VPP Platform Alert Rules
-# Version: v21.0
+#
+# Every expression below references metric names that actually exist:
+#   - OTel SDK metrics re-exported by the collector at :8889
+#     (http_server_request_duration_seconds_* with service_name/tenant_id labels)
+#   - Collector self-telemetry at :8888 (otelcol_receiver/exporter_*)
+#   - redis_exporter, kafka_exporter, postgres-exporter, node-exporter metrics
+#   - Temporal server 1.22 tally metrics (service_requests, workflow_failed,
+#     poll_success — note: no _total suffix, Temporal's tally reporter does
+#     not append one)
+#   - TigerBeetle StatsD metrics via the statsd-exporter sidecar (tb_*)
+#   - vpp-server prom-client series (kafka_messages_published_total,
+#     kafka_publish_duration_seconds_bucket)
+#   - up{} for scrape reachability
 
 groups:
-  - name: vpp_kafka_alerts
+  # ==========================================================================
+  # Watchdog — always firing; proves Prometheus -> Alertmanager -> receiver
+  # works end to end. Routed to the DeadMansSwitch webhook in Alertmanager.
+  # ==========================================================================
+  - name: meta_watchdog
     interval: 30s
     rules:
-      - alert: KafkaHighErrorRate
-        expr: rate(kafka_messages_published_total{status="error"}[5m]) > 10
+      - alert: Watchdog
+        expr: vector(1)
+        labels:
+          severity: info
+          component: monitoring
+        annotations:
+          summary: "Watchdog: alerting pipeline is alive"
+          description: "This alert fires continuously. If it stops arriving at the DeadMansSwitch webhook, the alerting pipeline is broken."
+
+  # ==========================================================================
+  # Availability
+  # ==========================================================================
+  - name: availability
+    interval: 30s
+    rules:
+      # Generic scrape-target liveness for jobs without a dedicated rule below.
+      - alert: TargetDown
+        expr: up{job!~"otel-collector-internal|tigerbeetle|redis|postgres"} == 0
+        for: 5m
+        labels:
+          severity: warning
+          component: platform
+        annotations:
+          summary: "Scrape target down: {{ $labels.job }}/{{ $labels.instance }}"
+          description: "Prometheus cannot scrape {{ $labels.job }} ({{ $labels.instance }}) for 5m."
+
+      - alert: RedisDown
+        expr: redis_up == 0
+        for: 2m
+        labels:
+          severity: critical
+          component: redis
+        annotations:
+          summary: "Redis is unreachable"
+          description: "redis_exporter reports redis_up=0 on {{ $labels.instance }} for 2m. Rate limiting and caching are degraded."
+
+      - alert: PostgresDown
+        expr: pg_up == 0
+        for: 5m
+        labels:
+          severity: critical
+          component: postgres
+        annotations:
+          summary: "PostgreSQL is unreachable"
+          description: "postgres-exporter reports pg_up=0 ({{ $labels.instance }}) for 5m. The platform database is down or the exporter DSN is wrong."
+
+      - alert: OtelCollectorDown
+        expr: up{job="otel-collector-internal"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          component: observability
+        annotations:
+          summary: "OTel collector is down"
+          description: "The central telemetry pipeline (traces to Jaeger, metrics re-export) has been unreachable for 2m."
+
+      - alert: TigerBeetleUnreachable
+        expr: up{job="tigerbeetle"} == 0
+        for: 5m
+        labels:
+          severity: critical
+          component: tigerbeetle
+        annotations:
+          summary: "TigerBeetle metrics pipeline down"
+          description: "The tigerbeetle-statsd sidecar is unreachable for 5m; TigerBeetle ledger observability is dark."
+
+      # The sidecar can be up while TigerBeetle itself is dead (StatsD is
+      # fire-and-forget UDP). No tb_replica_status series for 10m means the
+      # replica stopped emitting.
+      - alert: TigerBeetleNotEmitting
+        expr: absent(tb_replica_status)
+        for: 10m
+        labels:
+          severity: critical
+          component: tigerbeetle
+        annotations:
+          summary: "TigerBeetle replica not emitting metrics"
+          description: "No tb_replica_status series for 10m although the statsd sidecar is up — the TigerBeetle replica is down or --statsd is misconfigured."
+
+  # ==========================================================================
+  # SLO: HTTP services (OTel http server metrics via otel-collector:8889)
+  # ==========================================================================
+  - name: http_slo
+    interval: 30s
+    rules:
+      - alert: HttpHighErrorRate
+        expr: |
+          (
+            sum by (service_name, tenant_id) (rate(http_server_request_duration_seconds_count{http_response_status_code=~"5.."}[5m]))
+            /
+            sum by (service_name, tenant_id) (rate(http_server_request_duration_seconds_count[5m]))
+          ) > 0.05
+          and
+          sum by (service_name, tenant_id) (rate(http_server_request_duration_seconds_count[5m])) > 0.1
+        for: 10m
+        labels:
+          severity: warning
+          component: application
+        annotations:
+          summary: "High 5xx rate on {{ $labels.service_name }}"
+          description: "Service {{ $labels.service_name }} (tenant {{ $labels.tenant_id }}) returns {{ $value | humanizePercentage }} 5xx responses over 10m (SLO threshold 5%)."
+
+      - alert: HttpHighLatencyP95
+        expr: |
+          histogram_quantile(0.95,
+            sum by (service_name, tenant_id, le) (rate(http_server_request_duration_seconds_bucket[5m]))
+          ) > 1
+          and
+          sum by (service_name, tenant_id) (rate(http_server_request_duration_seconds_count[5m])) > 0.1
+        for: 10m
+        labels:
+          severity: warning
+          component: application
+        annotations:
+          summary: "p95 latency high on {{ $labels.service_name }}"
+          description: "Service {{ $labels.service_name }} p95 latency is {{ $value }}s over 10m (SLO threshold 1s)."
+
+  # ==========================================================================
+  # Temporal (server metrics from temporal:8000; worker metrics 9091-9094)
+  # ==========================================================================
+  - name: temporal
+    interval: 30s
+    rules:
+      - alert: TemporalWorkflowFailureRate
+        expr: |
+          (
+            sum by (namespace) (rate(workflow_failed[10m]))
+            /
+            (sum by (namespace) (rate(workflow_success[10m])) + sum by (namespace) (rate(workflow_failed[10m])))
+          ) > 0.05
+          and
+          (sum by (namespace) (rate(workflow_success[10m])) + sum by (namespace) (rate(workflow_failed[10m]))) > 0.01
+        for: 10m
+        labels:
+          severity: warning
+          component: temporal
+        annotations:
+          summary: "Temporal workflow failure rate high"
+          description: "Namespace {{ $labels.namespace }}: {{ $value | humanizePercentage }} of completed workflows are failing (threshold 5%)."
+
+      # Tasks are being enqueued (AddWorkflowTask/AddActivityTask RPCs) but no
+      # worker is polling (poll_success flat) — the backlog only grows.
+      - alert: TemporalBacklogNoWorkers
+        expr: |
+          sum(rate(service_requests{operation=~"AddWorkflowTask|AddActivityTask"}[5m])) > 0
+          and
+          sum(rate(poll_success[5m])) == 0
+        for: 10m
+        labels:
+          severity: critical
+          component: temporal
+        annotations:
+          summary: "Temporal tasks enqueued but no workers polling"
+          description: "Workflow/activity tasks are being added while poll_success is 0 for 10m — all TS workers (payment/dr/trading/prepaid) appear down."
+
+      - alert: TemporalServiceErrors
+        expr: sum(rate(service_errors[5m])) > 1
+        for: 10m
+        labels:
+          severity: warning
+          component: temporal
+        annotations:
+          summary: "Temporal server returning errors"
+          description: "Temporal server service_errors rate is {{ $value }}/s over 10m."
+
+      - alert: TemporalWorkerHighCPU
+        expr: rate(process_cpu_seconds_total{job="temporal-workers"}[5m]) * 100 > 80
+        for: 10m
+        labels:
+          severity: warning
+          component: temporal
+        annotations:
+          summary: "Temporal worker CPU high"
+          description: "Worker {{ $labels.worker }} ({{ $labels.instance }}) CPU usage is {{ $value }}% over 10m."
+
+  # ==========================================================================
+  # Kafka
+  # ==========================================================================
+  - name: kafka
+    interval: 30s
+    rules:
+      - alert: KafkaConsumerLagHigh
+        expr: max by (consumergroup, topic) (kafka_consumergroup_lag) > 1000
+        for: 15m
+        labels:
+          severity: warning
+          component: kafka
+        annotations:
+          summary: "Kafka consumer lag high"
+          description: "Group {{ $labels.consumergroup }} on {{ $labels.topic }} is {{ $value }} messages behind for 15m (threshold 1000)."
+
+      - alert: KafkaPublishErrors
+        expr: rate(kafka_messages_published_total{status="error"}[5m]) > 1
         for: 5m
         labels:
           severity: warning
           component: kafka
         annotations:
-          summary: "High Kafka error rate detected"
-          description: "Kafka error rate is {{ $value }} errors/minute (threshold: 10)"
+          summary: "Kafka publish errors from vpp-server"
+          description: "vpp-server is failing to publish {{ $value }} messages/s (threshold 1/s)."
 
-      - alert: KafkaLowSuccessRate
-        expr: (sum(rate(kafka_messages_published_total{status="success"}[5m])) / sum(rate(kafka_messages_published_total[5m]))) * 100 < 95
-        for: 10m
-        labels:
-          severity: warning
-          component: kafka
-        annotations:
-          summary: "Kafka success rate below threshold"
-          description: "Kafka success rate is {{ $value }}% (threshold: 95%)"
-
-      - alert: KafkaHighLatency
+      - alert: KafkaPublishLatencyHigh
         expr: histogram_quantile(0.99, rate(kafka_publish_duration_seconds_bucket[5m])) > 1
         for: 5m
         labels:
           severity: warning
           component: kafka
         annotations:
-          summary: "Kafka P99 latency high"
-          description: "Kafka P99 latency is {{ $value }}s (threshold: 1s)"
+          summary: "Kafka publish p99 latency high"
+          description: "Kafka publish p99 latency is {{ $value }}s (threshold 1s)."
 
-  - name: vpp_redis_alerts
+  # ==========================================================================
+  # Redis
+  # ==========================================================================
+  - name: redis
     interval: 30s
     rules:
-      - alert: RedisLowHitRate
-        expr: (redis_keyspace_hits_total / (redis_keyspace_hits_total + redis_keyspace_misses_total)) * 100 < 70
+      - alert: RedisHighMemoryUsage
+        expr: |
+          redis_memory_max_bytes > 0
+          and (redis_memory_used_bytes / redis_memory_max_bytes) > 0.9
         for: 10m
         labels:
           severity: warning
           component: redis
         annotations:
-          summary: "Redis cache hit rate low"
-          description: "Redis hit rate is {{ $value }}% (threshold: 70%)"
-
-      - alert: RedisHighMemoryUsage
-        expr: redis_memory_used_bytes > 1073741824
-        for: 5m
-        labels:
-          severity: warning
-          component: redis
-        annotations:
-          summary: "Redis memory usage high"
-          description: "Redis memory usage is {{ $value | humanize }}B (threshold: 1GB)"
-
-      - alert: RedisHighLatency
-        expr: histogram_quantile(0.99, rate(redis_command_duration_seconds_bucket[5m])) > 0.01
-        for: 5m
-        labels:
-          severity: warning
-          component: redis
-        annotations:
-          summary: "Redis P99 latency high"
-          description: "Redis P99 latency is {{ $value }}s (threshold: 10ms)"
+          summary: "Redis memory usage above 90% of maxmemory"
+          description: "Redis on {{ $labels.instance }} is using {{ $value | humanizePercentage }} of maxmemory for 10m."
 
       - alert: RedisHighEvictionRate
         expr: rate(redis_evicted_keys_total[5m]) > 100
@@ -75,63 +257,89 @@ groups:
           severity: warning
           component: redis
         annotations:
-          summary: "Redis high eviction rate"
-          description: "Redis eviction rate is {{ $value }} keys/sec (threshold: 100)"
+          summary: "Redis evicting keys"
+          description: "Redis eviction rate is {{ $value }} keys/s on {{ $labels.instance }} (threshold 100) — cache is undersized."
 
-  - name: vpp_temporal_alerts
+  # ==========================================================================
+  # PostgreSQL
+  # ==========================================================================
+  - name: postgres
     interval: 30s
     rules:
-      - alert: TemporalLowSuccessRate
-        expr: (sum(rate(temporal_workflow_execution_total{status="completed"}[5m])) / sum(rate(temporal_workflow_execution_total[5m]))) * 100 < 95
+      - alert: PostgresTooManyConnections
+        expr: sum(pg_stat_activity_count) > 80
         for: 10m
         labels:
           severity: warning
-          component: temporal
+          component: postgres
         annotations:
-          summary: "Temporal workflow success rate low"
-          description: "Workflow success rate is {{ $value }}% (threshold: 95%)"
+          summary: "PostgreSQL connection count high"
+          description: "{{ $value }} active connections against a default max_connections=100 for 10m."
 
-      - alert: TemporalNoActiveWorkers
-        expr: temporal_worker_active_count < 1
-        for: 1m
-        labels:
-          severity: critical
-          component: temporal
-        annotations:
-          summary: "No active Temporal workers"
-          description: "Temporal worker count is {{ $value }} (expected: >= 1)"
-
-      - alert: TemporalHighBacklog
-        expr: temporal_task_queue_backlog{queue="payment-processing"} > 100
+  # ==========================================================================
+  # TigerBeetle (StatsD -> statsd-exporter; tb_* series)
+  # ==========================================================================
+  - name: tigerbeetle
+    interval: 30s
+    rules:
+      # replica_status: 0=normal, 1=view_change, 2=recovering, 3=recovering_head
+      - alert: TigerBeetleReplicaNotNormal
+        expr: tb_replica_status != 0
         for: 5m
         labels:
           severity: warning
-          component: temporal
+          component: tigerbeetle
         annotations:
-          summary: "Temporal task queue backlog high"
-          description: "Task queue backlog is {{ $value }} tasks (threshold: 100)"
+          summary: "TigerBeetle replica not in normal status"
+          description: "tb_replica_status is {{ $value }} (cluster {{ $labels.cluster }}, replica {{ $labels.replica }}) for 5m — view change or recovery in progress."
 
-      - alert: TemporalHighDuration
-        expr: histogram_quantile(0.99, rate(temporal_workflow_duration_seconds_bucket[5m])) > 30
+  # ==========================================================================
+  # Collector pipeline health (otelcol_* self-telemetry from :8888)
+  # ==========================================================================
+  - name: collector_pipeline
+    interval: 30s
+    rules:
+      - alert: CollectorRefusedSpans
+        expr: sum(rate(otelcol_receiver_refused_spans[5m])) > 0
+        for: 5m
+        labels:
+          severity: warning
+          component: observability
+        annotations:
+          summary: "Collector refusing spans (memory pressure / queue full)"
+          description: "otelcol_receiver_refused_spans is {{ $value }}/s for 5m — spans are being dropped at ingestion."
+
+      - alert: CollectorTraceExportFailures
+        expr: sum(rate(otelcol_exporter_send_failed_spans[5m])) > 0
+        for: 5m
+        labels:
+          severity: critical
+          component: observability
+        annotations:
+          summary: "Collector failing to export spans to Jaeger"
+          description: "otelcol_exporter_send_failed_spans is {{ $value }}/s for 5m — traces are lost between collector and Jaeger."
+
+      - alert: CollectorTraceDropRatio
+        expr: |
+          (
+            sum(rate(otelcol_receiver_refused_spans[10m])) + sum(rate(otelcol_exporter_send_failed_spans[10m]))
+            /
+            sum(rate(otelcol_receiver_accepted_spans[10m]))
+          ) > 0.01
+          and
+          sum(rate(otelcol_receiver_accepted_spans[10m])) > 0
         for: 10m
         labels:
           severity: warning
-          component: temporal
+          component: observability
         annotations:
-          summary: "Temporal workflow duration high"
-          description: "Workflow P99 duration is {{ $value }}s (threshold: 30s)"
+          summary: "Trace pipeline drop ratio above 1%"
+          description: "{{ $value | humanizePercentage }} of accepted spans are being dropped (refused + export-failed) over 10m."
 
-      - alert: TemporalWorkerHighCPU
-        expr: rate(process_cpu_seconds_total{job="temporal-worker"}[5m]) * 100 > 80
-        for: 10m
-        labels:
-          severity: warning
-          component: temporal
-        annotations:
-          summary: "Temporal worker CPU usage high"
-          description: "Worker CPU usage is {{ $value }}% (threshold: 80%)"
-
-  - name: vpp_system_alerts
+  # ==========================================================================
+  # Host (node-exporter)
+  # ==========================================================================
+  - name: system
     interval: 30s
     rules:
       - alert: HighCPUUsage
@@ -141,8 +349,8 @@ groups:
           severity: warning
           component: system
         annotations:
-          summary: "High CPU usage detected"
-          description: "CPU usage is {{ $value }}% on {{ $labels.instance }}"
+          summary: "High CPU usage"
+          description: "CPU usage is {{ $value }}% on {{ $labels.instance }} for 10m."
 
       - alert: HighMemoryUsage
         expr: (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100 > 85
@@ -151,38 +359,15 @@ groups:
           severity: warning
           component: system
         annotations:
-          summary: "High memory usage detected"
-          description: "Memory usage is {{ $value }}% on {{ $labels.instance }}"
+          summary: "High memory usage"
+          description: "Memory usage is {{ $value }}% on {{ $labels.instance }} for 10m."
 
       - alert: DiskSpaceLow
-        expr: (1 - (node_filesystem_avail_bytes{fstype!~"tmpfs|fuse.lxcfs"} / node_filesystem_size_bytes)) * 100 > 85
+        expr: (1 - (node_filesystem_avail_bytes{fstype!~"tmpfs|fuse.lxcfs"} / node_filesystem_size_bytes{fstype!~"tmpfs|fuse.lxcfs"})) * 100 > 85
         for: 10m
         labels:
           severity: warning
           component: system
         annotations:
           summary: "Disk space low"
-          description: "Disk usage is {{ $value }}% on {{ $labels.instance }}:{{ $labels.mountpoint }}"
-
-  - name: vpp_application_alerts
-    interval: 30s
-    rules:
-      - alert: HighErrorRate
-        expr: rate(http_requests_total{status=~"5.."}[5m]) > 10
-        for: 5m
-        labels:
-          severity: warning
-          component: application
-        annotations:
-          summary: "High application error rate"
-          description: "Error rate is {{ $value }} errors/sec (threshold: 10)"
-
-      - alert: SlowResponseTime
-        expr: histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[5m])) > 1
-        for: 5m
-        labels:
-          severity: warning
-          component: application
-        annotations:
-          summary: "Slow application response time"
-          description: "P95 response time is {{ $value }}s (threshold: 1s)"
+          description: "Disk usage is {{ $value }}% on {{ $labels.instance }}:{{ $labels.mountpoint }}."

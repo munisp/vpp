@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"net/http"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -89,8 +90,20 @@ func init() {
 	)
 }
 
-// StartMetricsServer starts the Prometheus metrics HTTP server
-func StartMetricsServer(addr string) error {
-	http.Handle("/metrics", promhttp.Handler())
-	return http.ListenAndServe(addr, nil)
+// StartMetricsServer serves the bridge's observability endpoints on their own
+// mux: GET /metrics (Prometheus scrape target) and, when healthz is non-nil,
+// GET /healthz (telemetry and MQTT connection status). It blocks until the
+// server fails; run it in a goroutine.
+func StartMetricsServer(addr string, healthz http.HandlerFunc) error {
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", promhttp.Handler())
+	if healthz != nil {
+		mux.HandleFunc("/healthz", healthz)
+	}
+	server := &http.Server{
+		Addr:              addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	return server.ListenAndServe()
 }

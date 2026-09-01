@@ -26,18 +26,59 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"strings"
 	"sync"
-	"net/url"
 	"time"
 
 	"github.com/confluentinc/confluent-kafka-go/v2/kafka"
 	dapr "github.com/dapr/go-sdk/client"
 	"github.com/go-redis/redis/v8"
 	_ "github.com/lib/pq"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/vpp-platform/orchestrator/config"
 )
+
+// tracer is safe to resolve at package scope: the global provider delegates,
+// so spans stay no-op until telemetry.Setup binds the SDK at boot.
+var tracer = otel.Tracer("github.com/vpp-platform/orchestrator/services")
+
+// headerCarrier adapts confluent-kafka-go record headers to
+// propagation.TextMapCarrier.
+type headerCarrier struct {
+	headers *[]kafka.Header
+}
+
+func (c headerCarrier) Get(key string) string {
+	for _, h := range *c.headers {
+		if strings.EqualFold(h.Key, key) {
+			return string(h.Value)
+		}
+	}
+	return ""
+}
+
+func (c headerCarrier) Set(key, value string) {
+	for i, h := range *c.headers {
+		if strings.EqualFold(h.Key, key) {
+			(*c.headers)[i].Value = []byte(value)
+			return
+		}
+	}
+	*c.headers = append(*c.headers, kafka.Header{Key: key, Value: []byte(value)})
+}
+
+func (c headerCarrier) Keys() []string {
+	keys := make([]string, 0, len(*c.headers))
+	for _, h := range *c.headers {
+		keys = append(keys, h.Key)
+	}
+	return keys
+}
 
 // Services holds all middleware service clients.
 type Services struct {
@@ -108,15 +149,41 @@ type KafkaService struct {
 }
 
 // PublishEvent JSON-encodes event and produces it to topic.
+//
+// Tracing: one producer span per record, with the W3C trace context injected
+// into the record headers so consumers continue the trace. This is manual
+// because the contrib otelkafka instrumentation targets confluent-kafka-go v1
+// only — there is no v2-compatible contrib module, and pulling in v1 solely
+// for instrumentation would fork the client. With the SDK disabled the span
+// is a no-op and the record ships without extra headers.
 func (k *KafkaService) PublishEvent(ctx context.Context, topic string, event interface{}) error {
+	ctx, span := tracer.Start(ctx, "kafka.produce "+topic,
+		trace.WithSpanKind(trace.SpanKindProducer),
+		trace.WithAttributes(
+			attribute.String("messaging.system", "kafka"),
+			attribute.String("messaging.destination.name", topic),
+		),
+	)
+	defer span.End()
+
 	payload, err := json.Marshal(event)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return fmt.Errorf("failed to encode event for topic %q: %w", topic, err)
 	}
-	if err := k.producer.Produce(&kafka.Message{
+
+	msg := &kafka.Message{
 		TopicPartition: kafka.TopicPartition{Topic: &topic, Partition: kafka.PartitionAny},
 		Value:          payload,
-	}, nil); err != nil {
+	}
+	if trace.SpanContextFromContext(ctx).IsValid() {
+		otel.GetTextMapPropagator().Inject(ctx, headerCarrier{headers: &msg.Headers})
+	}
+
+	if err := k.producer.Produce(msg, nil); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return fmt.Errorf("failed to produce event to topic %q: %w", topic, err)
 	}
 	return nil

@@ -5,10 +5,58 @@
  */
 
 import mqtt from 'mqtt';
+import {
+  context as otelContext,
+  propagation,
+  SpanKind,
+  SpanStatusCode,
+  trace,
+} from '@opentelemetry/api';
 import { getDb } from '../db';
 import { telemetry, alerts, assets } from '../../drizzle/schema';
 import { eq } from 'drizzle-orm';
 import { observing, recordObservation } from '../services/degraded-operation';
+
+const mqttTracer = trace.getTracer('vpp-mqtt');
+
+/**
+ * Wrap one broker publish in a PRODUCER span named for its topic and stamp
+ * the W3C trace context into MQTT v5 user properties. mqtt.js drops
+ * `properties` silently on 3.1.1 sessions, so this is safe against older
+ * brokers — context simply does not propagate there.
+ */
+function publishTraced(
+  client: mqtt.MqttClient,
+  topic: string,
+  body: string,
+  onError: (err: Error) => void,
+  onOk: () => void
+): void {
+  const span = mqttTracer.startSpan(`mqtt.publish ${topic}`, {
+    kind: SpanKind.PRODUCER,
+    attributes: {
+      'messaging.system': 'mqtt',
+      'messaging.destination.name': topic,
+      'messaging.operation': 'publish',
+    },
+  });
+  const userProperties: Record<string, string> = {};
+  otelContext.with(trace.setSpan(otelContext.active(), span), () =>
+    propagation.inject(otelContext.active(), userProperties)
+  );
+
+  client.publish(topic, body, { qos: 1, properties: { userProperties } }, err => {
+    if (err) {
+      span.recordException(err);
+      span.setStatus({ code: SpanStatusCode.ERROR, message: err.message });
+      span.end();
+      onError(err);
+    } else {
+      span.end();
+      onOk();
+    }
+  });
+}
 
 export interface DeviceReading {
   deviceId: string;
@@ -358,15 +406,19 @@ class MQTTBrokerService {
     });
 
     return new Promise((resolve, reject) => {
-      this.client!.publish(topic, payload, { qos: 1 }, (err) => {
-        if (err) {
+      publishTraced(
+        this.client!,
+        topic,
+        payload,
+        err => {
           console.error(`[MQTT] Failed to publish command to ${deviceId}:`, err);
           reject(err);
-        } else {
+        },
+        () => {
           console.log(`[MQTT] Published command to ${deviceId}: ${command}`);
           resolve();
         }
-      });
+      );
     });
   }
 
@@ -397,15 +449,19 @@ class MQTTBrokerService {
     const body = JSON.stringify({ ...payload, published_at: new Date().toISOString() });
 
     return new Promise((resolve, reject) => {
-      this.client!.publish(topic, body, { qos: 1 }, err => {
-        if (err) {
+      publishTraced(
+        this.client!,
+        topic,
+        body,
+        err => {
           console.error(`[MQTT] Failed to publish price signal to ${siteRef}:`, err);
           reject(err);
-        } else {
+        },
+        () => {
           console.log(`[MQTT] Published price signal to ${siteRef}`);
           resolve();
         }
-      });
+      );
     });
   }
 

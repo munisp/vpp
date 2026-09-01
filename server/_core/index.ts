@@ -1,3 +1,7 @@
+// OpenTelemetry must initialize before any other module loads so the
+// auto-instrumentation hooks (http, express, pg, ioredis, kafkajs) can patch
+// them. Keep this side-effect import on the first line.
+import "./telemetry";
 import "dotenv/config";
 import express from "express";
 import rateLimit from "express-rate-limit";
@@ -41,6 +45,7 @@ import {
   PAYMENT_LIMIT_RPM_ENV,
 } from "../security/rate-limit";
 import { jsonBodyParser, urlencodedBodyParser } from "../security/request-parsers";
+import { createMetricsHandler, telemetryReadyPayload, withTelemetryShutdown } from "./telemetry";
 
 function isPortAvailable(port: number): Promise<boolean> {
   return new Promise(resolve => {
@@ -173,18 +178,30 @@ async function startServer() {
   });
 
   app.get("/ready", async (req, res) => {
+    const telemetry = telemetryReadyPayload();
     try {
       // Check database connectivity
       const { getDb } = await import("../db");
       const db = await getDb();
       if (!db) {
-        return res.status(503).json({ status: "not_ready", reason: "database_unavailable" });
+        return res.status(503).json({ status: "not_ready", reason: "database_unavailable", telemetry });
       }
-      res.status(200).json({ status: "ready", timestamp: new Date().toISOString() });
+      // Telemetry never blocks readiness, but it is always reported: disabled
+      // says why, and enabled-but-failing (e.g. collector unreachable in
+      // production) reports degraded instead of pretending all is well.
+      res.status(200).json({
+        status: telemetry.degraded ? "degraded" : "ready",
+        timestamp: new Date().toISOString(),
+        telemetry,
+      });
     } catch (error) {
-      res.status(503).json({ status: "not_ready", reason: "database_error" });
+      res.status(503).json({ status: "not_ready", reason: "database_error", telemetry });
     }
   });
+
+  // Prometheus scrape target (INFRA owns the scraper). Serves the OTel
+  // Prometheus exporter merged with the legacy prom-client registry.
+  app.get("/metrics", createMetricsHandler());
 
   // Payment gateway webhooks. Order matters: signature verification runs
   // first, then the strict rate limiter, then the callback handler.
@@ -396,6 +413,12 @@ function setupGracefulShutdown(server: ReturnType<typeof createServer>) {
         }
       } catch (error) {
         console.warn("[Shutdown] Error draining database pool:", error);
+      }
+
+      try {
+        await withTelemetryShutdown();
+      } catch (error) {
+        console.warn("[Shutdown] Error shutting down telemetry:", error);
       }
 
       server.close(() => {

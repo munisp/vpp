@@ -50,3 +50,11 @@ bridge:
   buffer_size: 1000
   enable_validation: true
   log_level: "info"
+  # Prometheus metrics + /healthz listen address (METRICS_ADDR overrides).
+  # The monitoring stack scrapes mqtt-fluvio-bridge:8080/metrics.
+  metrics_addr: ":8080"
+
+# OpenTelemetry traces (environment variables, not YAML):
+#   OTEL_EXPORTER_OTLP_ENDPOINT  e.g. http://localhost:4317 (unset = disabled, logged at boot)
+#   OTEL_SERVICE_NAME / OTEL_SERVICE_VERSION / OTEL_ENVIRONMENT / OTEL_TENANT_ID
+#   OTEL_SDK_DISABLED=true       escape hatch: force no-op telemetry

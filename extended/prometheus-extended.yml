@@ -1,0 +1,97 @@
+# =============================================================================
+# Prometheus scrape-config FRAGMENT for the extended components stack.
+#
+# MERGE INSTRUCTIONS (INFRA coder / operator):
+#   Append the entries below to `scrape_configs:` in prometheus/prometheus.yml
+#   (this file is intentionally NOT merged by the extended-components coder,
+#   who does not own prometheus/prometheus.yml), then reload:
+#     curl -X POST http://localhost:9090/-/reload
+#
+# Targets use Docker DNS names on the monitoring network
+# (default: vpp_monitoring, created by docker-compose.monitoring.yml).
+# All extended services that expose metrics are attached to that network by
+# docker-compose.extended.yml under these exact service names.
+# =============================================================================
+scrape_configs:
+  # ---- Mojaloop core (all services expose /metrics via central-services-metrics)
+  - job_name: 'mojaloop-central-ledger'
+    static_configs:
+      - targets: ['central-ledger:3001', 'central-ledger-handlers:3001']
+    metrics_path: '/metrics'
+    scrape_interval: 15s
+
+  - job_name: 'mojaloop-ml-api-adapter'
+    static_configs:
+      - targets: ['ml-api-adapter:3000', 'ml-api-adapter-handler:3000']
+    metrics_path: '/metrics'
+    scrape_interval: 15s
+
+  - job_name: 'mojaloop-account-lookup'
+    static_configs:
+      # 4001 admin, 4002 API (both serve /metrics), 4003 handlers monitoring port
+      - targets: ['account-lookup-service:4001', 'account-lookup-service:4002', 'account-lookup-service-handlers:4003']
+    metrics_path: '/metrics'
+    scrape_interval: 15s
+
+  - job_name: 'mojaloop-quoting'
+    static_configs:
+      # 3002 API, 3003 handlers monitoring port
+      - targets: ['quoting-service:3002', 'quoting-service-handlers:3003']
+    metrics_path: '/metrics'
+    scrape_interval: 15s
+
+  - job_name: 'mojaloop-transaction-requests'
+    static_configs:
+      - targets: ['transaction-requests-service:4003']
+    metrics_path: '/metrics'
+    scrape_interval: 15s
+
+  # ---- OpenSearch (official prometheus-exporter plugin, /_prometheus/metrics)
+  # Security plugin is enabled -> scrape over HTTPS with basic auth.
+  # NOTE: replace the password with OPENSEARCH_INITIAL_ADMIN_PASSWORD, or
+  # preferably create a dedicated read-only user and put credentials in a
+  # basic_auth password_file instead of inline.
+  - job_name: 'opensearch'
+    scheme: https
+    tls_config:
+      insecure_skip_verify: true
+    basic_auth:
+      username: admin
+      password: CHANGE_ME_OPENSEARCH_INITIAL_ADMIN_PASSWORD
+    metrics_path: '/_prometheus/metrics'
+    static_configs:
+      - targets: ['opensearch:9200']
+    scrape_interval: 30s
+
+  # ---- Apache Spark (PrometheusServlet on the Master/Worker web UIs)
+  - job_name: 'spark-master'
+    metrics_path: '/metrics/prometheus/'
+    static_configs:
+      - targets: ['spark-master:8080']
+    scrape_interval: 15s
+
+  - job_name: 'spark-worker'
+    metrics_path: '/metrics/prometheus/'
+    static_configs:
+      - targets: ['spark-worker:8081']
+    scrape_interval: 15s
+
+  # ---- Novu (no native /metrics on api/worker/ws -> infra exporters)
+  - job_name: 'novu-redis'
+    static_configs:
+      - targets: ['novu-redis-exporter:9121']
+    scrape_interval: 15s
+
+  - job_name: 'novu-mongodb'
+    static_configs:
+      - targets: ['novu-mongodb-exporter:9216']
+    scrape_interval: 30s
+
+  # ---- NOT SCRAPED (nothing honest to scrape):
+  #   * geolibre        - client-side browser GIS app (nginx static hosting),
+  #                       no server-side metrics endpoint exists.
+  #   * appsec-agent / appsec-nginx - open-appsec exposes no Prometheus
+  #                       endpoint; security events go to agent logs
+  #                       (/var/log/nano_agent) or the SaaS WebUI. Scrape
+  #                       nginx stub_status here later if enabled.
+  #   * novu-api/worker/ws/dashboard - no Prometheus exporter in Novu v3.

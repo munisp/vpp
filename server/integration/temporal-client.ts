@@ -1,5 +1,29 @@
 import { getTemporalClient, TASK_QUEUES } from './temporal-config';
-import { ScheduleOverlapPolicy, WorkflowHandle } from '@temporalio/client';
+import { Client, ScheduleOverlapPolicy, WorkflowHandle } from '@temporalio/client';
+import { OpenTelemetryWorkflowClientInterceptor } from '@temporalio/interceptors-opentelemetry/lib/client';
+
+let instrumentedClient: Client | null = null;
+
+/**
+ * Temporal client carrying the OpenTelemetry interceptor. Every workflow
+ * start/signal is wrapped in a client span and the active W3C trace context
+ * is injected into the workflow headers (`_tracer-data` payload), where the
+ * worker-side interceptors (server/_core/telemetry.ts temporalWorkerTelemetry)
+ * extract it — so a trace that begins at an HTTP request continues through
+ * the workflow and its activities. Shares the singleton connection from
+ * temporal-config; when telemetry is disabled the global tracer is a no-op
+ * and the interceptor is inert.
+ */
+async function getInstrumentedTemporalClient(): Promise<Client> {
+  if (instrumentedClient) return instrumentedClient;
+  const base = await getTemporalClient();
+  instrumentedClient = new Client({
+    connection: base.connection,
+    namespace: base.options.namespace,
+    interceptors: { workflow: [new OpenTelemetryWorkflowClientInterceptor()] },
+  });
+  return instrumentedClient;
+}
 
 export interface PaymentWorkflowInput {
   paymentId: string;
@@ -34,7 +58,7 @@ export interface TradingWorkflowInput {
 export class TemporalWorkflowClient {
   // Payment workflows
   async startPaymentWorkflow(input: PaymentWorkflowInput): Promise<WorkflowHandle> {
-    const client = await getTemporalClient();
+    const client = await getInstrumentedTemporalClient();
     
     const handle = await client.workflow.start('processPayment', {
       taskQueue: TASK_QUEUES.PAYMENT_PROCESSING,
@@ -52,7 +76,7 @@ export class TemporalWorkflowClient {
   }
 
   async getPaymentWorkflowStatus(paymentId: string): Promise<any> {
-    const client = await getTemporalClient();
+    const client = await getInstrumentedTemporalClient();
     const handle = client.workflow.getHandle(`payment-${paymentId}`);
     
     try {
@@ -70,7 +94,7 @@ export class TemporalWorkflowClient {
   }
 
   async cancelPaymentWorkflow(paymentId: string): Promise<void> {
-    const client = await getTemporalClient();
+    const client = await getInstrumentedTemporalClient();
     const handle = client.workflow.getHandle(`payment-${paymentId}`);
     
     try {
@@ -98,7 +122,7 @@ export class TemporalWorkflowClient {
     userId: number;
     billingId: number;
   }): Promise<WorkflowHandle> {
-    const client = await getTemporalClient();
+    const client = await getInstrumentedTemporalClient();
 
     const handle = await client.workflow.start('refundWorkflow', {
       taskQueue: TASK_QUEUES.PAYMENT_PROCESSING,
@@ -117,7 +141,7 @@ export class TemporalWorkflowClient {
 
   // DR event workflows
   async startDREventWorkflow(input: DREventWorkflowInput): Promise<WorkflowHandle> {
-    const client = await getTemporalClient();
+    const client = await getInstrumentedTemporalClient();
     
     const handle = await client.workflow.start('orchestrateDREvent', {
       taskQueue: TASK_QUEUES.DR_ORCHESTRATION,
@@ -134,7 +158,7 @@ export class TemporalWorkflowClient {
   }
 
   async getDREventWorkflowStatus(eventId: string): Promise<any> {
-    const client = await getTemporalClient();
+    const client = await getInstrumentedTemporalClient();
     const handle = client.workflow.getHandle(`dr-event-${eventId}`);
     
     try {
@@ -152,7 +176,7 @@ export class TemporalWorkflowClient {
   }
 
   async signalDREventWorkflow(eventId: string, signal: string, args?: any[]): Promise<void> {
-    const client = await getTemporalClient();
+    const client = await getInstrumentedTemporalClient();
     const handle = client.workflow.getHandle(`dr-event-${eventId}`);
     
     try {
@@ -166,7 +190,7 @@ export class TemporalWorkflowClient {
 
   // Trading workflows
   async startTradingWorkflow(input: TradingWorkflowInput): Promise<WorkflowHandle> {
-    const client = await getTemporalClient();
+    const client = await getInstrumentedTemporalClient();
     
     const handle = await client.workflow.start('executeTrade', {
       taskQueue: TASK_QUEUES.TRADING_EXECUTION,
@@ -184,7 +208,7 @@ export class TemporalWorkflowClient {
   }
 
   async getTradingWorkflowStatus(tradeId: number): Promise<any> {
-    const client = await getTemporalClient();
+    const client = await getInstrumentedTemporalClient();
     const handle = client.workflow.getHandle(`trade-${tradeId}`);
     
     try {
@@ -210,7 +234,7 @@ export class TemporalWorkflowClient {
    * temporalQueryService.cancelWorkflow(`dr-event-${eventId}`).
    */
   async startCancelDREventWorkflow(eventId: number, reason: string): Promise<WorkflowHandle> {
-    const client = await getTemporalClient();
+    const client = await getInstrumentedTemporalClient();
 
     const handle = await client.workflow.start('cancelDREventWorkflow', {
       taskQueue: TASK_QUEUES.DR_ORCHESTRATION,
@@ -235,7 +259,7 @@ export class TemporalWorkflowClient {
   // Health check
   async isHealthy(): Promise<boolean> {
     try {
-      const client = await getTemporalClient();
+      const client = await getInstrumentedTemporalClient();
       // Simple connection check
       return client !== null && client.connection !== null;
     } catch (error) {

@@ -1,0 +1,89 @@
+{
+  "uid": "vpp-service-latency",
+  "title": "Per-Service Latency & Errors",
+  "description": "Pick one or more services (OTEL_SERVICE_NAME). Latency percentiles and error breakdown from OTel HTTP server metrics via the collector.",
+  "tags": ["vpp", "otel", "latency", "errors"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": {"from": "now-1h", "to": "now"},
+  "templating": {
+    "list": [
+      {
+        "name": "service",
+        "label": "Service",
+        "type": "query",
+        "datasource": {"type": "prometheus", "uid": "prometheus"},
+        "query": "label_values(http_server_request_duration_seconds_count, service_name)",
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true,
+        "sort": 1
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Latency percentiles (s) — $service",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"x": 0, "y": 0, "w": 12, "h": 9},
+      "targets": [
+        {"refId": "A", "expr": "histogram_quantile(0.50, sum by (le) (rate(http_server_request_duration_seconds_bucket{service_name=~\"$service\"}[5m])))", "legendFormat": "p50"},
+        {"refId": "B", "expr": "histogram_quantile(0.95, sum by (le) (rate(http_server_request_duration_seconds_bucket{service_name=~\"$service\"}[5m])))", "legendFormat": "p95"},
+        {"refId": "C", "expr": "histogram_quantile(0.99, sum by (le) (rate(http_server_request_duration_seconds_bucket{service_name=~\"$service\"}[5m])))", "legendFormat": "p99"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []}
+    },
+    {
+      "id": 2,
+      "title": "Request vs 5xx rate (req/s) — $service",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"x": 12, "y": 0, "w": 12, "h": 9},
+      "targets": [
+        {"refId": "A", "expr": "sum(rate(http_server_request_duration_seconds_count{service_name=~\"$service\"}[5m]))", "legendFormat": "requests"},
+        {"refId": "B", "expr": "sum(rate(http_server_request_duration_seconds_count{service_name=~\"$service\", http_response_status_code=~\"5..\"}[5m]))", "legendFormat": "5xx"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "reqps"}, "overrides": []}
+    },
+    {
+      "id": 3,
+      "title": "Slowest routes p95 (s) — $service",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"x": 0, "y": 9, "w": 12, "h": 9},
+      "targets": [
+        {"refId": "A", "expr": "topk(10, histogram_quantile(0.95, sum by (http_route, le) (rate(http_server_request_duration_seconds_bucket{service_name=~\"$service\"}[5m]))))", "legendFormat": "{{http_route}}"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []}
+    },
+    {
+      "id": 4,
+      "title": "5xx rate by route (errors/s) — $service",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"x": 12, "y": 9, "w": 12, "h": 9},
+      "targets": [
+        {"refId": "A", "expr": "sum by (http_route) (rate(http_server_request_duration_seconds_count{service_name=~\"$service\", http_response_status_code=~\"5..\"}[5m]))", "legendFormat": "{{http_route}}"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "reqps"}, "overrides": []}
+    },
+    {
+      "id": 5,
+      "title": "Status class breakdown (req/s) — $service",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"x": 0, "y": 18, "w": 24, "h": 8},
+      "targets": [
+        {"refId": "A", "expr": "sum(rate(http_server_request_duration_seconds_count{service_name=~\"$service\", http_response_status_code=~\"2..\"}[5m]))", "legendFormat": "2xx"},
+        {"refId": "B", "expr": "sum(rate(http_server_request_duration_seconds_count{service_name=~\"$service\", http_response_status_code=~\"3..\"}[5m]))", "legendFormat": "3xx"},
+        {"refId": "C", "expr": "sum(rate(http_server_request_duration_seconds_count{service_name=~\"$service\", http_response_status_code=~\"4..\"}[5m]))", "legendFormat": "4xx"},
+        {"refId": "D", "expr": "sum(rate(http_server_request_duration_seconds_count{service_name=~\"$service\", http_response_status_code=~\"5..\"}[5m]))", "legendFormat": "5xx"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "reqps"}, "overrides": []}
+    }
+  ]
+}

@@ -32,7 +32,8 @@ instead of falling back to the rule engine.
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `GET` | `/health` | Liveness and the list of discovered solvers |
+| `GET` | `/health` | Liveness, the list of discovered solvers, and the telemetry status |
+| `GET` | `/metrics` | Prometheus scrape endpoint |
 | `POST` | `/optimize/dispatch` | Deterministic MILP over the horizon |
 | `POST` | `/optimize/stochastic` | Two-stage stochastic program, optional CVaR |
 | `POST` | `/optimize/mpc` | Rolling horizon, applying only the first interval per step |
@@ -40,6 +41,26 @@ instead of falling back to the rule engine.
 
 Authentication is the `x-optimizer-token` header, compared against
 `OPTIMIZER_AUTH_TOKEN`.
+
+## Telemetry
+
+Traces and metrics are OpenTelemetry, governed by the shared env contract:
+
+| Variable | Effect |
+| --- | --- |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP gRPC endpoint (e.g. `http://otel-collector:4317`). **Unset = telemetry disabled**: the service logs `telemetry disabled: <reason>` at startup and runs fine without it. |
+| `OTEL_SDK_DISABLED` | `true` disables the SDK entirely (escape hatch). |
+| `OTEL_SERVICE_NAME` / `OTEL_SERVICE_VERSION` / `OTEL_ENVIRONMENT` | Resource attributes; service name defaults to `optimizer`. |
+| `OTEL_TENANT_ID` | `tenant.id` resource attribute (default `default`), exported as the `tenant_id` label by the collector. |
+| `OTEL_SEMCONV_STABILITY_OPT_IN` | Defaults to `http` (set by the service if unset) so the FastAPI instrumentor emits the stable `http.server.request.duration` metric (seconds), which the collector's Prometheus exporter serves as `http_server_request_duration_seconds_*`. |
+
+The FastAPI instrumentor extracts W3C `traceparent`/`tracestate` from incoming
+requests, so traces started by the TypeScript caller continue here. Each solve
+endpoint wraps its work in a `pulp.solve` child span (solver, variable and
+constraint counts, status, objective). Collector unavailability never crashes
+the service: export failures are logged and dropped. `/health` reports
+`telemetry: {enabled, reason?}`; `/metrics` serves Prometheus text
+(`optimizer_http_requests_total`, `optimizer_solve_duration_seconds`).
 
 ## Units
 

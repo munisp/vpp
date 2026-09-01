@@ -14,7 +14,54 @@ import (
 	"github.com/segmentio/kafka-go/sasl/scram"
 	"github.com/sirupsen/logrus"
 	"github.com/vpp/mqtt-fluvio-bridge/config"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/trace"
 )
+
+// headerCarrier adapts Kafka record headers to propagation.TextMapCarrier.
+type headerCarrier struct {
+	headers *[]kafka.Header
+}
+
+func (c headerCarrier) Get(key string) string {
+	for _, h := range *c.headers {
+		if strings.EqualFold(h.Key, key) {
+			return string(h.Value)
+		}
+	}
+	return ""
+}
+
+func (c headerCarrier) Set(key, value string) {
+	for i, h := range *c.headers {
+		if strings.EqualFold(h.Key, key) {
+			(*c.headers)[i].Value = []byte(value)
+			return
+		}
+	}
+	*c.headers = append(*c.headers, kafka.Header{Key: key, Value: []byte(value)})
+}
+
+func (c headerCarrier) Keys() []string {
+	keys := make([]string, 0, len(*c.headers))
+	for _, h := range *c.headers {
+		keys = append(keys, h.Key)
+	}
+	return keys
+}
+
+// traceHeaders carries the W3C trace context of ctx into Kafka record headers,
+// so consumers (the platform's event consumer, lakehouse loaders) continue the
+// trace that started at the MQTT message. Without a recording span there is
+// nothing to propagate and the record ships with no extra headers.
+func traceHeaders(ctx context.Context) []kafka.Header {
+	if !trace.SpanContextFromContext(ctx).IsValid() {
+		return nil
+	}
+	var headers []kafka.Header
+	otel.GetTextMapPropagator().Inject(ctx, headerCarrier{headers: &headers})
+	return headers
+}
 
 // KafkaProducer publishes telemetry to the platform's Kafka topics.
 type KafkaProducer struct {
@@ -96,13 +143,15 @@ func (p *KafkaProducer) SendBatch(ctx context.Context, topic string, records []R
 		return nil
 	}
 
+	headers := traceHeaders(ctx)
 	messages := make([]kafka.Message, 0, len(records))
 	for _, record := range records {
 		messages = append(messages, kafka.Message{
-			Topic: topic,
-			Key:   []byte(record.Key),
-			Value: record.Value,
-			Time:  time.Now().UTC(),
+			Topic:   topic,
+			Key:     []byte(record.Key),
+			Value:   record.Value,
+			Headers: headers,
+			Time:    time.Now().UTC(),
 		})
 	}
 
